@@ -1132,9 +1132,14 @@ class SkillLoopExecuteMixin:
                             manuscript_review_status,
                         )
 
+                        # The Reviewer bound the manuscript it read in the
+                        # execution workdir; compare against that same tree.
+                        # ``_artifact_root`` is the session state root, which
+                        # holds no manuscript and would grade every current
+                        # review as stale.
                         review_freshness = manuscript_review_status(
                             {"manuscript_snapshot": binding},
-                            Path(getattr(self, "_artifact_root", ex_state.workdir)),
+                            Path(ex_state.workdir),
                         )
                     except Exception:  # noqa: BLE001 - certification fails closed
                         review_freshness = {

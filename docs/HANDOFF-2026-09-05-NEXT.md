@@ -257,3 +257,14 @@ Planner 上下文，builtin 角色 skill，research skill）里的流程词改�
 协议 token（`scope:bounded`、`final_submission`、TASK_SCOPE 默认值）、文件名、
 函数名和代码注释不动。受影响的 9 个测试断言同步更新；宽泛选择集
 （prompt/handoff/bounded/reviewer/planner/engineer/manager/skill/stage）全部通过。
+
+## 2026-09-06 · 当前终审被误判为 stale（已修）
+
+FuseHead 的 final_submission 终审 09:58 得到 done、"Reject-level issues: none"，Manager 却 hold，
+理由是"authoritative verdict covers an earlier manuscript"。根因：`_runtime_execute.py`
+的 `_extract_execute_outcome_fields` 用 `self._artifact_root`（会话状态根，没有 paper/main.tex）
+去比对 Reviewer 绑定的稿件哈希，当前哈希为空，于是把一份哈希完全一致（b57ea320…）的评审
+改写成 status=stale 再交给 Manager。其他所有 freshness 调用点（_stage_ops、_core、mission_view）
+都用执行目录；这里是 4eaa23591 分离状态根/执行目录时漏掉的一处。改为 `ex_state.workdir`，
+加 tests/apps/test_review_freshness_uses_execution_workdir.py（当前评审保持 done；
+改稿后的旧评审仍 stale）。tests/apps、tests/manager、认证恢复测试全部通过。
