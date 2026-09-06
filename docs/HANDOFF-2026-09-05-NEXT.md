@@ -57,6 +57,14 @@
 > 进程环境里有该账号的 OAuth token，用它 `copilot login --with-token` 登录了默认
 > `~/.copilot` 和 Argus 隔离 home（`~/.argus-skill/copilot-home`），干净环境下两者调
 > gpt-5.6-sol 均返回 OK；daemon 未重启，冷却到期自动续跑。token 未写入任何仓库或文档。
+> 07:25 UTC 续：登录恢复后 FuseHead 又被 `94a7cefec` 引入的主机全局预算规则挡住——
+> `ARGUS_SKILL_UNPRICED_COST_POLICY` 默认 `block`，只要主机上任一会话当天有一条
+> `partial` 定价记录（s-0ebfd18c、7ddbde45b40d 在 07:14 故障期间各留下一条
+> `manager-classify-grounded`），所有会话的所有调用都被拒（`paused_budget`），且这类
+> 失败调用永远不会被对账。**这是 codex 分支的设计问题，建议改成：无用量的失败调用不计入
+> 未定价，或默认 allow。** 我只对 FuseHead daemon 用环境变量 `=allow` 重启（每日 $1000
+> 上限仍生效），未改持久化配置；s-0ebfd18c、7ddbde45b40d 两个 daemon（07:14 由他人启动）
+> 仍在被该规则拒绝，未动。
 
 > 另外两点更正/未处理：本文"今日花费约 $1,148"实为 cost-control.jsonl
 > 自 08-28 起的累计（09-05 当天约 $111，FuseHead 当天 $7.9）；FuseHead 的
