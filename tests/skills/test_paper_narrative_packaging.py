@@ -50,7 +50,7 @@ def test_drafting_lets_the_venue_and_claim_decide_the_form() -> None:
         assert "170" not in text
         assert "five-sentence" not in text
     assert "hedge a sentence only when the evidence for that sentence" in drafting
-    assert "workflow words (bounded, certified, gate" in drafting
+    assert "terms for internal task limits, declarations of readiness, stage decisions" in drafting
     assert "legitimate paper when its evidence is as complete" in drafting
 
 
@@ -99,7 +99,7 @@ def test_drafting_selects_and_packages_without_dropping_coverage() -> None:
         assert role in drafting
     assert "complete method, baseline, control" in drafting
     assert "selection changes emphasis" not in drafting
-    assert "packaging, not deletion" in drafting
+    assert "appendix changes its placement; it does not remove it" in drafting
 
 
 def test_paper_stage_allows_role_bearing_repetition_not_matrix_recital() -> None:
@@ -127,7 +127,7 @@ def test_paper_engineer_prompt_carries_the_writing_standard() -> None:
     assert "170" not in prompt
     assert "a headline number may recur" in prompt
     assert "method-by-dataset-by-metric" in prompt
-    assert "evidence-chain language" in prompt
+    assert "translate any workflow or evidence-bookkeeping language" in prompt
 
 
 def test_integrated_reviewer_judges_as_a_venue_reviewer() -> None:
@@ -149,8 +149,8 @@ def test_integrated_reviewer_judges_as_a_venue_reviewer() -> None:
 def test_operation_prompts_enforce_narrative_and_cold_read_input_boundaries(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "HANDOFF.md").write_text(
-        "# HANDOFF — PAPER\n\nUNIQUE_EVIDENCE_ROLE_MAP",
+    (tmp_path / "RESEARCH_NOTES.md").write_text(
+        "# Research notes — Paper stage\n\nUNIQUE_EVIDENCE_ROLE_MAP",
         encoding="utf-8",
     )
     paper = tmp_path / "paper"

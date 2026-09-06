@@ -24,7 +24,6 @@ _REVIEW_SCHEMA_VERSION = 2
 _SELECTION_SCHEMA_VERSION = 3
 TEAM_ROOT = Path(".argus") / "teams"
 _STATE_LOCK_PATH = Path(".argus") / "IDEA_PORTFOLIO.lock"
-_HANDOFF_PATH = Path("HANDOFF.md")
 _LEGACY_STATE_PATH = Path("research") / "IDEA_PORTFOLIO.json"
 _LEGACY_SELECTION_PATH = Path("research") / "IDEA_SELECTION.json"
 _REVIEW_VERDICTS = frozenset({"qualified", "rejected"})
@@ -948,8 +947,10 @@ def _write_handoff(project_root: Path, selection: dict[str, Any]) -> None:
         for item in (unresolved if isinstance(unresolved, list) else ())
         if _one_line(item)
     ) or "- None recorded at selection."
+    from .notes import notes_heading, research_notes_path
+
     text = (
-        "# HANDOFF — IDEA\n\n"
+        f"{notes_heading('idea')}\n\n"
         "## Selected idea\n"
         f"- Route: `{selection.get('route_id')}`\n"
         f"- Why it won: {selection.get('rationale')}\n"
@@ -960,7 +961,7 @@ def _write_handoff(project_root: Path, selection: dict[str, Any]) -> None:
         "## Rejected routes\n"
         f"{rejection_lines}\n"
     )
-    atomic_write(project_root / _HANDOFF_PATH, text)
+    atomic_write(research_notes_path(project_root), text)
 
 
 def _materialize_selection(
@@ -1014,7 +1015,7 @@ def _materialize_selection(
             payload["current_verdict"] = "idea_selected"
             payload["next_action"] = (
                 "Build the selected mechanism and strongest fair baseline, then "
-                "rewrite HANDOFF.md for Experiment."
+                "rewrite RESEARCH_NOTES.md for Experiment."
             )
             meta["selection_complete"] = True
             payload["idea_portfolio"] = meta
@@ -1202,7 +1203,7 @@ def idea_portfolio_completion_issues(
     *,
     state_root: Path | None = None,
 ) -> tuple[str, ...]:
-    """Validate the internal portfolio and materialize its sole visible handoff."""
+    """Validate the internal portfolio and write the research notes it selects."""
     project_root, state_root = _resolved_roots(project_root, state_root)
     if not portfolio_required(state_root):
         return ()

@@ -54,7 +54,7 @@ export function isStructuredAgentPayload(event: EventMsg): boolean {
   return role === 'reviewer' || role === 'planner';
 }
 
-const AGENT_HANDOFF_LINE = /^(?:MILESTONE_STATUS|OPERATOR_QUESTION|OPERATOR_OPTIONS)\s*=/i;
+const AGENT_HANDOFF_LINE = /^(?:[-*+]\s*)?[`*_]*(?:ARGUS_)?(?:MILESTONE_STATUS|NEXT_OWNER|OPERATOR_QUESTION|OPERATOR_OPTIONS|ROLE_DECISION)[`*_]*\s*[:=]|^(?:final\s+)?decision\s*:\s*$/i;
 
 export function visibleAgentText(value: unknown): string {
   return String(value ?? '')

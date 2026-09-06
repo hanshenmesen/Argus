@@ -1026,14 +1026,9 @@ def reset_stage_for_new_intent(
         payload["current_verdict"] = "in_progress"
         payload["next_action"] = f"Continue the current {new_order[0]} stage."
         write_pipeline_state(project_root, payload)
-        handoff_root = Path(evidence_root or project_root)
-        try:
-            (handoff_root / "HANDOFF.md").unlink(missing_ok=True)
-        except OSError:
-            log.debug(
-                "reset_stage_for_new_intent: could not clear stale HANDOFF.md",
-                exc_info=True,
-            )
+        from ..verticals.research_bridge import clear_research_notes
+
+        clear_research_notes(Path(evidence_root or project_root))
     elif payload.get("research_target_level"):
         write_pipeline_state(project_root, payload)
     return True

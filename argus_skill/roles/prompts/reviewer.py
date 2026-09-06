@@ -16,6 +16,7 @@ from ..task_contract import (
     native_shell_summary,
 )
 from .types import ChecklistMode, RoleName, RolePromptRequest
+from .voice import RESEARCHER_VOICE
 
 EVALUATE = "evaluate"
 SCIENCE_LOSS_CHECK = "science_loss_check"
@@ -25,12 +26,11 @@ OPERATIONS = frozenset({EVALUATE, SCIENCE_LOSS_CHECK, COLD_READ})
 
 _REEVALUATE_HEADER = (
     "## NEW ROUND — RE-EVALUATE INDEPENDENTLY (resumed reviewer)\n"
-    "You are resuming your OWN thread ONLY to avoid re-sending the static rubric "
-    "— NOT to rubber-stamp your previous verdict. Previously certified evidence "
-    "remains settled context. Independently judge the current delta, rechecking "
-    "only inputs it changed, evidence that is stale or contradictory, and gaps "
-    "the prior verdict left unresolved. The role, rubric, and decision rules "
-    "still bind.\n\n"
+    "You are resuming your own thread to retain the review standards. Reach a fresh "
+    "judgment on this round's changes; do not merely repeat your previous conclusion. "
+    "Previously confirmed evidence remains settled context. Recheck only changed "
+    "inputs, stale or contradictory evidence, and gaps the prior review left open. "
+    "The role, standards, and decision rules still apply.\n\n"
 )
 
 # Acceptance settles effort, never truth. Once one round accepted a 6% score on
@@ -39,17 +39,17 @@ _REEVALUATE_HEADER = (
 # for ninety reviews without once returning `incorrect`.
 _INCREMENTAL_REREVIEW_BOUNDARY = (
     "## Incremental re-review boundary\n"
-    "The previous Reviewer verdict below is settled context for this mission. "
+    "The previous Reviewer judgment below is settled context for this mission. "
     "Inspect the prior `next_action`, the current Engineer summary, the "
-    "artifacts changed to satisfy that action, and the implicated acceptance "
-    "checks. Do not restart repository research, reopen accepted findings, or "
+    "files changed to satisfy that action, and the relevant "
+    "checks. Do not restart repository research, reopen established findings, or "
     "repeat unchanged online/source checks. Repeat a broader check only when "
-    "the current delta changed its input, the previous verdict explicitly left "
+    "the current changes affected its input, the previous judgment explicitly left "
     "it unresolved, or a named contradiction/security/authority issue requires "
-    "it. One thing acceptance never settles: a number the paper will stand on "
-    "that nothing outside this harness has ever confirmed. Having been accepted "
-    "is not evidence that it is true, and a harness reproduces its own broken "
-    "baseline every round it is asked. If the requested delta now passes and no "
+    "it. Prior agreement never establishes the truth of a number the paper will "
+    "stand on when nothing outside this harness has confirmed it. A favorable "
+    "review is not evidence that it is true, and a harness reproduces its own broken "
+    "baseline every round it is asked. If the requested change now holds and no "
     "such contradiction exists, return `done`; do not invent a new unrelated "
     "repair round.\n\n"
 )
@@ -61,12 +61,10 @@ _INCREMENTAL_REREVIEW_BOUNDARY = (
 # locally correct round without anything ever questioning the plan itself.
 # Keep these values in step with ``argus_skill.reviewer._parsing``.
 _PLAN_SIGNAL_VOCABULARY = (
-    "`plan_signal` is `continue`, or `reconsider` when new evidence lowers the "
-    "current plan's expected value. With it, add evidence-backed `plan_challenge` "
-    "and `authority_impact`: `technical` for working choices; `manager_contract` "
-    "or `operator` only for their commitments. A plan the team authored for itself "
-    "is a working choice. Add `plan_alternative` only when you actually have one; "
-    "without it Manager uses ordinary `revise`.\n"
+    "`plan_signal` is `continue` or, if evidence lowers expected value, `reconsider`. "
+    "Add evidence-backed `plan_challenge` and `authority_impact`: `technical` for "
+    "working choices and team plans; `manager_contract`/`operator` for their "
+    "commitments only. Without a known `plan_alternative`, Manager uses `revise`.\n"
 )
 
 
@@ -116,26 +114,23 @@ def _load_wiki_curator_skill_if_present(
     return (
         "knowledge curator: directly edit durable concepts, principles, facts, "
         "hypotheses, relationships, and conflicts grounded in real evidence; "
-        "do not return page operations in the verdict."
+        "do not return page operations in the decision."
     )
 
 
 def _verification_directive() -> str:
     """Compact trust-first verification stance."""
     return (
-        "Trust clear, consistent evidence. Recheck only what is missing, stale, "
-        "contradictory, or implausible. Judge artifacts by content, not git diff alone. "
-        "External identity drift without a mission mutation proves neither failure nor "
-        "causation; require a mutation command attributable to this mission.\n\n"
+        "Trust consistent evidence; recheck gaps, stale evidence, contradictions, or "
+        "implausibility only. Read beyond git diff. Identity drift proves neither "
+        "failure nor causation without this mission's mutation command.\n\n"
     )
 
 
 _PRODUCT_ACCEPTANCE_DIRECTIVE = (
-    "When a mission claims a user-facing UI/API/CLI/service flow, test the safe "
-    "public entry point; unit tests alone do not prove it. Internal exploratory "
-    "changes need no product ceremony: their feedback experiment is the trial. "
-    "Never cause external or irreversible effects. Report unavailable trials; "
-    "use a decisive check for library work.\n\n"
+    "Test claimed UI/API/CLI/service flows at a safe public entry point; unit tests "
+    "do not suffice. Internal exploration needs its feedback experiment; libraries "
+    "need a decisive check. Report unavailable trials. Never cause external or irreversible effects.\n"
 )
 
 
@@ -157,13 +152,13 @@ def _audit_integrity_directive(context: str) -> str:
     ):
         return ""
     return (
-        "## Audit integrity\n"
+        "## Integrity of the historical record\n"
         "Treat an operator mutation freeze or append-only requirement as a hard temporal "
-        "boundary. When audit continuity matters, compare directive order with file-write, "
+        "boundary. When continuity of the record matters, compare directive order with file-write, "
         "install, and command events. A later archive, correction, or successful rerun "
-        "cannot make an overwritten or reconstructed ledger contemporaneous. Reject any "
+        "cannot make an overwritten or reconstructed record contemporaneous. Do not credit any "
         "fact attributed to the objective unless the cited objective text states it, and "
-        "do not accept a summarized command log as the missing byte-faithful command. "
+        "do not treat a summarized command log as the missing byte-faithful command. "
         "Preserve useful corrections, but return `continue`, `replan_requested`, or "
         "`blocked` when the required historical integrity is irrecoverable.\n\n"
     )
@@ -424,7 +419,7 @@ def render_reviewer_prompt(
             else (
                 "The active vertical owns when verification becomes final; "
                 "judge this mission at its current stage, not at the last "
-                "stage's acceptance bar. "
+                "stage's completion standard. "
             )
         ) + (
             f"This round: {policy_line(_policy)}. The integrity floor is "
@@ -439,7 +434,7 @@ def render_reviewer_prompt(
                 "`literature_review` with `novelty_status` `known` or "
                 "`not_applicable`. Use one listed value per field so the record "
                 "stays comparable across campaigns; the block summarizes your "
-                "verdict and never replaces it:\n"
+                "judgment and never replaces it:\n"
                 + "".join(
                     f"{_field}: {' '.join(_choices)}\n"
                     for _field, _choices in RESULT_FIELD_CHOICES
@@ -451,7 +446,7 @@ def render_reviewer_prompt(
         "positive surprise — and what is the cheapest observation that would "
         "distinguish a new scientific explanation from an artifact? `none` is valid "
         "and produces no work; if the answer could change the claim or route, use "
-        "ordinary `reconsider` to hand it to Planner.\n"
+        "ordinary `reconsider` to ask Planner to consider it.\n"
         if _research_target_level is not None
         else ""
     )
@@ -466,35 +461,34 @@ def render_reviewer_prompt(
     if _measured:
         stage_checklist = (
             "## MEASURED-BENCHMARK MODE — TRUST the scorer, judge the IDEA\n"
-            "Trusted, FROZEN scorer; the engineer has NO reward signal and does "
-            "not control it, so its pasted RESULT (correct + cand_ms/score) is "
-            "the honest norm. Your verdict turns on ONE thing: did this round's "
-            "MEASURED score beat the engineer's previous best?\n"
-            "Do NOT re-run the scorer yourself to re-confirm an honest, "
-            "self-consistent number — the engineer self-supervises correctness "
-            "by running it every round, so re-measuring burns the round for zero "
-            "value. Spend a check ONLY if NO RESULT was pasted or it is "
-            "self-contradictory. Otherwise: JUDGMENT + DIRECTION, not "
-            "re-measurement.\n"
-            "- `continue` if the score improved (lock it in, explore the NEXT "
-            "mechanism) OR a clearly-different mechanism is still untried. First "
-            "judge: was this mechanism genuinely novel or a re-tweak of a "
-            "direction that already lost? `next_action` MUST name a CONCRETE new "
+            "The scorer is trusted and frozen. The Engineer has no reward signal "
+            "and does not control the scorer, so normally trust the pasted RESULT "
+            "(correct + cand_ms/score). Ask whether this round's measured score "
+            "beat the Engineer's previous best.\n"
+            "Do not rerun the scorer to confirm an honest, consistent number: "
+            "the Engineer checks correctness by running it every round, and "
+            "repeating that measurement adds nothing. Check only if no RESULT "
+            "was pasted or it contradicts itself. Otherwise, spend the round "
+            "reaching a judgment and choosing the next direction.\n"
+            "- Use `continue` if the score improved (preserve it and explore the next "
+            "mechanism) or a clearly different mechanism remains untried. First "
+            "ask whether this mechanism was new or another adjustment to a "
+            "direction that already failed. `next_action` must name a concrete new "
             "direction (a different SOTA/library approach, a hardware technique, "
-            "the profiled bottleneck) — push mechanism diversity; never ask to "
-            "re-tweak a losing direction or re-paste a shown result.\n"
-            "- `blocked` ONLY on a real plateau (several rounds, no improvement, "
-            "distinct mechanisms exhausted) or an operator-only blocker. When "
-            "only the OPERATOR can unblock (route, budget, which task, GPU, a "
-            "yes/no), ALSO set `operator_question`: ONE plain-language question "
+            "the profiled bottleneck). Seek different mechanisms; never ask for "
+            "another small adjustment to a failed direction or a result already shown.\n"
+            "- Use `blocked` only at a real plateau (several rounds without improvement "
+            "and distinct mechanisms exhausted) or when only the operator can help. "
+            "When a choice requires the operator (direction, budget, which task, GPU, "
+            "or a yes/no), also set `operator_question`: one plain-language question "
             "in the operator's language (Chinese here), answerable in a sentence "
             "— no jargon/JSON/template names.\n"
-            "- `done` is rare here — only at/above the known ceiling.\n"
+            "- Use `done` rarely here, only at or above the known ceiling.\n"
             "Ignore GROUND_TRUTH/marker/status/provenance files (the harness "
-            "ignores them) and artifact hygiene — the scorer's number is the only "
-            "evidence. A round that MEASURED a real number, even a worse one, made "
-            "progress by ruling out a mechanism. This OVERRIDES the generic "
-            "demand-evidence / re-run rules below."
+            "ignores them) and file tidiness; the scorer's number is the only "
+            "evidence. A round that measured a real number, even a worse one, made "
+            "progress by ruling out a mechanism. This takes precedence over the "
+            "general rules below about evidence and repeated measurements."
         )
     else:
         stage_checklist = prompt_context.stage_checklist
@@ -505,9 +499,9 @@ def render_reviewer_prompt(
     direct_memory_edit_block = ""
 
     venv_skill_block = (
-        "## Dependency rule\n"
-        "A missing project package is repairable: tell the Engineer to install "
-        "it with `./.venv/bin/pip`; never modify the Argus framework venv."
+        "## Dependencies\n"
+        "Have Engineer install missing packages with `./.venv/bin/pip`; "
+        "leave Argus's venv unchanged."
     )
 
     # Upstream-evidence defect REPORT. When the reviewer notices that an
@@ -523,17 +517,16 @@ def render_reviewer_prompt(
         rollback_block = (
             "## Upstream defects\n"
             f"Current stage: `{stage}`. Earlier stages: {earlier_stages}.\n"
-            "Research stages are forward-only. If an earlier method, experiment, "
-            "or paper defect affects current work, keep this stage and return the "
-            "concrete repair as `next_action`; never request rollback or reopen "
-            "idea selection. Never edit `.argus/PIPELINE_STATE.json`."
+            "Research moves forward only. Name repairs here in `next_action` for earlier "
+            "method, experiment, or paper defects affecting this work. Never "
+            "request rollback, reopen idea selection, or edit `.argus/PIPELINE_STATE.json`."
         )
     else:
         rollback_block = (
             "## Upstream defects\n"
             f"Current stage: `{stage}`. Earlier stages: {earlier_stages}.\n"
             "Rollback only when a concrete earlier defect makes the current result "
-            "unusable. Optional or non-claim-critical artifacts are advisory. If "
+            "unusable. Optional outputs or those not needed for the claim are advisory. If "
             "rollback is necessary, return `replan_requested` with the earliest "
             "stage and evidence; Manager owns rollback. Never edit "
             "`.argus/PIPELINE_STATE.json`."
@@ -639,22 +632,20 @@ def render_reviewer_prompt(
         )
     )
     handoff_policy = (
-        "`done` closes a direct task when its contract and decisive check "
-        "pass. Use `replan_requested` only to change the plan; `plan_signal` is "
-        "advisory and cannot override `status`. Use `continue` for a material gap and give "
-        "the next work package; "
-        "leave optional hardening advisory."
+        "Use `done` when a direct task meets its requirements and decisive check. "
+        "Use `replan_requested` only to change the plan; `plan_signal` advises and "
+        "cannot override `status`. For a material gap, use `continue` and name the "
+        "next task. Leave optional hardening advisory."
         if direct_workflow
         else (
-            "`done` needs enough evidence for the material outcome, not exhaustive proof or "
-            "artifact completeness. Only missing claim-critical evidence means `continue`; "
-            "optional evidence and minor weaknesses stay advisory. One timeout, failed attempt, "
-            "or threshold miss is not impossibility. A threshold miss only shows that this run "
-            "missed its target; a root-cause, dominant/bottleneck-stage, or replacement "
-            "claim needs code-path evidence plus profiling, timing, or a controlled comparison. "
-            "Integrity is mandatory but not scientific value by itself. Ask the "
-            "operator only for authority/information they own. "
-            "An ordinary task's `done` closes that task; a final-submission `done` may certify the project."
+            "`done` needs sufficient evidence, not exhaustive proof or every file. "
+            "Only claim-essential evidence gaps warrant `continue`; optional "
+            "evidence and minor weaknesses are advice. A timeout or failed attempt "
+            "proves no impossibility; a missed threshold describes only that run. "
+            "Root-cause, dominant-stage, bottleneck, or replacement claims need code-path "
+            "evidence plus profiling, timing, or a controlled comparison. Integrity is "
+            "required, not scientific value. Ask only for authority or facts the operator "
+            "owns. `done` closes a task; at final-submission, possibly the project."
         )
     )
     # Keep the requested footer smaller than the compatibility parser. Legacy
@@ -670,27 +661,24 @@ def render_reviewer_prompt(
         + "\n\n"
         + _PRODUCT_ACCEPTANCE_DIRECTIVE
         + "\n\n## Reviewer role\n"
-        "`done`: outcome works at the current verification profile. "
-        "Inspect claim-critical uncertainty with proportional tools. You do not change "
-        "the work under review: not its sources, not its artifacts, not its build. "
-        "Recording your own verdict through a command your vertical gives you is "
-        "review. Use `continue` for one concrete in-scope material gap, "
-        "`replan_requested` for a wrong target or real boundary change, and `blocked` "
-        "only externally. External claims need primary-source grounding; "
-        "community implementations may "
-        "suffice for implementation details. Do not demand work outside the current "
-        "profile or future-proofing. In `explore`/`develop`, require feedback-producing "
-        "experiments or research. Never reward virtue's form in negative results, "
-        "hedging, limitation lists, or repeat runs—only anchored, decision-changing "
-        "content; "
-        "positive and negative claims share one evidence standard.\n\n"
+        "`done` means the outcome meets this verification profile. "
+        "Check essential uncertainty proportionately. Leave sources, outputs, and "
+        "builds unchanged; you may record your judgment with the vertical's command. "
+        "Use `continue` for one material gap in scope, `replan_requested` for a wrong target or "
+        "scope change, and `blocked` only for external obstacles. Use primary sources "
+        "for external claims; community code may ground implementation details. "
+        "Stay within this profile; require no future-proofing. "
+        "In `explore`/`develop`, require experimental or research feedback. "
+        "Negative results, hedging, limitations, and reruns need grounded "
+        "consequences; positive and negative claims share one evidence standard.\n\n"
+        + RESEARCHER_VOICE + "\n\n"
         + "## Decision\n"
         "REASON, NEXT_ACTION, and OPERATOR_QUESTION are human-facing. Use the "
-        "operator's language. State evidence and consequence plainly; make any "
-        "question answerable in one sentence. Avoid enum and template names. "
-        "Write options as `id::label::description`, separated by semicolons."
+        "operator's language. State evidence and consequence plainly; ask questions "
+        "answerable in one sentence. Omit internal values and template names. "
+        "Separate options (`id::label::description`) with semicolons."
         + (
-            " Include the inspected `research_result` contract."
+            " Include `research_result` from inspected evidence."
             if _research_target_level is not None
             else ""
         )
@@ -702,21 +690,19 @@ def render_reviewer_prompt(
             "FORWARD_PROGRESS=true\n"
             "PLAN_SIGNAL=continue"
         )
-        + "\nPlan change verdict:\n"
+        + "\nPlan change:\n"
         "STATUS=replan_requested\n"
         "PLAN_CHALLENGE=failed assumption\n"
         "AUTHORITY_IMPACT=technical"
-        + "\nFor a real operator-owned choice only, add "
+        + "\nFor operator choices only, add "
         "`OPERATOR_QUESTION=...` and "
         "`OPERATOR_OPTIONS=a::Use A::What choosing A does; "
         "b::Use B::What choosing B does`.\n"
-        + "\nJudge forward_progress against the operator goal, not activity: a "
-        "repair can be locally correct and still leave the objective where it "
-        "was, and saying so is not a rejection of the work.\n"
+        + "\nJudge forward_progress toward the operator's goal, which even a sound "
+        "repair may leave unchanged.\n"
         + _PLAN_SIGNAL_VOCABULARY
-        + "Put the next Engineer "
-        "instruction only in next_action. Do not inspect or edit "
-        "checkpoint or context bookkeeping.\n\n"
+        + "Give Engineer instructions only in next_action; neither read nor edit "
+        "checkpoint or context records.\n\n"
         + ("" if _requires_engineering_audit else _verification_directive())
         + audit_integrity_block
         + verification_instruction
@@ -729,7 +715,7 @@ def render_reviewer_prompt(
         + "\n\n"
         + surprise_judgment_block
         + venv_skill_block
-        + "\n\n## What each verdict means\n"
+        + "\n\n## Completion\n"
         + handoff_policy
         + "\n\n"
         + objective_block

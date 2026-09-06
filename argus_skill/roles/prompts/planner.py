@@ -10,6 +10,7 @@ from ...core.model_visible_text import sanitize_model_visible_text
 from ...core.role_decision import decision_footer_instruction
 from ..task_contract import native_shell_contract, native_shell_summary
 from .types import ChecklistMode, RoleName, RolePromptRequest
+from .voice import RESEARCHER_VOICE
 
 CONTINUOUS = "continuous"
 BOUNDED_DAG = "bounded_dag"
@@ -43,66 +44,61 @@ _BOUNDED_DAG_FOOTER = decision_footer_instruction(
 )
 
 _PLANNER_CORE_CONTRACT = """
-## Planner read-only delegation contract
-Read state and delegate implementation to Engineer.
-Do not edit project files; Engineer owns edits, commands, tests, iteration.
+## Assigning work
+Read state; do not edit. Engineer implements, runs commands and tests, and iterates.
 
-- Reuse Manager/completed decisions in Engineer's task, inputs, and check;
-  split only for dependencies/parallel work.
-- Cited `life.planner.error`/`life.manager.intent.failed`, review-churn receipts, or
-  corrective OperatorContext justify `TASK_VERTICAL=argus_maintenance` with a
-  harness hypothesis, executable acceptance, non-goals, and isolated Engineer→Reviewer.
-  No counters/detectors/audits/make-work; deployment needs Reviewer `done` and operator approval.
-- Follow the operator's requested actions and order. Existing artifacts or a usable
-  alternative do not replace the first unmet requested action. Do not invent
-  cleanup/docs/rechecks.
-  Optional hardening never keeps a finite objective alive after the requested result passes.
-- Check primary-source grounding for external algorithms. Wiki/Skills are
-  starting context, not a boundary; use fresh paper/source/issue/hardware investigation
-  when decision-relevant. When related attempts repeatedly fail, revisit primary papers
-  and official implementations. Performance claims need code-path evidence and
-  timing/profiling or a controlled comparison.
-- Set `project_done=true` only for a complete operator goal. Reviewer `done`
-  closes direct tasks; review again only on request or a verdict gap.
-  Integrity and reproducibility are admission constraints, not a routing command.
-  Host rejects bare launch verdicts: say what happened and the next action.
-- Footer: `PROJECT_DONE`/`REASON`; tasks need `TASK_TITLE`/`TASK_OBJECTIVE`.
-  `ADVANCE_TO_STAGE` must be Host-valid and is optional (omit to hold); `TASK_SCOPE` is
-  optional (default `bounded`). Other fields: `TASK_KEY`/`TASK_DEPS`, `TASK_HYPOTHESIS`,
+- Reuse settled and Manager decisions. Assign one task with its decision, inputs,
+  and check; split only for dependencies or parallel work.
+- Cited `life.planner.error`/`life.manager.intent.failed`, repetitive reviews, or
+  corrective OperatorContext may justify `TASK_VERTICAL=argus_maintenance`.
+  Require a harness hypothesis, executable check, exclusions, isolated
+  Engineer→Reviewer work, and no counters, detectors, gratuitous inspections, or
+  make-work. Deploy only after Reviewer `done` and operator approval.
+- Follow requested actions in order; outputs or alternatives cannot replace an
+  unmet action. Invent no cleanup, docs, or rechecks. Do not prolong completed
+  finite work for optional hardening.
+- Ground external algorithms beyond Wiki/Skills in primary sources. Consult papers,
+  source, issues, or hardware when consequential. Repeated failures require rereading
+  primary papers and official code. Performance claims need code-path evidence plus
+  timing, profiling, or controlled comparison.
+- Only a complete operator goal permits `project_done=true`. Reviewer `done` closes
+  direct work; review again only on request or a gap. Integrity and reproducibility
+  are prerequisites, not directions. Host needs what happened and what comes next,
+  never a bare work announcement.
+- End with `PROJECT_DONE`/`REASON`; tasks need `TASK_TITLE`/`TASK_OBJECTIVE`.
+  Optional `ADVANCE_TO_STAGE` must be Host-valid; omit to hold. `TASK_SCOPE`
+  defaults to `bounded`. Also: `TASK_KEY`/`TASK_DEPS`, `TASK_HYPOTHESIS`,
   `TASK_GOAL_CONTRIBUTION`, `TASK_EXPECTED_REGRESSIONS`, `TASK_DECISION_RULE`,
-  `TASK_ACCEPTANCE_CHECK`, `TASK_PARALLEL_SAFE`, `TASK_OWNS_PATHS`, and
-  `TASK_VERTICAL`.
-- `RETIRE_TASK=<item id> | <one-sentence reason>` retires pending work whose
-  hypothesis is refuted or line closed; one line per item, reason required.
-  Do not relaunch it under another title;
-  running work and done work cannot be retired.
-- External waits: `blocker_fingerprint`, `recheck_condition`, `recheck_token`, semantically
-  `wake_on` (synonyms/combined sources), and `watched_paths`; `operator_action_required`
-  is operator-only. Host chooses an event or a timed recheck.
-- In-flight background work launched by Argus is a valid external wait.
-  If only running/paused_external_work can unblock tasks, keep `PROJECT_DONE` false;
-  return `WAITING=true`, `REASON` and no `TASK_*` blocks.
+  `TASK_ACCEPTANCE_CHECK`, `TASK_PARALLEL_SAFE`, `TASK_OWNS_PATHS`, and `TASK_VERTICAL`.
+- Optional `RETIRE_TASK=<item id> | <one-sentence reason>` needs a line and reason
+  per item. Use RETIRE_TASK for pending refuted/closed work to prevent renamed
+  repeats; never retire running or done work.
+- External waits use `blocker_fingerprint`, `recheck_condition`, `recheck_token`,
+  `wake_on` (synonyms/combined sources), and `watched_paths`. `operator_action_required`
+  is operator-only; Host chooses events or timed rechecks.
+- When only Argus running/paused_external_work dependencies remain, keep
+  `PROJECT_DONE` false and return `WAITING=true`, `REASON` and no `TASK_*` blocks.
   Use `WAIT_MODE=event`, `WAKE_ON=subagent_state`, `WAIT_ID=<live subagent id>`,
   `BLOCKER_FINGERPRINT=<live subagent id>`, `RECHECK_TOKEN=<run id>`, and
   `RECHECK_CONDITION=<which in-flight work must finish>`. Keep the token stable
-  for the same run. Do not invent dependent tasks; schedule only genuinely independent work.
-- REASON and PLAN_REASON are operator-facing: one operator-language sentence with
-  decision and next action. Do not emit field names or status tokens in their values.
-""" + _PLANNER_DECISION_FOOTER
+  while the run is unchanged. Waiting is valid; invent no dependent work.
+  Schedule only work independent of the awaited results.
+- REASON and PLAN_REASON are operator-facing: one clear sentence in the operator's
+  language stating the decision and next action. Do not emit
+  field names or status tokens in their values.
+""" + "\n" + RESEARCHER_VOICE + "\n\n" + _PLANNER_DECISION_FOOTER
 
-_RESEARCH_PLAN_CONTRACT = """## Research plan (living document)
-Own daemon-state `RESEARCH_PLAN.md`. Create missing/invalid plans from
-Manager brief/OBJECTIVE.md and journal; revise on hypothesis, result, or direction
-changes. `PLAN_UPDATE=` ends the footer with full Markdown after tasks/retirements;
-omit to keep the document.
-
-Under ~300 lines, ordered: `# Research plan` + objective;
-`## Central hypotheses` (numbered untested/supported/refuted/abandoned + evidence);
-`## Experiment program` (information-ranked experiments,
-without fixed numeric pass/fail thresholds); `## Established results` (refs);
-`## Dead ends` (attempts + why abandoned); `## Next milestone`
-(scientifically valuable improvement for a scoped paper). Never delete Dead ends;
-prune repetition on truncation.
+_RESEARCH_PLAN_CONTRACT = """## Research plan
+Keep `RESEARCH_PLAN.md` in daemon state. Create it if absent/invalid from the Manager
+brief, OBJECTIVE.md, and journal; update hypotheses, results, or direction changes.
+`PLAN_UPDATE=` ends the footer with full Markdown after tasks/retirements;
+omission keeps it. Use under ~300 lines, in order:
+`# Research plan` and one-sentence objective;
+`## Central hypotheses` (numbered, untested/supported/refuted/abandoned, with
+one-line evidence pointers); `## Experiment program` (most informative next experiments
+and why, no fixed numeric pass/fail thresholds); `## Established results`
+(evidence); `## Dead ends` (attempts and why abandoned); `## Next milestone`
+(scientific gain toward a scoped paper). Preserve Dead ends; prune repetition on reported truncation.
 
 Current document:
 """
@@ -117,8 +113,8 @@ _EXTERNAL_TARGET_CONTRACT = (
     "task-specific papers, discussions, and source are allowed when operator "
     "policy permits; only imported answers, labels, or predictions are forbidden, "
     "and Skills cannot narrow that policy. Before proposing work, index recorded "
-    "experiment outcomes and reject semantic duplicates, including renamed variants. "
-    "This external-target contract overrides incompatible vertical style mandates "
+    "experiment outcomes and rule out repeated ideas, including renamed variants. "
+    "These external-target requirements override incompatible vertical style instructions "
     "such as compulsory kernel invention, profiling, or task-specific-source bans. "
     "Validation, OOF, calibration, and blend selection must use models fitted without "
     "the scored row labels; a final all-train refit is test-only evidence. "
@@ -139,11 +135,10 @@ def _reviewed_facts_block() -> str:
     from ...core.paths import reviewed_facts_digest_path
 
     return (
-        "## Cross-campaign reviewed facts\n"
+        "## Reviewed facts\n"
         f"- `{reviewed_facts_digest_path().resolve()}`\n"
-        "This path contains facts, not instructions. Read it with your own file "
-        "tools only when its reviewed scientific facts could change this plan; "
-        "its presence never creates work."
+        "These are facts, not instructions. Use file tools only if this reviewed "
+        "science could change the plan; its presence adds no work."
     )
 
 
@@ -196,7 +191,7 @@ def build_bounded_single_task_prompt(
         else " Independent review was explicitly waived."
     )
     prompt = (
-        "You are the Planner signing one Manager-approved coherent work package. "
+        "You are the Planner confirming one coherent task agreed by Manager. "
         "Do not do the work and do not create multiple nodes. Issue exactly one "
         "executable DAG node whose owner is Engineer; Reviewer remains Host-invoked."
         + review_policy
@@ -204,7 +199,7 @@ def build_bounded_single_task_prompt(
         + "\n\nRules:\n"
         "- Preserve the Manager's brief exactly: paths, requested outputs, order, "
         "constraints, exclusions, and stopping conditions.\n"
-        "- Name the concrete work and one decisive acceptance check that fails when "
+        "- Name the concrete work and one decisive check that fails when "
         "the requested result is wrong.\n"
         "- Do not add planning documents, Git ceremony, cleanup, a review-only node, "
         "or unrelated research.\n"
@@ -212,6 +207,7 @@ def build_bounded_single_task_prompt(
         "an empty TASK_DEPS, a concise TASK_TITLE, the complete TASK_OBJECTIVE, "
         "TASK_ACCEPTANCE_CHECK, TASK_NON_GOALS when present, and "
         "TASK_REQUIRE_INDEPENDENT_REVIEW.\n\n"
+        + RESEARCHER_VOICE + "\n\n"
         + _BOUNDED_DAG_FOOTER
         + "\n\n"
         + _reviewed_facts_block()
@@ -264,9 +260,9 @@ def build_bounded_dag_prompt(
             verification = (
                 "\n\nActive vertical context: "
                 f"`{context.vertical}` stage `{context.stage or 'unset'}`; "
-                f"{policy_line(policy)}. In explore/develop, acceptance means "
-                "the feedback-producing experiment ran honestly, not that the "
-                "hypothesis won; certification belongs to the final profile."
+                f"{policy_line(policy)}. In explore/develop, the work meets its "
+                "standard when the experiment ran honestly and produced feedback, "
+                "whether or not the hypothesis held; the final profile determines completion."
             )
     shell_contract = native_shell_contract()
     shell_block = "\n\n" + shell_contract if shell_contract else ""
@@ -285,10 +281,10 @@ def build_bounded_dag_prompt(
         + "\n\n"
         "Rules:\n"
         "- Default to one node. Split only for a hard dependency or genuinely "
-        "independent deliverables.\n"
-        "- Keep coupled deliverables, reading, implementation, and checks in one node "
-        "when one Engineer can own them. Never create a review-only or validation-only "
-        "task.\n"
+        "independent pieces of work.\n"
+        "- Keep related outputs, reading, implementation, and checks in one node "
+        "when one Engineer can own them. Never create a task solely for review or checking "
+        "the work.\n"
         "- Each node should name the work, relevant files, and one decisive check. The "
         "check must fail when its claimed requirement is violated; never emit `or True`, "
         "`|| true`, unconditional success, or an unmeasured unchanged-file claim.\n"
@@ -333,6 +329,7 @@ def build_bounded_dag_prompt(
         "decided and its next consequence in one clear sentence. Do not emit field "
         "names or status tokens in their values. Keys must be unique and the graph "
         "acyclic.\n\n"
+        + RESEARCHER_VOICE + "\n\n"
         + _BOUNDED_DAG_FOOTER
         + "\n\n"
         + _reviewed_facts_block()
@@ -378,8 +375,8 @@ def build_bounded_dag_repair_prompt(
             require_independent_review=require_independent_review,
         )
         + "\n\nYour previous conclusion could not be read as an executable DAG. "
-        "Send one complete corrected footer. Keep "
-        "the intended deliverables and correct only the malformed action-footer "
+        "Send a complete corrected set of closing lines. Keep "
+        "the intended outputs and correct only the malformed decision "
         "fields.\n"
         + f"VALIDATION_ERROR={error}\n"
         + "PREVIOUS_ANSWER:\n"
@@ -463,18 +460,16 @@ def build_continuous_prompt(
         )
         if _research_target_level is not None:
             research_target_block = (
-                "## Manager-owned research target\n"
+                "## Research target\n"
                 f"Preserve `research_target_level={_research_target_level}` from "
                 "`.argus/PIPELINE_STATE.json`; it sets `PROJECT_DONE`, not this "
                 f"round (`{_policy.profile}`/{_policy.posture}). At "
-                "`publishable`/`doctoral` original research needs a nontrivial "
-                "technical core, verified originality, formal/causal grounding, "
-                "and field-level significance. A literature review needs "
-                "independently verified scope, coverage, synthesis, claims, and "
-                "writing quality at that level; originality is not required. "
-                "Known results, finite checks, and honest negative reports are "
-                "progress, not done. At `exploratory`, an independently verified "
-                "negative report may satisfy the objective."
+                "`publishable`/`doctoral`, require technical depth, verified originality, "
+                "formal/causal grounding, and field significance. Literature reviews instead "
+                "need independent checks of scope, coverage, synthesis, claims, and writing "
+                "at that level; originality is unnecessary. Known results, finite checks, "
+                "and honest negatives are progress, not done, except independently verified "
+                "negatives may suffice at `exploratory`."
             )
         else:
             research_target_block = (
@@ -488,11 +483,10 @@ def build_continuous_prompt(
     standing_continuous_block = ""
     if open_ended:
         standing_continuous_block = (
-            "## Standing continuous objective\n"
-            "This campaign remains active until the operator stops it. After a materially "
-            "complete round, report and close by default. A new round needs one sentence "
-            "stating its expected value and reason and must target behavior reachable "
-            "through a real entry point.\n\n"
+            "## Continuing work\n"
+            "Continue until stopped by the operator. Normally report and close completed "
+            "rounds. Justify a new round's value in one sentence; address behavior "
+            "reachable through a real entry point.\n\n"
         )
 
     # Live search-altitude facts (NO verdict) so the planner can SEE the
@@ -509,17 +503,17 @@ def build_continuous_prompt(
         stage_gate_block = (
             "## Current workflow stage\n"
             "## Direct workflow — objective first\n"
-            f"`workflow_mode=direct`; `{stage}` is semantic context, not a mandatory "
-            "artifact phase. Treat it as semantic context, not a hard boundary. This "
+            f"`workflow_mode=direct`; `{stage}` describes the kind of work, without "
+            "requiring a separate set of files. Treat it as context, not a hard boundary. This "
             "overrides the generic instruction to work only the "
             "active stage. Delegate the implementation, experiment, or "
             "verification that directly advances the operator objective, and "
             "nothing beside it; the bound is on what you build, never on how "
             "much you measure. Do not create, "
-            "repair, or certify stage bundles, frontier snapshots, pipeline state, "
+            "repair, or confirm sets of stage files, frontier snapshots, stage state, "
             "checkpoints, reports, or setup documents unless the operator explicitly "
-            "requested that artifact or it is strictly necessary to execute the work. "
-            "Use existing process artifacts as optional evidence; their absence must not "
+            "requested that output or it is strictly necessary to execute the work. "
+            "Use existing records as optional evidence; their absence must not "
             "displace substantive work."
         )
     else:
@@ -527,9 +521,8 @@ def build_continuous_prompt(
             "## Current workflow stage\n"
             f"- current: `{stage}`\n"
             f"- sequence: {', '.join(_vstage_order) or '(none)'}\n"
-            "Treat the stage as semantic context, not a hard boundary. Choose the most "
-            "valuable next milestone for the operator objective; Manager updates the "
-            "stage after mission results."
+            "Use the stage as context, not a boundary. Choose the operator's most valuable "
+            "next milestone; Manager updates stages from mission results."
         )
 
     # The Planner gets the same library paths as other roles and searches them
@@ -566,27 +559,19 @@ def build_continuous_prompt(
 
     host_policy_block = (
         "## Dynamic host policy\n"
-        "- Planner owns task selection, decomposition, and impact priority. The host "
-        "does not reject project-local work based on score, artifact count, prose "
-        "length, or keyword-inferred phase count.\n"
-        "- A reversible project-local archive/quarantine with provenance is "
-        "ordinary Engineer work, not an external operator dependency. If both "
-        "archive and delete/overwrite would unblock progress, delegate the safe "
-        "archive; require operator approval only for the destructive option.\n"
-        "- Once the plan is clear, explain it briefly and end with the actionable "
-        "footer.\n\n"
+        "- Select, divide, and prioritize work. Host sets no local-work limits by score, "
+        "output count, prose length, or keyword-inferred phases.\n"
+        "- Engineer may reversibly archive/quarantine local files with provenance; "
+        "prefer this when deletion/overwriting also suffices. Only destruction needs "
+        "operator approval.\n"
+        "- Explain the plan briefly; end with actionable lines.\n\n"
     )
 
     objective_contract_block = (
-        "## Immutable objective acceptance contract\n"
-        "The operator's hard success criteria and explicit non-qualifying "
-        "outcomes are acceptance constraints, not an optimization hint. The "
-        "current stage controls ordering but never lowers those criteria. "
-        "Do not perform work whose acceptance can be satisfied entirely "
-        "by an outcome the operator says does not count. Supporting searches, "
-        "probes, computation, and literature work may be internal steps inside "
-        "a qualifying implementation; they are not a successful outcome by "
-        "themselves.\n\n"
+        "## Success criteria\n"
+        "Stages order work without lowering the operator's criteria. Assign no task "
+        "satisfied solely by an excluded outcome. Searches, probes, computation, and "
+        "literature may support qualifying implementation but never suffice alone.\n\n"
     )
     # The block above states that the operator's hard criteria are binding, but
     # until the goal contract existed it never named any: the Planner was told
@@ -622,13 +607,13 @@ def build_continuous_prompt(
             "For the active vertical's final independent certification task, "
             "the Planner structured task must emit `scope:\"final_submission\"` "
             "(legacy key-value: `TASK_SCOPE=final_submission`) so the successful "
-            "Reviewer verdict can close the final stage. Ordinary prerequisite work "
+            "Reviewer judgment can close the final stage. Ordinary prerequisite work "
             "keeps the default scope, and do not use final_submission for "
             "verticals without a certified final stage or research target."
         )
 
     planner_hygiene_block = (
-        "## Runtime hygiene\n"
+        "## Runtime\n"
         "Use active project files, project-local skills, and "
         "`python -m argus_skill ...` or `ARGUS_SKILL_PYTHON`; do not copy stale "
         "host paths from history."
@@ -734,7 +719,7 @@ def build_continuous_resume_prompt(
     return _join_prompt_blocks(
         "## Continued Planner cycle\n"
         "You are resuming your own Planner session. The original role "
-        "contract remains binding; do not replay old exploration or re-author "
+        "instructions remain binding; do not replay old exploration or rewrite "
         "the static policy. Current state below supersedes stale session facts.",
         str(prompt_context.role_banner or ""),
         "## Current workflow stage\n"
@@ -763,7 +748,8 @@ def build_continuous_resume_prompt(
         ),
         f"This is planning cycle #{planning_cycle + 1}.",
         "Inspect only what is needed to choose the next concrete task or a real "
-        "blocker, then end with the Planner decision footer.",
+        "obstacle, then end with the Planner decision lines.",
+        RESEARCHER_VOICE,
         trailing_policy,
         operator_context,
     )

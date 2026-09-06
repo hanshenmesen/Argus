@@ -1,9 +1,9 @@
 ---
-name: "Research SVG Pipeline"
+name: "Drawing the method in SVG"
 description: "Synthesize a compact, horizontal ICLR-style method pipeline from executed research code and the current manuscript, with staggered SVG geometry and Times New Roman."
 ---
 
-# Research SVG Pipeline
+# Drawing the method in SVG
 
 Use this as the default for a method, architecture, or pipeline figure in Paper,
 and for a concrete pipeline repair in Review. You, the active Engineer model,
@@ -25,9 +25,9 @@ PDF. Moving its float in LaTeX does not require regenerating the graphic.
 
 Read the current manuscript and the executed method code, including the direct
 configuration or call site needed to understand branches. Paper may use
-`HANDOFF.md` to locate these sources; Review follows the manuscript's direct
+the research notes in `RESEARCH_NOTES.md` to locate these sources; Review follows the manuscript's direct
 dependencies. Do not crawl research history or replace the scientific method
-with the Argus orchestration lifecycle.
+with a depiction of how Argus organizes its own work.
 
 Gather a short design brief from explicitly selected files:
 
@@ -52,7 +52,7 @@ For a real architecture overview, first inventory the important components,
 interfaces, stored state and feedback paths in the code. Preserve that coverage
 in the drawing: use compact bands and nested groups, exposing the mechanism
 inside each major module. Distinguish control, execution, record/memory and
-domain layers when the implementation does. Show dependencies, artifact flow,
+domain layers when the implementation does. Show dependencies, the flow of intermediate outputs,
 library access and actual verification/repair loops through explicit connections.
 A four-box summary with large blank interiors is insufficient for a complex
 system. Density should come from relevant subcomponents and relationships;
@@ -104,7 +104,8 @@ them in the source; do not misstate the final width to bypass the check.
 
 Open the PNG and inspect it at final size. Repair internal whitespace, wrong
 arrows, collisions and awkward grouping in the editable SVG, then rerender.
-The geometry checks are authoring aids, not a scientific or visual verdict.
+The geometry checks help with drawing; they do not settle whether the figure
+is scientifically faithful or visually clear.
 
 ```latex
 % After the final paragraph of Introduction, before the next section.
@@ -120,11 +121,12 @@ Default to inserting the **PDF** after the end of Introduction, with a top float
 on page **2 or 3**. Check the compiled PDF and adjust the float location in LaTeX
 if needed. Respect the actual Introduction length and author kit; do not add
 blank pages, force a page break or shrink text merely to hit a page number.
-This is a preferred placement, not an independent acceptance step.
+This placement is a preference; it does not require a separate decision about
+whether the paper is ready.
 
-Adapt the caption to the actual paper and its drafting contract; use `figure*`
+Adapt the caption to the actual paper and its drafting requirements; use `figure*`
 if a two-column paper needs full width. Use the exported PDF for normal
 pdfLaTeX builds; plain `\includegraphics` does not load SVG. Compile and inspect
 the included figure. Keep the source and final exports, with no extra reports
-or acceptance files. Strict visual and scientific acceptance stays in the
-existing integrated Review, recorded in `paper/REVIEW.md`.
+or files declaring the figure ready. The existing integrated Review makes the
+strict visual and scientific judgment and records it in `paper/REVIEW.md`.

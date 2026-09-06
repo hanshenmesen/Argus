@@ -171,6 +171,7 @@ export interface LifeMissionCompletedEvent extends EventMsg {
   "scope"?: string;
   "status": string;
   "summary"?: string;
+  "final_output"?: string;
   "outcome_class"?: "completed" | "incomplete" | "stalled" | "blocked" | "failed" | "ended";
   "outcome"?: { "execution_status": string; "review_status": string; "stage_certification": string; "interruption_kind": string; "resumable": boolean; };
   "success"?: boolean;
@@ -1170,6 +1171,30 @@ export interface SkillLibraryAvailableEvent extends EventMsg {
   "text"?: string;
 }
 
+export interface LifeResearchSecondReadingEvent extends EventMsg {
+  type: "life.research.second_reading";
+  payload_schema_version?: 1;
+  "stage"?: string;
+  "refuted"?: string;
+  "supported"?: string;
+  "next"?: string;
+  "text"?: string;
+  "notes_path"?: string;
+  "signals"?: number;
+  "agent_layer"?: string;
+}
+
+export interface LifeLetterWrittenEvent extends EventMsg {
+  type: "life.letter.written";
+  payload_schema_version?: 1;
+  "stage"?: string;
+  "text"?: string;
+  "message_id"?: string;
+  "letters_path"?: string;
+  "hours_since_last"?: number;
+  "agent_layer"?: string;
+}
+
 export interface OperatorAlertEvent extends EventMsg {
   type: "operator_alert";
   payload_schema_version?: 1;
@@ -1284,6 +1309,8 @@ export interface EventPayloadByType {
   "venue.research.started": VenueResearchStartedEvent;
   "venue.research.completed": VenueResearchCompletedEvent;
   "skill.library.available": SkillLibraryAvailableEvent;
+  "life.research.second_reading": LifeResearchSecondReadingEvent;
+  "life.letter.written": LifeLetterWrittenEvent;
   "operator_alert": OperatorAlertEvent;
 }
 

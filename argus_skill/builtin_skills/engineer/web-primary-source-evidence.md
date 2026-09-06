@@ -15,13 +15,13 @@ Classify the claim before choosing a source:
 
 Fetch the primary source before citing it. Copy bibliographic facts and short
 supporting excerpts from the source rather than model memory. Record the source
-URL and access date next to the claim in the working paper, configuration, or
-current `HANDOFF.md`, whichever directly consumes it.
+URL and access date next to the claim in the working paper, the configuration,
+or the research notes, `RESEARCH_NOTES.md`, whichever directly consumes it.
 
 Do not infer an algorithm from a launch page, turn an inference into a public
 fact, or treat repository absence as proof of a hidden implementation. When a
-material source cannot be resolved, keep the uncertainty explicit and surface
-it to Reviewer.
+material source cannot be resolved, keep the uncertainty explicit and raise it
+with the Reviewer.
 
 Do not create a separate source database, evidence report, or duplicate
 provenance file solely to prove that web research occurred.

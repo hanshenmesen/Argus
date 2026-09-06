@@ -104,6 +104,7 @@ def test_direct_idea_only_research_completes_without_advancing(tmp_path) -> None
     assert decision.target_stage == "idea"
     assert _state(state_root)["current_stage"] == "idea"
     assert _state(state_root)["stages"]["idea"]["status"] == "done"
+    assert not (workdir / "RESEARCH_NOTES.md").exists()
     assert not (workdir / "HANDOFF.md").exists()
 
 

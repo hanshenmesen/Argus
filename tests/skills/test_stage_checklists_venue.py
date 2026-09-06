@@ -47,8 +47,8 @@ def test_explicit_venue_uses_the_same_single_handoff_contract(
         role="reviewer",
         project_root=_project(tmp_path, "AAAI"),
     )
-    assert "paper.handoff" in paper
-    assert "HANDOFF.md" in paper
+    assert "paper.notes" in paper
+    assert "RESEARCH_NOTES.md" in paper
     assert "VENUE_PROFILE" not in paper
 
 

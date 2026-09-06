@@ -130,16 +130,16 @@ def needs_venue_research(workdir: Any) -> bool:
 
 def _build_prompt(venue: str) -> str:
     return (
-        "The operator/project explicitly selected this publication venue: "
+        "The operator or project has explicitly selected this publication venue: "
         f"{venue}. Verify only this venue's current submission cycle, deadline, "
         "scope, and official format. Do not search for or select alternatives "
         "unless the operator explicitly requested venue discovery.\n\n"
-        "Using LIVE web_search, find the venue's OFFICIAL submission "
-        "instructions / author kit (call-for-papers, author guidelines, or the "
-        "official LaTeX template). Extract its format facts — do NOT guess from "
+        "Use live web_search to find the venue's official submission "
+        "instructions or author kit (call-for-papers, author guidelines, or the "
+        "official LaTeX template). Read the format requirements there — do not guess from "
         "memory; use the official page.\n\n"
-        "Then WRITE research/VENUE_PROFILE.json (a flat JSON object) with these "
-        "fields (fill every format-critical one; omit a field to accept its "
+        "Then write research/VENUE_PROFILE.json as a flat JSON object with these "
+        "fields (fill every field that determines the format; omit a field to use its "
         "default):\n"
         '  key (UPPERCASE, e.g. "NEURIPS"), display_name (e.g. "NeurIPS 2026"),\n'
         "  body_page_limit (int), conclusion_max_page (= body_page_limit), "
@@ -160,14 +160,14 @@ def _build_prompt(venue: str) -> str:
         "Also update only the descriptive `target_venue` field in "
         ".argus/PIPELINE_STATE.json to the selected profile key. Do not edit "
         "`current_stage` or any stage status.\n\n"
-        "Validate it loads:\n"
+        "Check that the profile loads:\n"
         "  python -c \"from argus_skill.verticals.research.venue_profiles import "
         "resolve_venue_profile as r; p=r('.'); print(p.key, p.page_budget_line())\"\n\n"
         "Do not create any other venue report or template-source file. If a "
         "fact cannot be confirmed from official sources, leave that field at "
         "its default rather than guessing; if the explicit venue cannot be "
-        "verified at all, do not fabricate a profile — report the blocker in "
-        "your final message. You are done only when the venue is source-backed "
+        "verified at all, do not fabricate a profile — explain what prevents verification in "
+        "your final message. The work is complete only when the venue is supported by sources "
         "and the profile loads."
     )
 

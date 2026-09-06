@@ -119,7 +119,7 @@ def test_reviewer_rejects_retroactive_audit_reconstruction(monkeypatch) -> None:
 
     assert "operator mutation freeze or append-only requirement" in p
     assert "compare directive order with file-write, install, and command events" in p
-    assert "cannot make an overwritten or reconstructed ledger contemporaneous" in p
+    assert 'cannot make an overwritten or reconstructed record contemporaneous' in p
     assert "unless the cited objective text states it" in p
     assert "missing byte-faithful command" in p
 

@@ -1,16 +1,16 @@
 ---
-name: "Venue Academic Language Review"
-description: "Read-only academic-language pass using the selected venue's current conventions."
+name: "Reading the paper's argument and language"
+description: "Read the paper's argument and academic language against the selected venue's current conventions, without editing it."
 ---
 
-# Venue Academic Language Review
+# Reading the paper's argument and language
 
 Use this for the reader-facing pass in Review. Under `cold_read`, read only the
 rendered PDF supplied in the isolated workspace; do not search for manuscript
-source, HANDOFF, REVIEW, code, or review history. During the later integrated
-review, source and venue guidance may be inspected under that operation's wider
-contract. Do not edit files and do not create a separate language-review
-artifact.
+source, the research notes, REVIEW, code, or review history. During the later
+integrated review, source and venue guidance may be inspected under that
+operation's wider terms. Do not edit files and do not create a separate
+language-review file.
 
 ## Inspect
 
@@ -25,9 +25,10 @@ artifact.
   fine when they serve the argument at that venue.
 - Object when a claim outruns its evidence, when a number's meaning is unclear
   from its context, when hedging or limitation lists stand in for a clear
-  statement, or when internal workflow vocabulary (bounded, certified, gate,
-  artifact, mission, round, handoff, validator, audit) appears. Do not ask for
-  more hedging than the evidence requires, and do not ask for a number where a
+  statement, or when terms for internal task limits, declarations of readiness,
+  stage decisions, generated outputs, missions, rounds, transfers between roles,
+  checking tools, or inspections appear. Do not ask for more hedging than the
+  evidence requires, and do not ask for a number where a
   plain statement is clearer.
 - Read as a stranger to the project. Can the argument be recovered from the
   headings, the takeaways and the captions alone? Does the introduction promise
@@ -47,7 +48,7 @@ artifact.
   `engineer/references/paper-writing-craft.md` describes the repairs; name the
   passage and the obstacle, not a count.
 - Allow a headline number to recur when it serves a different section role.
-  Reject repeated matrix recital, not repetition by mechanical count.
+  Object to repeated matrix recital; do not judge repetition by a mechanical count.
 - Require Methods, tables, and appendices to retain complete definitions and
   result coverage while prose explains the comparisons that change the current
   inference.
@@ -68,8 +69,12 @@ artifact.
 For each required repair, return the passage or PDF location, the concrete
 obstacle to understanding or inference, and the smallest repair goal. A
 report-like tone or a preference for different wording alone is insufficient.
-Example wording is optional; the Engineer need not copy it verbatim. Return
-pass when no substantive reader-facing defect remains; do not manufacture
-revisions to demonstrate review effort. The single Engineer resolves findings
+Example wording is optional; the Engineer need not copy it verbatim. Find that
+the language holds when no substantive reader-facing defect remains, and return
+the corresponding result:
+
+`pass`
+
+Do not manufacture revisions to demonstrate review effort. The single Engineer resolves findings
 with the scientific-loss and visual findings. The integrated Reviewer closes
 resolved issues and records the final result only in `paper/REVIEW.md`.

@@ -48,7 +48,9 @@ def test_no_bibliography_count_floor_in_skills(relative) -> None:
 
 def test_reference_count_is_not_a_hard_blocker() -> None:
     text = _read("reviewer/academic-paper-peer-review-benchmark.md")
-    blockers = text.split("## Hard blockers", 1)[1].split("##", 1)[0]
+    blockers = text.split(
+        "## Problems that mean the paper does not hold yet", 1
+    )[1].split("##", 1)[0]
 
     assert "BibTeX entries" not in blockers
     assert "cited keys" not in blockers

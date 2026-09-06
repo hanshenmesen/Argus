@@ -1,26 +1,26 @@
 ---
-name: "Research Paper Playbook"
-description: "The single authoritative playbook for writing a complete, compilable, venue-ready paper from confirmed positive evidence."
+name: "Writing the research paper"
+description: "The guide that defines Paper: write a complete paper from confirmed positive evidence, compile it, and prepare it for the selected venue."
 ---
 
-# Research Paper Playbook
+# Writing the research paper
 
-## Outcome
+## What the paper should accomplish
 
 Produce a complete manuscript that argues the strongest contribution the
 confirmed Experiment evidence supports. Aim for the clarity, confidence,
 technical density, and visual finish of the strongest papers in the selected
 venue.
 
-The paper is an argument, not an experiment report. Its organizing unit is a
+The paper is an argument, not an experiment report. It is organized around a
 scientific claim: why the problem matters, what insight changes the solution,
 how the mechanism follows, what evidence distinguishes it from alternatives,
 and what the result changes for the field. Experiments support that chain; they
 do not become the narrative.
 
-## Work
+## How to build the argument
 
-1. Read `HANDOFF.md`, the selected venue profile, and the current official
+1. Read the research notes in `RESEARCH_NOTES.md`, the selected venue profile, and the current official
    author kit. Before prose, classify the complete evidence as headline,
    mechanism, disambiguating control, scope-changing, or completeness evidence;
    assign each item a canonical full location and any repeat locations.
@@ -35,7 +35,7 @@ do not become the narrative.
    each cluster, then Method, then the final introduction from a blank page
    once the results stand, then Related Work, Conclusion, and the abstract
    last. State supported contributions plainly. Do not narrate experiment
-   chronology, process compliance, internal uncertainty management, or
+   chronology, assurances that procedures were followed, internal uncertainty management, or
    defensive caveat chains. `engineer/references/paper-writing-craft.md` is
    the craft reference for every sentence-, paragraph- and section-level
    choice.
@@ -80,31 +80,33 @@ were not collected from participants. A study that did not run is outside the
 claims and may be one sentence of future work.
 
 A direct request for part of a paper (figures, a section, a revision) produces
-exactly that deliverable with this Playbook's figure and writing skills and
+exactly the requested work with this guide's figure and writing skills and
 stops after independent review. It does not require a full manuscript, a venue
-profile, or HANDOFF.md.
+profile, or research notes.
 
-Paper performs normal authoring checks, not a separate scientific, visual,
-language, or whole-paper acceptance. Those happen together in Review.
+Paper includes the normal checks needed while writing. The scientific, visual,
+language, and whole-paper judgments are made together in Review; do not make
+them separately in Paper.
 Limitations remain accurate and specific, but they do not dominate the title,
 abstract, introduction, or conclusion when the evidence supports a strong claim.
 
-## Completion
+## When the draft is ready
 
 The full paper, bibliography, figures, tables, includes, and rendered output are
 present and mutually consistent. Manager alone advances the stage.
 
-## Handoff
+## Research notes
 
-Replace project-root `HANDOFF.md` with `# HANDOFF — PAPER`, containing only the
-current manuscript location, central thesis, evidence roles and placements,
+Replace the research notes at project-root `RESEARCH_NOTES.md`, beginning with
+`# Research notes — Paper stage`. Include only the current manuscript location,
+central thesis, evidence roles and placements,
 venue, and any known issue Review must inspect. Do not create another drafting
 or format report.
 
-## Progressive disclosure
+## When another skill would help
 
-Start with this Playbook. Open one specialist Skill only for the current paper
-task, then return here. Do not preload the table.
+Start with this guide. Open one specialist skill only for the current paper
+task, then return here. Do not read all the sources in advance.
 
 | When needed | Open | Use it for |
 |---|---|---|
@@ -112,7 +114,7 @@ task, then return here. Do not preload the table.
 | The argument or full draft must be written | `engineer/venue-paper-drafting.md` | Draft under the selected author kit, in the order strong papers are written |
 | A passage, section or the abstract needs to read like a strong paper | `engineer/references/paper-writing-craft.md` | Introduction moves, results by claims with takeaways, numbers and precision, confidence without defensive patterns, compression |
 | Strong paper structure or visual calibration is needed | `engineer/paper-exemplar-pdf-learning.md` | Study open-access Oral, Outstanding, or Best Papers |
-| A material citation is uncertain | `engineer/citation-audit.md` | Resolve and repair it from primary sources |
+| A material citation is uncertain | `engineer/citation-check.md` | Resolve and repair it from primary sources |
 | Data results need paper figures | `engineer/paper-chart-styling.md` | Produce consistent publication-size data charts |
 | A method pipeline or architecture overview is needed | `engineer/research-svg-pipeline.md` | Draw a compact horizontal SVG from code and paper, with Times New Roman |
 | A conceptual or method figure is needed | `engineer/research-visualization-router.md` | Select the faithful rendering route |

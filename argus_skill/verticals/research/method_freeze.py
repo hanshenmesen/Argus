@@ -116,19 +116,19 @@ def research_review_prompt_block(project_root: Path | str) -> str:
         else {}
     )
     lines = [
-        "## Declared method freeze (process-written facts)",
-        f"- method identity: {method.get('identity') or '<missing>'}",
-        f"- method description: {method.get('description') or '<missing>'}",
-        "- frozen at "
+        "## The method fixed for confirmation, as recorded by the research tools",
+        f"- The declared method is {method.get('identity') or '<missing>'}",
+        f"- The recorded description is {method.get('description') or '<missing>'}",
+        "- The method was fixed at "
         + str(freeze.get("frozen_at") or "<missing>")
         + " against the then-current manuscript",
-        f"- planned confirmation command: {planned.get('command') or '<missing>'}",
-        "- planned confirmation data split: "
+        f"- The planned confirmation command is {planned.get('command') or '<missing>'}",
+        "- The planned confirmation data split is "
         + str(planned.get("data_split_identity") or "<missing>"),
     ]
     frozen_manuscript = str(freeze.get("manuscript_sha256_at_freeze") or "")
     if frozen_manuscript != manuscript_sha256(root):
-        lines.append("- the manuscript has changed since the freeze")
+        lines.append("- The manuscript has changed since the method was fixed")
     try:
         confirmation = json.loads(
             (root / CONFIRMATION_RESULT_PATH).read_text(encoding="utf-8")
@@ -136,15 +136,15 @@ def research_review_prompt_block(project_root: Path | str) -> str:
     except (OSError, UnicodeError, json.JSONDecodeError):
         confirmation = None
     if isinstance(confirmation, dict):
-        lines.append("- confirmation result: " + json.dumps(
+        lines.append("- The recorded confirmation result is: " + json.dumps(
             confirmation, ensure_ascii=False, sort_keys=True
         ))
     else:
-        lines.append("- confirmation result: not recorded")
+        lines.append("- No confirmation result has been recorded")
     lines.extend([
-        "Headline numbers may change only from this declared confirmation run. ",
-        "Further exploration variants belong to the next paper, not this manuscript.",
-        "As part of ordinary review judgment, compare every headline number with "
+        "Only results from this declared confirmation run may change the headline numbers. ",
+        "Further exploratory variants belong to the next paper, not this manuscript.",
+        "As part of your review, compare every headline number with "
         "research/confirmation_result.json and report any inconsistency.",
     ])
     return "\n".join(lines) + "\n\n"

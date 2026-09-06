@@ -42,6 +42,7 @@ class _Outcome:
     final_review_reason: str = ""
     final_message: str = ""
     summary: str = ""
+    final_output: str = ""
 
 
 class _FixedOutcomeRunner:
@@ -535,6 +536,80 @@ def test_research_result_survives_runtime_and_mission_event(tmp_path) -> None:
     assert _completed_event(sink)["summary"] == (
         "Wrote the survey and verified every cited source."
     )
+
+
+def test_long_engineer_handoff_survives_compact_mission_summary(tmp_path) -> None:
+    from argus_skill.core.mission_view import load_mission_view, update_mission_view_event
+
+    body = "# Complete report\n\n" + "\n\n".join(
+        f"Section {index}: verified result with supporting detail."
+        for index in range(80)
+    )
+    wire_message = (
+        f"{body}\n\n"
+        "Decision:\n"
+        "MILESTONE_STATUS=done\n"
+        "NEXT_OWNER=reviewer\n"
+        "OPERATOR_QUESTION=none\n"
+        "OPERATOR_OPTIONS=none"
+    )
+    loop_outcome = LoopOutcome(
+        status="done",
+        rounds=[
+            RoundRecord(
+                round_index=1,
+                engineer_message=wire_message,
+                engineer_exit_code=0,
+                review=ReviewDecision(
+                    status="done",
+                    reason="The report is complete.",
+                    next_action="",
+                ),
+            )
+        ],
+        final_message=wire_message,
+        reason="",
+        workdir=str(tmp_path),
+    )
+    execute_state = _ExecuteState()
+    execute_state.outcome = loop_outcome
+    execute_state.effective_status = "done"
+    runtime_outcome = _SkillLoopRunner.__new__(
+        _SkillLoopRunner
+    )._build_execute_outcome(execute_state)
+    supervisor, sink = _make_supervisor(tmp_path, runtime_outcome)
+    supervisor.memory.backlog.add(
+        BacklogItem.new(title="long report", objective="deliver the full report")
+    )
+
+    supervisor.tick()
+
+    assert len(runtime_outcome.summary) == 1200
+    assert runtime_outcome.final_output == body
+    assert _completed_event(sink)["summary"] == runtime_outcome.summary
+    assert _completed_event(sink)["final_output"] == body
+    for event in sink.events:
+        update_mission_view_event(tmp_path / "projected", event)
+    mission = load_mission_view(tmp_path / "projected")["mission"]
+    assert mission["summary"] == runtime_outcome.summary
+    assert mission["final_output"] == body
+
+
+def test_completion_does_not_invent_engineer_output_from_review_or_runtime_text(tmp_path) -> None:
+    supervisor, sink = _make_supervisor(
+        tmp_path,
+        _Outcome(
+            success=False, status="blocked",
+            final_message="Runtime blocked execution.",
+            final_review_reason="Reviewer needs more evidence.",
+        ),
+    )
+    supervisor.memory.backlog.add(
+        BacklogItem.new(title="blocked task", objective="deliver a report"),
+    )
+    supervisor.tick()
+    assert _completed_event(sink)["summary"] == "Reviewer needs more evidence."
+    assert _completed_event(sink)["final_output"] == ""
 
 
 def test_daemon_shutdown_is_persisted_as_recoverable_pause(tmp_path) -> None:

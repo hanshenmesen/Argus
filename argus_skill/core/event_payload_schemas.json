@@ -185,6 +185,7 @@
         "scope": {"type": "string"},
         "status": {"type": "string", "minLength": 1},
         "summary": {"type": "string"},
+        "final_output": {"type": "string"},
         "outcome_class": {
           "type": "string",
           "enum": [
@@ -1083,6 +1084,8 @@
     "venue.research.started": {"version": 1, "properties": {"text": {"type": "string"}}},
     "venue.research.completed": {"version": 1, "properties": {"ok": {"type": "boolean"}, "text": {"type": "string"}}},
     "skill.library.available": {"version": 1, "properties": {"role": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "own_paths": {"type": "array", "items": {"type": "string"}}, "reference_paths": {"type": "array", "items": {"type": "string"}}, "required_paths": {"type": "array", "items": {"type": "string"}}, "precedence": {"type": "array", "items": {"type": "string"}}, "discovery": {"type": "string"}, "text": {"type": "string"}}},
+    "life.research.second_reading": {"version": 1, "properties": {"stage": {"type": "string"}, "refuted": {"type": "string"}, "supported": {"type": "string"}, "next": {"type": "string"}, "text": {"type": "string"}, "notes_path": {"type": "string"}, "signals": {"type": "integer", "minimum": 0}, "agent_layer": {"type": "string"}}},
+    "life.letter.written": {"version": 1, "properties": {"stage": {"type": "string"}, "text": {"type": "string"}, "message_id": {"type": "string"}, "letters_path": {"type": "string"}, "hours_since_last": {"type": "number", "minimum": 0}, "agent_layer": {"type": "string"}}},
     "operator_alert": {"version": 1, "properties": {"text": {"type": "string"}, "reason": {"type": "string"}, "operator_alert": {"type": "boolean", "const": true}}}
   }
 }

@@ -72,12 +72,12 @@ def test_manager_prompt_separates_capability_from_execution_mode() -> None:
         verticals_with_purpose=VERTICAL_PURPOSES,
     )
 
-    assert "capability VERTICAL and independent execution WORKFLOW" in prompt
-    assert "`direct` for one coherent Engineer work package" in prompt
-    assert "coupled output files" in prompt
-    assert "Reviewer is Host-invoked after Engineer" in prompt
+    assert 'VERTICAL and, independently, WORKFLOW' in prompt
+    assert '`direct` for one coherent Engineer task' in prompt
+    assert 'related output files' in prompt
+    assert 'Host invokes Reviewer after Engineer' in prompt
     assert "no task work or Live View" in prompt
-    assert "Omit `execution_task` for a standalone existing route" in prompt
+    assert 'omit it for a standalone existing route' in prompt
 
 
 def test_manager_prompt_routes_short_repair_to_software_direct() -> None:
@@ -87,7 +87,7 @@ def test_manager_prompt_routes_short_repair_to_software_direct() -> None:
     )
 
     assert "software" in prompt
-    assert "`direct` for one coherent Engineer work package" in prompt
+    assert '`direct` for one coherent Engineer task' in prompt
 
 
 def test_direct_reviewer_receives_skill_library_paths(tmp_path) -> None:
@@ -143,7 +143,7 @@ def test_direct_reviewer_uses_contract_not_stage_pipeline(tmp_path) -> None:
     )
 
     assert reviewer.last_prompt_block_stats["stage_checklist"]["chars"] == 0
-    assert "done` closes a direct task" in prompt
+    assert 'done` when a direct task meets its requirements and decisive check' in prompt
     assert "## Upstream defects" not in prompt
 
 

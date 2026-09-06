@@ -1,15 +1,15 @@
 ---
-name: "Venue Format Preflight"
+name: "Preparing the draft for the venue"
 description: "Compile a complete draft against the selected venue's official author kit before Review."
 ---
 
-# Venue Format Preflight
+# Preparing the draft for the venue
 
 Use this in Paper only for compilation and official venue structure. Resolve the
-selected venue from pipeline state and verify its current official author kit;
+selected venue from the project state and verify its current official author kit;
 do not infer rules from another conference.
 
-## Checks
+## What the draft must include and respect
 
 - Use the official document class, style files, review mode, paper size,
   columns, fonts, bibliography behavior, and anonymity rules.
@@ -31,5 +31,5 @@ latexmk -pdf -interaction=nonstopmode -halt-on-error \
 ```
 
 Fix compilation and venue-structure errors until the rendered paper and build
-log are current. Create no preflight report. Proceed to Review for the parallel
+log are current. Do not create a separate report about these preparations. Proceed to Review for the parallel
 scientific, visual, and language inspections.

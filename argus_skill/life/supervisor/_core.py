@@ -93,12 +93,14 @@ from ._constants import (
 )
 from ._evolution import EvolutionMixin
 from ._idle_cycle import IdleCycleMixin, _idle_exit_seconds  # noqa: F401
+from ._letters import LettersMixin
 from ._lifecycle import LifecycleMixin
 from ._mission_execution import MissionExecutionMixin
 from ._planner_orchestration import PlannerOrchestrationMixin
 from ._planner_rendering import PlannerRenderingMixin
 from ._planning_context import PlanningContextMixin
 from ._planning_cycle import PlanningCycleMixin
+from ._second_reading import SecondReadingMixin
 from .pending_notify import should_report_pending_wait
 
 log = logging.getLogger(__name__)
@@ -166,6 +168,8 @@ _PLAN_PROJECT_DONE = "project_done"
 
 class LifeSupervisor(
     EvolutionMixin,
+    LettersMixin,
+    SecondReadingMixin,
     IdleCycleMixin,
     MissionExecutionMixin,
     LifecycleMixin,
@@ -898,6 +902,8 @@ class LifeSupervisor(
                     self._enter_pause_backoff()
                 else:
                     self._enter_idle_backoff()
+                # Long waits are when the operator most wants a word.
+                self._maybe_write_letter()
                 if outcome.get("status") == "claim_lost":
                     # The backoff only tells the daemon how long to sleep after
                     # run() returns; the loop would otherwise keep spinning
@@ -942,7 +948,38 @@ class LifeSupervisor(
                     self._emit_status(gate_reason)
                     stopped_by = gate_reason
                     break
-                planned = self._plan_next_work(revision_request=outcome)
+                revision = self._maybe_second_reading(outcome) or outcome
+                planned = self._plan_next_work(revision_request=revision)
+                if planned is True:
+                    continue
+                if planned == "daemon_handoff":
+                    stopped_by = "daemon_handoff"
+                elif planned == "planner_retry":
+                    stopped_by = "planner_retry"
+                elif planned == _PLAN_AWAITING:
+                    stopped_by = _PLAN_AWAITING
+                elif planned == _PLAN_TERMINAL_IDLE:
+                    stopped_by = _PLAN_TERMINAL_IDLE
+                else:
+                    stopped_by = "planner_error"
+                break
+            # A mission can end well and still leave the Reviewer doubting the
+            # line of work it belongs to. Repeated doubt earns a fresh reading
+            # of the evidence and a re-plan around what it supports, without
+            # waiting for a formal request to replace the plan.
+            reading = self._maybe_second_reading(outcome)
+            if reading is not None:
+                gate_reason = self._planner_cycle_gate_reason()
+                if gate_reason:
+                    self._emit({
+                        "type": "life.planner.deferred",
+                        "reason": gate_reason,
+                        "agent_layer": "planner",
+                    })
+                    self._emit_status(gate_reason)
+                    stopped_by = gate_reason
+                    break
+                planned = self._plan_next_work(revision_request=reading)
                 if planned is True:
                     continue
                 if planned == "daemon_handoff":
@@ -1562,6 +1599,8 @@ class LifeSupervisor(
                 and event.get("certification_recovered") is not True
             ):
                 self._publish_mission_completion_message(event)
+                # A mission boundary is a natural moment to write home.
+                self._maybe_write_letter()
             elif (
                 event_type == EventType.LIFE_PLANNER_VERDICT
                 and event.get("project_done") is True

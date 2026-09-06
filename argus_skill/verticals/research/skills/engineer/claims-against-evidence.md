@@ -1,9 +1,9 @@
 ---
-name: "Claim Check"
-description: "Check material paper claims against their real sources and repair unsupported or overstated prose without creating a parallel audit bundle."
+name: "Reading claims against the evidence"
+description: "Check material paper claims against their real sources and repair unsupported or overstated prose without creating a separate set of inspection records."
 ---
 
-# Claim Check
+# Reading claims against the evidence
 
 ## When to use
 
@@ -18,7 +18,7 @@ scope claims that may have drifted from the current experiments or literature.
 3. For high-risk numeric, comparative, causal, or scope claims, use a
    **fresh-context** check: give an independent reviewer only the claim sentence
    and the relevant raw source excerpt. Use one reviewer thread per claim and
-   require a `MATCH / MISMATCH / MISSING` verdict for each assertion. Do not give
+   require a finding for each assertion, using `MATCH / MISMATCH / MISSING`. Do not give
    it the engineer's narrative or prior conclusion.
 4. Decide whether the wording is supported, too broad, stale, contradicted, or
    missing a citation.
@@ -34,11 +34,11 @@ scope claims that may have drifted from the current experiments or literature.
 6. Recompile and reread the affected paragraph, table, or caption as a paper
    reviewer would.
 
-Check every material claim, but do not create a claim map, audit table, graph,
+Check every material claim, but do not create a claim map, inspection table, graph,
 gap list, or parallel report merely to record that the check happened. Existing
 files may be read as historical notes; they are not completion conditions.
 
-## Handoff
+## Explaining what changed
 
 Summarize the claims changed and any unresolved scientific gap in ordinary prose.
 Keep raw data and analysis outputs intact for later inspection.

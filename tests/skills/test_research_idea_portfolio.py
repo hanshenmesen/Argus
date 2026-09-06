@@ -187,10 +187,10 @@ def test_team_local_owner_ids_and_compact_handoff(tmp_path: Path) -> None:
     selected = idea_portfolio_selection(tmp_path)
     assert selected is not None
     assert "winner_detail" not in selected
-    handoff = (tmp_path / "HANDOFF.md").read_text(encoding="utf-8")
-    assert handoff.startswith("# HANDOFF — IDEA\n")
-    assert handoff.count("\n- **route-") == 11
-    assert ("evidence " * 4000).strip() in handoff
+    notes = (tmp_path / "RESEARCH_NOTES.md").read_text(encoding="utf-8")
+    assert notes.startswith("# Research notes — Idea stage\n")
+    assert notes.count("\n- **route-") == 11
+    assert ("evidence " * 4000).strip() in notes
 
 
 def test_first_valid_selection_remains_authoritative(tmp_path: Path) -> None:

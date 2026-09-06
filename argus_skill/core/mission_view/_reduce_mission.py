@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from ...life.mission_outcome import mission_outcome_class, mission_outcome_dimensions
 from ..event_catalog import EventType
+from ..role_reply import strip_named_lines
 from ._reduce_helpers import (
     _PROGRESS_LABELS,
     _integer,
@@ -81,6 +82,7 @@ def reduce_mission_lifecycle_event(
             "title": _text(event, "title", 240),
             "objective": _text(event, "objective", 2000),
             "summary": "",
+            "final_output": "",
             "status": "working",
             "started_at": ts,
             "completed_at": None,
@@ -112,11 +114,21 @@ def reduce_mission_lifecycle_event(
             event,
             event_type,
         )
+        final_output = (
+            str(event.get("final_output") or "").strip()
+            if "final_output" in event
+            else mission.get("final_output", "")
+            if _text(event, "item_id") == mission.get("id")
+            and mission.get("started_at") is not None
+            and mission.get("completed_at") in {None, ts}
+            else ""
+        )
         mission.update({
             "id": _text(event, "item_id") or mission.get("id", ""),
             "title": _text(event, "title", 240) or mission.get("title", ""),
             "objective": _text(event, "objective", 2000) or mission.get("objective", ""),
             "summary": _text(event, "summary", 1200),
+            "final_output": final_output,
             "status": mission_status,
             "completed_at": ts,
         })
@@ -250,6 +262,26 @@ def reduce_round_event(
         kind = _text(event, "kind")
         label = _PROGRESS_LABELS.get(kind, "Working")
         _set_role(view, role, "active", label, ts)
+        if (
+            role == "engineer"
+            and kind in {"assistant_message", "agent_message", "message"}
+            and event.get("final_delivery") is True
+            and mission.get("started_at") is not None
+            and mission.get("completed_at") is None
+            and ts >= mission["started_at"]
+            and (not event.get("item_id") or event["item_id"] == mission.get("id"))
+        ):
+            candidate = strip_named_lines(
+                str(event.get("text") or ""),
+                (
+                    "MILESTONE_STATUS",
+                    "NEXT_OWNER",
+                    "OPERATOR_QUESTION",
+                    "OPERATOR_OPTIONS",
+                    "ROLE_DECISION",
+                ),
+            ).strip()
+            mission["final_output"] = candidate
         detail = (
             _text(event, "action_summary", 4000)
             or _text(event, "text", 4000)

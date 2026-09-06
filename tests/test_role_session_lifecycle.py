@@ -148,7 +148,7 @@ def test_fresh_policy_repeats_task_contract_on_continuation_round(
         if label.startswith("engineer-")
     ]
     assert len(engineer_prompts) == 2
-    assert all("## Effective task contract" in prompt for prompt in engineer_prompts)
+    assert all('## Task authority' in prompt for prompt in engineer_prompts)
     assert all(
         "implement the contract-preserving change" in prompt
         for prompt in engineer_prompts

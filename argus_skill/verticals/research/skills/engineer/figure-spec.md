@@ -1,19 +1,19 @@
 ---
-name: "Figure Spec (deterministic SVG)"
-description: "After the Research Visualization Router selects a simple exact-topology route, generate deterministic editable SVG architecture, workflow, pipeline, or audit-cascade diagrams from structured JSON. Do not select FigureSpec directly for visually rich paper conceptual/method figures; compare installed PPT Master and HTML/SVG routes first."
+name: "FigureSpec: drawing exact diagrams from JSON"
+description: "After using Choosing how to draw a research figure to select a simple diagram with exact connections, generate deterministic editable SVG diagrams of architectures, workflows, method pipelines, or successive reviews from structured JSON. Do not select FigureSpec directly for visually rich conceptual or method figures in a paper; compare installed PPT Master and HTML/SVG routes first."
 ---
 
-# Figure Spec — deterministic JSON → SVG renderer
+# FigureSpec: drawing exact diagrams from JSON
 
 > Adapted from ARIS `figure-spec` skill (MIT, © 2026 wanshuiyin).
 > Renderer script copied verbatim into `figure_spec_scripts/` beside this skill.
 
 ## When to use this renderer
 
-Use FigureSpec when architecture, workflow, audit cascade, ER/dependency graphs,
-labels, colors, and arrow targets must be exact and editable. The Research
-Visualization Router decides whether FigureSpec, browser SVG, diagrams, PPT
-Master, data-chart tooling, or image-2 best fits a paper figure.
+Use FigureSpec when architecture, workflow, successive reviews, ER/dependency graphs,
+labels, colors, and arrow targets must be exact and editable. Use *Choosing how
+to draw a research figure* to decide whether FigureSpec, browser SVG, diagrams,
+PPT Master, data-chart tooling, or image-2 best fits a paper figure.
 
 The two skills are complementary; both can live in the same paper.
 Data/metric/result plots stay with matplotlib (the existing
@@ -31,7 +31,7 @@ Data/metric/result plots stay with matplotlib (the existing
 ## Tool location
 
 Renderer: `figure_spec_scripts/figure_renderer.py`, shipped beside this
-skill. Resolve it rather than guessing a package path:
+skill. Resolve its location rather than guessing its path within the Python installation:
 
 ```bash
 RENDER=$(find "$ARGUS_SKILL_HOME" . -name figure_renderer.py \
@@ -41,7 +41,7 @@ python figure_renderer.py validate spec.json
 python figure_renderer.py schema
 ```
 
-## Workflow
+## How to draw the figure
 
 ### Step 1 — understand the diagram goal
 
@@ -55,7 +55,7 @@ The schema:
 
 ```json
 {
-  "title": "Argus Research Factory Architecture",
+  "title": "Argus Research Architecture",
   "canvas": {"width": 800, "height": 500},
   "style": {
     "font_family": "Arial",
@@ -73,11 +73,11 @@ The schema:
   "edges": [
     {"from": "planner", "to": "engineer", "label": "task"},
     {"from": "engineer", "to": "reviewer", "label": "evidence"},
-    {"from": "reviewer", "to": "planner", "label": "verdict",
+    {"from": "reviewer", "to": "planner", "label": "judgment",
      "style": "dashed"}
   ],
   "groups": [
-    {"id": "harness", "label": "Harness (dumb pipes)",
+    {"id": "harness", "label": "Execution framework",
      "node_ids": ["planner"], "fill": "#F3F4F6", "stroke": "#9CA3AF"}
   ]
 }
@@ -87,14 +87,14 @@ Allowed: `shape ∈ {rect, rounded, circle, diamond, ellipse}`,
 `style ∈ {solid, dashed, dotted}`. Nodes and groups use explicit `fill` and
 `stroke` colors.
 
-### Step 3 — render and validate
+### Step 3 — render and check the specification
 
 ```bash
 python figure_renderer.py validate spec.json   # schema-only check
 python figure_renderer.py render spec.json --output paper/figures/arch.svg
 ```
 
-If validation fails the renderer prints structured errors with
+If the specification fails a check, the renderer prints structured errors with
 JSON-pointer paths so the engineer can fix the spec directly.
 
 ### Step 4 — visual review
@@ -108,10 +108,10 @@ Open the SVG. Check:
 If any of these fail, edit the spec (NOT the SVG — the SVG is the
 output, the spec is the source of truth) and re-render.
 
-### Final review ownership
+### Who makes the final judgment
 
 Do not launch a separate Reviewer from Paper. The checks above are ordinary
-engineering validation needed to produce a complete compilable draft. During
+engineering checks needed to produce a complete compilable draft. During
 Review, the assigned read-only visual pass inspects the rendered SVG at final
 paper size together with the spec and manuscript, and the integrated Reviewer
 decides whether the repaired paper is publication-ready.
@@ -125,7 +125,7 @@ Common spec shapes that work well — copy then adapt:
 - **Hub-and-spoke** — one central node + radial edges
 - **Pipeline with feedback** — left-to-right edges plus one dashed
   return edge
-- **Audit cascade** — vertical stack of nodes, each with a "verdict"
+- **Successive reviews** — vertical stack of nodes, each with a "judgment"
   edge to a side column
 
 The renderer clips edge endpoints to source and target boundaries, positions
@@ -137,7 +137,7 @@ Master. Always inspect the final render for connector penetration and overlap.
 ## Anti-patterns
 
 - ❌ Using it automatically for every teaser/conceptual figure — first route by
-  semantics and available capability through Research Visualization Router.
+  what the figure expresses and the available tools using *Choosing how to draw a research figure*.
 - ❌ Hand-editing the SVG — your changes are lost the next time
   someone re-renders. Edit the spec.
 - ❌ Embedding arbitrary inline SVG / raster in a node — keep the spec abstract;
@@ -145,7 +145,7 @@ Master. Always inspect the final render for connector penetration and overlap.
 - ❌ Using this for data plots — matplotlib already covers that
   better
 
-## Output contract
+## Where the figure and its source belong
 
 - Renders to `paper/figures/<name>.svg`
 - Spec lives at `paper/figures/<name>.spec.json` so future re-renders

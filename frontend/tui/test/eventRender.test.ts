@@ -209,9 +209,8 @@ test('semantic renderer shadows current TUI with full-density policy and triaged
     'life.manager.intent.started': { text: 'classifying request…' },
     'life.manager.intent.failed': { text: 'routing failed · backend 401 Missing bearer (attempt 2) · raw: VerticalDecisionError: routing failed' },
     'life.phase.started': { text: 'entering implementation' },
-    // The old TUI leaks secrets and lags Python follow's complete handoff-field stripping.
+    // The old TUI leaks recognized credentials; the semantic core redacts them.
     'engineer.progress.secret-redaction': { text: 'using token <REDACTED:github-token>' },
-    'engineer.progress.handoff-fields': { text: 'Artifact complete.' },
     // These are semantic distinctions/events that the old whitelist currently loses.
     'life.planner.task_skipped.review-purchase-deferred': { text: 'review purchase deferred Purchase another paper review' },
     'life.planner.normalized': { text: 'normalized · removed duplicate planner task' },

@@ -1,13 +1,14 @@
 ---
-name: "Venue Paper Drafting"
-description: "Write the complete paper from the selected venue's author kit, in the order strong papers are actually written."
+name: "Writing for the selected venue"
+description: "Write the complete paper with the selected venue's author kit, in the order strong papers are written."
 ---
 
-# Venue Paper Drafting
+# Writing for the selected venue
 
 Use this only in Paper after Experiment clears the paper-entry bar. Read
-`HANDOFF.md`, direct evidence, the selected venue in pipeline state, and that
-venue's current official author kit. Read `references/paper-writing-craft.md`
+the research notes in `RESEARCH_NOTES.md`, direct evidence, the selected venue
+in the project state, and that venue's current official author kit.
+Read `references/paper-writing-craft.md`
 once before drafting and keep it open while revising; it is the how, this file
 is the order.
 
@@ -27,7 +28,7 @@ uncertain. Keep the complete method, baseline, control, adverse-result,
 uncertainty, and scope coverage in the paper; selection changes where evidence
 lives, never whether it is there.
 
-## 1. Architecture before prose
+## 1. Shape the argument before writing prose
 
 Write down, before any section:
 
@@ -44,9 +45,9 @@ the thesis; may recur where each location has a distinct job), **mechanism**
 **scope-changing** (changes the claim or its boundary), **completeness** (makes
 the comparison whole without changing the inference). Give each item a
 canonical full location; methods and tables keep complete definitions and
-matrices, prose selects what changes the inference. Appendix placement is
-packaging, not deletion. Adverse or null results that change the headline
-interpretation stay in the main reader path. These role words are planning
+matrices, prose selects what changes the inference. Moving evidence to the
+appendix changes its placement; it does not remove it. Adverse or null results
+that change the headline interpretation stay in the main reader path. These role words are planning
 vocabulary and never appear in the manuscript.
 
 ## 2. Write in this order
@@ -85,8 +86,9 @@ Include every intended claim-bearing experiment, figure, table, and citation.
   need.
 - Keep internal paths, role names, workflow language, and development history
   out of the manuscript. Evidence-role words (headline, mechanism, control,
-  scope, completeness) and workflow words (bounded, certified, gate, artifact,
-  mission, round, handoff, validator, audit) never appear in the paper.
+  scope, completeness) and terms for internal task limits, declarations of
+  readiness, stage decisions, generated outputs, missions, rounds, transfers
+  between roles, checking tools, and inspections never appear in the paper.
 
 ## 3. Figures and tables
 
@@ -105,6 +107,7 @@ every cell aloud.
 ## 4. Files and finish
 
 Maintain only `paper/main.tex`, its direct included sources, bibliography,
-figures, tables, rendered paper, and project-root `HANDOFF.md`. Compile under
-the official template, then enter Review. Scientific acceptance, strict visual
-inspection, and academic-language polishing happen only there.
+figures, tables, rendered paper, and the research notes at project-root
+`RESEARCH_NOTES.md`. Compile under the official template, then enter Review.
+Scientific judgment, strict visual inspection, and academic-language polishing
+happen only there.

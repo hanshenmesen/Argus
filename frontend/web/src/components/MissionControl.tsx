@@ -197,6 +197,10 @@ export function MissionControl({
   const objective = displayObjective(
     view.mission.objective || view.mission.title || t('mission.waiting'),
   );
+  const finalOutput = view.mission.final_output?.trim() || '';
+  const hasFullOutput = Boolean(
+    finalOutput && finalOutput !== view.mission.summary.trim(),
+  );
   const [replayIndex, setReplayIndex] = useState(Math.max(0, view.timeline.length - 1));
   const [selectedRole, setSelectedRole] = useState(view.active_role || 'planner');
   const [selectedTaskId, setSelectedTaskId] = useState(activeNode?.id || '');
@@ -313,7 +317,7 @@ export function MissionControl({
             <div className="mission-status-line__subtitle">{view.frontier.change}</div>
           ) : null}
         </div>
-        {view.mission.summary ? (
+        {view.mission.summary || hasFullOutput ? (
           <div className="mt-3 rounded border border-ok/25 bg-ok/5 px-3 py-2">
             <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ok">
               {t('mission.summary')}
@@ -323,6 +327,18 @@ export function MissionControl({
                 {view.mission.summary}
               </MarkdownContent>
             </div>
+            {hasFullOutput ? (
+              <details className="mt-2 border-t border-ok/20 pt-2 text-xs text-ink-dim">
+                <summary className="cursor-pointer font-medium text-ok hover:text-ink">
+                  {t('mission.showFullOutput')}
+                </summary>
+                <div className="mt-3 break-words text-sm leading-relaxed text-ink">
+                  <MarkdownContent artifacts={artifacts} onOpenArtifact={onOpenArtifact}>
+                    {finalOutput}
+                  </MarkdownContent>
+                </div>
+              </details>
+            ) : null}
           </div>
         ) : null}
         {delivery ? (

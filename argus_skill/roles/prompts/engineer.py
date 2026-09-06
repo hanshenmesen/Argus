@@ -12,6 +12,7 @@ from ..task_contract import (
     native_shell_summary,
 )
 from .types import RoleName, RolePromptRequest
+from .voice import RESEARCHER_VOICE
 
 MISSION = "mission"
 AUTHOR_DRAFT = "author_draft"
@@ -26,7 +27,7 @@ _POSIX_LONG_EXPERIMENT_RULE = (
     "--timeout <seconds> --command '<command>'`. Use `--mode supervised` only for "
     "semantic monitoring. Never `task(mode=\"background\")` or a session-owned "
     "background shell. Keep the `state=submitted`, `task_id`, `run_id` and "
-    "`check_with` receipt; on `state=discussing` answer with `reply_with` "
+    "`check_with` response; on `state=discussing` answer with `reply_with` "
     "and do not poll in the foreground. For accelerators, "
     "declare count, memory, duration, checkpointability and intent; never put "
     "nvidia-smi/GPU polling in the command. `waiting_resource` is healthy."
@@ -43,7 +44,7 @@ _WINDOWS_LONG_EXPERIMENT_RULE = (
     "--task-id '<id>' --mode direct --timeout '<seconds>' --command '<command>'`. "
     "Use `--mode supervised` only for semantic monitoring. Do not use "
     "`task(mode=\"background\")` or a session-owned background shell. Keep the "
-    "`state=submitted`, `task_id`, `run_id`, and `check_with` receipt. On "
+    "`state=submitted`, `task_id`, `run_id`, and `check_with` response. On "
     "`state=discussing`, answer with `reply_with`; do not poll in the foreground. For "
     "accelerators, declare count, memory, duration, checkpointability "
     "and intent; never put nvidia-smi/GPU polling in the command. "
@@ -67,7 +68,7 @@ def append_live_guidance(prompt: str, guidance: list[str]) -> str:
         + "\n\n## LIVE MANAGER / OPERATOR DIRECTIVES — HIGHEST PRIORITY\n"
         + "These directives may stop, narrow, or correct the current mission. "
         + "They do not silently broaden the task as assigned or cross its "
-        + "pipeline stage. If a directive materially replaces the current "
+        + "stage. If a directive materially replaces the current "
         + "objective, preserve state, update CHECKPOINT.md, and request "
         + "Reviewer/Planner replanning instead of executing the new scope here.\n"
         + "\n".join(f"- {item}" for item in guidance)
@@ -145,7 +146,7 @@ def _post_task_learning_section(
         "You have file and shell tools. After verification, if this task "
         "produced durable procedures that would change how future tasks are "
         "done, create or update the applicable Engineer Skills directly in the "
-        "project skill directory before you hand off.\n"
+        "project skill directory before you finish this task.\n"
         + rules
         + "\nDo not turn task-specific hypotheses, causal attributions, failed "
         "attempts, or replacement recommendations into Skills unless phase "
@@ -191,20 +192,21 @@ def build_mission_prompt(
         sections.append(_PERFORMANCE_DIAGNOSTIC_RULE)
         sections.append(
             "## Engineer service\n"
-            "Manager fixed scope and Planner delegated this package. Inspect only what "
-            "the mission contract needs and implement it end to end. Run the named "
+            "Manager set the scope and Planner assigned this task. Inspect only what "
+            "the agreed task requires and implement it end to end. Run the named "
             "feedback-producing check at the size this verification profile needs; "
             "use changed feedback, never repeat an unchanged check. Do not reopen "
             "campaign planning, start another Argus service, or create unrelated "
-            "artifacts. Within an explore/develop mission, follow feedback into the "
-            "alternative proposal the decision rule authorizes. If a material blocker "
+            "outputs. Within an explore/develop mission, follow feedback into the "
+            "alternative proposal the decision rule authorizes. If a material obstacle "
             "remains, preserve only the state needed for one next round."
         )
         if learning_block:
             sections.append(learning_block)
         sections.append(
-            "## Engineer receipt\n"
-            "Return the material result and decisive check; Reviewer owns acceptance.\n"
+            RESEARCHER_VOICE + "\n\n"
+            "## Engineer summary\n"
+            "Return the material result and decisive check; Reviewer judges whether the work holds.\n"
             + decision_footer_instruction(
                 "MILESTONE_STATUS=done\n"
                 "RESULT=material result and decisive check\n"
@@ -268,7 +270,7 @@ def build_mission_prompt(
     sections.append(
         "## This turn\n"
         "Own this task end to end: plan and use tools until its check passes or a real "
-        "blocker remains. Work here; pure reading needs an artifact or measurement. "
+        "obstacle remains. Work here; reading must yield a written result or measurement. "
         "Write only needed code; add no hashes, UUIDs, retries, fallbacks, locks, or "
         "abstractions unless required. Do not write planning/spec/brief documents, "
         "initialize Git, branch/worktree, or commit unless required; Planner owns the "
@@ -285,19 +287,20 @@ def build_mission_prompt(
     if learning_block:
         sections.append(learning_block)
     sections.append(
-        "## Handoff\n"
+        "## Carrying context between rounds\n"
         "CHECKPOINT.md is the only file you maintain to carry context between rounds; do not create "
-        "separate summary or evidence packets. Host invokes Reviewer only when required; do not "
+        "separate summaries or collections of evidence. Host invokes Reviewer only when required; do not "
         "spawn a Reviewer subagent. Normally set next_owner=reviewer. Use operator only "
         "for a real operator decision; include one operator_question and at most five "
         "operator_options; that parks the task, so record it and yield. Options use "
         "`id::label::description`, or `id::true::label::description` when a note "
         "is required.\n\n"
+        + RESEARCHER_VOICE + "\n\n"
         + decision_footer_instruction(
             "MILESTONE_STATUS=done\n"
             "RESULT=one or two operator-facing sentences in the operator's language: "
-            "what changed, the decisive check, and any remaining blocker; do not repeat "
-            "footer or status fields\n"
+            "what changed, the decisive check, and any remaining obstacle; do not repeat "
+            "decision or status fields\n"
             "NEXT_OWNER=reviewer"
         )
     )
@@ -317,15 +320,16 @@ def build_mission_prompt(
         + "\n"
         + _long_experiment_rule()
         + "\n\n"
-        "## Handoff\n"
+        "## Carrying context between rounds\n"
         "Use next_owner=operator only for an operator-owned choice; its question "
         "parks the task. Include operator_question and operator_options in that "
-        "decision.\n"
+        "decision.\n\n"
+        + RESEARCHER_VOICE + "\n\n"
         + decision_footer_instruction(
             "MILESTONE_STATUS=done\n"
             "RESULT=one or two operator-facing sentences in the operator's language: "
-            "what changed, the decisive check, and any remaining blocker; do not repeat "
-            "footer or status fields\n"
+            "what changed, the decisive check, and any remaining obstacle; do not repeat "
+            "decision or status fields\n"
             "NEXT_OWNER=reviewer"
         )
     )

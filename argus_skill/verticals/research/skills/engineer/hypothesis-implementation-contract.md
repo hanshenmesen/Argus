@@ -1,12 +1,13 @@
 ---
-name: "Hypothesis-Implementation Alignment"
+name: "Keeping the hypothesis and implementation aligned"
 description: "Keep the selected thesis and the code that tests it aligned during Experiment."
 ---
 
-# Hypothesis-Implementation Alignment
+# Keeping the hypothesis and implementation aligned
 
 Use this in Experiment after Idea selection and before claim-bearing execution. Read
-the selected thesis from `HANDOFF.md`; do not create a separate contract file.
+the selected thesis from the research notes in `RESEARCH_NOTES.md`; do not
+create a separate file stating the terms of the comparison.
 
 Map every load-bearing part of the thesis to the actual implementation:
 
@@ -26,4 +27,5 @@ selected thesis and the reachable call chain and return exactly one conclusion:
 
 Fix `MISMATCH` or `NOT_IMPLEMENTED` in place before claim-bearing runs. Do not
 reopen Idea selection, and do not write a separate note for the alignment
-result — the HANDOFF.md written at Paper entry is the only one.
+result — the research notes in `RESEARCH_NOTES.md`, written at Paper entry,
+are the only such account.

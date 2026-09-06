@@ -87,7 +87,7 @@ def test_vertical_prompts_do_not_treat_one_paper_reading_as_research_pipeline():
         verticals_with_purpose=VERTICAL_PURPOSES,
     )
 
-    assert "This is a read-only routing decision" in grounded
+    assert 'Decide by reading only' in grounded
 
 
 def test_serious_survey_is_staged_without_implied_publication() -> None:
@@ -98,8 +98,8 @@ def test_serious_survey_is_staged_without_implied_publication() -> None:
     )
 
     assert "papers and surveys are `research`" in prompt
-    assert "publishable only when publication-level original work is requested" in prompt
-    assert "always add `research_target_level`" in prompt
+    assert 'publishable for requested original work at publication level' in prompt
+    assert 'add `research_target_level`' in prompt
     assert "`research_direction_mode`" in prompt
     assert "Never infer a venue" in prompt
 
@@ -111,16 +111,16 @@ def test_research_routing_distinguishes_idea_only_from_paper_production() -> Non
         research_target_verticals=("research",),
     )
 
-    assert "supplies an idea or hypothesis and asks for a full paper" in prompt
+    assert 'supplied idea or hypothesis requested as a full paper' in prompt
     assert "choose staged research with direction locked" in prompt
-    assert "asks only to propose, compare, or review ideas" in prompt
+    assert 'For proposing, comparing, or reviewing ideas' in prompt
     assert "choose direct research" in prompt
-    assert "never expands an idea-only deliverable into a paper" in prompt
-    assert "Figures, plots, diagrams, a Figure 1" in prompt
-    assert "a revision of a research manuscript are `research`" in prompt
-    assert "exactly that part; add no manuscript, experiments, or literature review" in prompt
+    assert 'never expands an idea-only request into a paper' in prompt
+    assert 'Research figures, plots, diagrams, Figure 1' in prompt
+    assert 'manuscript revisions are `research`' in prompt
+    assert 'produce that part without adding a manuscript, experiments, or literature review' in prompt
     assert "START_STAGE=<stage name or empty>" in prompt
-    assert "`paper` for figures, drafts, sections, and manuscript revisions" in prompt
+    assert '`paper` for figures, drafts, sections, or revisions' in prompt
 
 
 @pytest.mark.parametrize("parse", [parse_fast_vertical_decision, parse_vertical_decision])
@@ -177,10 +177,10 @@ def test_vertical_prompt_does_not_escalate_bounded_repo_fix_to_new_domain() -> N
         verticals_with_purpose=VERTICAL_PURPOSES,
     )
 
-    assert "capability VERTICAL" in prompt
+    assert 'Choose VERTICAL' in prompt
     assert "WORKFLOW_MODE=direct" in prompt
     assert "REQUIRE_INDEPENDENT_REVIEW=true" in prompt
-    assert "independent review on by default" in prompt
+    assert 'Independent review defaults on' in prompt
     assert "software" in prompt
 
 
@@ -208,7 +208,7 @@ def test_new_domain_starts_with_real_work_not_process_ceremony() -> None:
         verticals_with_purpose=VERTICAL_PURPOSES,
     )
 
-    assert "The Host owns its generic candidate lifecycle" in prompt
+    assert 'Host manages candidate development' in prompt
     assert "do not propose or revise stage names" in prompt
     assert "STAGES" not in prompt
 
@@ -219,8 +219,8 @@ def test_vertical_prompt_preserves_explicit_operator_actions() -> None:
         verticals_with_purpose=VERTICAL_PURPOSES,
     )
 
-    assert "Preserve stated paths, commands, order, and stopping conditions" in prompt
-    assert "requested action, not incidental words" in prompt
+    assert 'Preserve paths, commands, order, and stopping conditions' in prompt
+    assert 'requested action, not words' in prompt
     assert "Repository work is usually `software`" in prompt
 
 
@@ -231,7 +231,7 @@ def test_vertical_prompts_do_not_use_software_as_performance_catch_all() -> None
         verticals_with_purpose=VERTICAL_PURPOSES,
     )
 
-    assert "Use `new` only when none fits" in grounded
+    assert 'Use `new` only if none fits' in grounded
     assert "Pick the closest existing capability" in grounded
     assert "inference/serving" in VERTICAL_PURPOSES["kernel_engineering"]
     assert "inference serving" in grounded
@@ -656,11 +656,11 @@ def test_grounded_vertical_prompt_preserves_manager_agency_and_planner_boundary(
         verticals_with_purpose=VERTICAL_PURPOSES,
     )
 
-    assert "inspect only when the fit is unclear" in prompt
+    assert 'inspect if the fit is unclear' in prompt
     assert "no task work or Live View" in prompt
     assert "presentations" not in prompt
-    assert "Omit `execution_task` for a standalone existing route" in prompt
-    assert "include it only when the task text must be rewritten" in prompt
+    assert 'omit it for a standalone existing route' in prompt
+    assert "Include `execution_task` only to make the instructions standalone" in prompt
 
 
 def test_read_only_repository_audit_avoids_maintenance_meta_review() -> None:

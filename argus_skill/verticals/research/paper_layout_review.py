@@ -233,9 +233,9 @@ def generate_layout_review(
         "issues": issues,
         "blocking_issues": blocking_issues,
         "review_policy": {
-            "decision_authority": "reviewer agent decides against the stage checklist; "
-            "the harness reports page facts and relays the vision reviewer's advisory "
-            "findings, and emits no quality verdict",
+            "decision_authority": "the reviewing agent judges the work against the stage's standards; "
+            "the program reports page facts and shares the vision reviewer's observations "
+            "without deciding whether the work is good enough",
             "allowed_directive_actions": sorted(ALLOWED_DIRECTIVE_ACTIONS),
         },
     }
@@ -1004,19 +1004,19 @@ def _vision_prompt(
             else "main-text word limit"
         )
         return (
-            f"Role: You are an independent visual reviewer for a {vn} paper. "
-            f"Judge the rendered screenshots as a polished {venue.layout_format_persona}, "
+            f"You are an independent visual reviewer for a {vn} paper. "
+            f"Read the rendered screenshots with the standards of a polished {venue.layout_format_persona} in mind, "
             "not as a two-column conference paper.\n\n"
-            f"Venue contract: there is no fixed body-page limit. Enforce the {word_limit}, "
+            f"This venue has no fixed body-page limit. Require the {word_limit}, "
             "single spacing, page numbers, review line numbers, readable editable tables, "
-            "real single-anonymized author metadata, journal-compliant public AI disclosure, "
+            "real single-anonymized author metadata, public AI disclosure that follows the journal's rules, "
             "and distinct alt text for every figure. Do not manufacture an underfill or "
             "overflow defect from the Conclusion or References page number. Still report their "
             "actual pages and flag genuine clipping, overlap, unreadable typography, forced "
             "blank pages, detached captions, or poor visual flow.\n\n"
-            "Figure policy: judge the actual visible figure for clarity and "
-            "good-enough aesthetics. Optional FIGURE_PROVENANCE.json may help locate "
-            "the source but is not a blocker. Do not request repeated regeneration "
+            "Judge the figure you can see for clarity and whether its appearance is "
+            "good enough for publication. Optional FIGURE_PROVENANCE.json may help locate "
+            "the source, but its absence does not stand in the way. Do not request repeated regeneration "
             "for minor stylistic preferences.\n\n"
             "Every blocking or major issue must name the page, target, visual evidence, root "
             "cause, concrete source edits, visual goal, and verification steps. Do not ask the "
@@ -1025,8 +1025,8 @@ def _vision_prompt(
             "Write a prose review, not JSON. Order material findings by severity. For each "
             "finding give the page or visual target, the evidence visible in the rendering, "
             "and a concrete source-level fix with a verification step. If there is no material "
-            "defect, say so plainly. This review is advisory to the agent checklist.\n\n"
-            f"Deterministic layout signals:\n"
+            "defect, say so plainly. This review informs the reviewing agent's judgment against the stage's standards.\n\n"
+            f"Automatically collected layout observations:\n"
             f"{json.dumps(deterministic, ensure_ascii=False)[:6000]}"
         )
     cmax = venue.conclusion_max_page         # Conclusion must land by this page
@@ -1034,35 +1034,35 @@ def _vision_prompt(
     end_matter = venue.end_matter_prose()
     review_lines = venue.review_linenumber_prose()
     return (
-        f"Role: You are an independent visual reviewer for an {vn} paper that is being "
+        f"You are an independent visual reviewer for a {vn} paper that is being "
         "prepared for submission. Your job is to judge the rendered PDF screenshots as a polished, "
         "standard two-column conference paper: visual beauty, professional layout, readability, "
-        f"and compliance with {vn} paper norms. Do not act as the author and do not excuse "
-        "ugly artifacts; be as strict as a proceedings layout reviewer.\n\n"
-        "Review task: inspect the screenshots page by page, using the deterministic signals below "
-        "as concrete hints. Penalize any page that looks non-submission-ready: large blank lower-page "
-        "regions before the body boundary, float-dump pages, cramped or plain audit-style tables, table/body overlap, tiny "
+        f"and how well it follows {vn} paper norms. Do not act as the author and do not excuse "
+        "poor visual work; be as strict as a proceedings layout reviewer.\n\n"
+        "Inspect the screenshots page by page, using the automatically collected observations below "
+        "as concrete hints. Treat the following as defects that make a page unready for submission: large blank lower-page "
+        "regions before the body boundary, pages crowded with floats, cramped tables or plain tables laid out like logs, table/body overlap, tiny "
         "unreadable fonts, awkward two-column imbalance, captions detached from content, weak page "
-        "flow, square or low-quality figures, non-human code-like labels, snake_case labels, heavy "
-        f"gradients, photorealism, or visuals that look like debug artifacts rather than {vn} paper "
+        "flow, square or low-quality figures, labels written as code rather than for readers, snake_case labels, heavy "
+        f"gradients, photorealism, or visuals that look like debugging output rather than {vn} paper "
         "figures. A body page with only a couple of small tables and a large empty area usually "
         "signals poor float placement; the fix is to move, merge, or resize floats, never to pad "
         "the prose. Final References/Appendix pages are post-body pages: natural trailing "
         "whitespace on the last appendix/reference page is advisory unless there is a separate "
         "readability defect such as overlap, detached captions, missing required content, or "
         f"unreadably tiny tables. {review_lines} "
-        "Penalize only nonstandard duplicate line-number overlays, margin counters "
+        "Treat as defects only nonstandard duplicate line-number overlays, margin counters "
         "unrelated to review mode, or post-processing artifacts. Do not turn a small amount of "
-        "post-body whitespace into repeated revision churn when the Conclusion lands by page "
+        "post-body whitespace into repeated requests for revision when the Conclusion lands by page "
         f"{cmax} and {end_matter} is in place.\n\n"
-        "Make the feedback concrete for the next engineer/tool call: every blocking or major issue "
+        "Make the feedback specific enough for the person revising the paper to act on: every blocking or major issue "
         "must name the page number when visible, the visual target (for example: page 6 lower half, "
         "Table 3, Figure 1 labels, references page), the visual evidence you saw, and the specific "
         "source-level action needed. Prefer fixes that rewrite/rebalance manuscript flow, merge or "
         "remove low-value floats, split unreadable tables, or regenerate poor figures; do not suggest "
-        "cosmetic page-break shuffling when the real defect is weak prose/float integration. "
-        "Figure repair policy: judge visible clarity and aesthetics, not provenance. "
-        "Pass a readable, coherent, factually correct, good-looking-enough figure. "
+        "cosmetic page-break changes when the real defect is how poorly the prose and floats work together. "
+        "When deciding whether a figure needs revision, judge its visible clarity and appearance, not its provenance. "
+        "A figure that is readable, coherent, factually correct, and visually good enough for publication should stand. "
         "Wrong, reversed, missing, or unsupported arrows; connector penetration through "
         "node fills or unrelated labels; overlapping nodes or text; clipped elements; "
         "inconsistent shape semantics; and unreadable final-size typography are concrete "
@@ -1074,31 +1074,31 @@ def _vision_prompt(
         f"`\\pagebreak`, or `\\FloatBarrier` immediately before Conclusion; that can leave page {cmax} "
         f"mostly blank and then push Conclusion to page {cmax + 1} after minor float changes. Use section "
         "ordering, prose tightening, and float placement instead.\n\n"
-        "Complete improvement guidance is mandatory, not optional. For every blocking or major issue, "
-        "provide enough repair guidance that an engineer can act without re-interpreting the screenshot: "
+        "You must give complete guidance for improvement. For every blocking or major issue, "
+        "explain the repair fully enough that an engineer can act without having to interpret the screenshot afresh: "
         "root_cause, source_targets (LaTeX/generator/table/figure files or section names to edit), "
         "specific_edits (ordered concrete edits, not vague advice), visual_goal, and verification "
         "steps after recompilation. The guidance must say whether to delete filler, merge/split/move "
         "specific floats, rewrite nearby prose, regenerate a figure, or change table styling. The "
         "page budget is a ceiling, not a quota: never ask the author to pad or lengthen the paper "
-        "to fill pages. If a page looks bad because low-value audit-style material crowds the body, "
+        "to fill pages. If a page looks bad because operational records that add little to the argument crowd the body, "
         "recommend moving it to the appendix or deleting it; flag missing content only when a "
         "reader genuinely needs it to follow the argument, and name exactly what is missing. For "
         "any single table cluster, choose one dominant repair action: merge low-density redundant "
         "tables or split an unreadably dense table, but do not issue contradictory merge and split "
         "directives for the same appendix/table target in the same review.\n\n"
-        "Reference boundary guidance: if References or Bibliography starts on the same rendered page "
+        "If References or Bibliography starts on the same rendered page "
         "as Conclusion or post-conclusion body end matter, do not automatically call the body "
         "overlong and do not ask for generic section shortening. If body content actually runs past "
         f"page {cmax}, require trimming or moving material to the appendix. An early References page "
         "by itself is not a defect and is never a reason to demand body expansion or filler. A "
         "manual `\\clearpage`, `\\newpage`, `\\pagebreak`, or `\\FloatBarrier` inserted immediately "
-        "before References solely to move it to a later page is a layout hack: remove the break and "
+        "before References solely to move it to a later page forces an artificial break in the layout: remove the break and "
         "let the page flow fall naturally. Do not require References to begin on any particular "
         "page; the total page count after the body is uncapped. Treat trailing whitespace after end "
         "matter as at most a minor style note unless it reflects a forced break or a Conclusion "
         f"after page {cmax}.\n\n"
-        f"Submission contract to enforce: conclusion by page {cmax}, {end_matter}, "
+        f"The paper must meet these submission requirements: conclusion by page {cmax}, {end_matter}, "
         "References before Appendix with no total-page cap after the body, "
         "no Overfull hbox above 5pt, a figure count and width that follow what the "
         "argument has to show rather than a quota, "
@@ -1108,9 +1108,9 @@ def _vision_prompt(
         "gradients, photorealism, or code-like labels in paper-facing visuals.\n\n"
         "Write a prose review, not JSON. Order material findings by severity. For every finding, "
         "name the page or target, cite the visible evidence, and suggest a concrete source-level "
-        "fix plus a verification step. If no material defect remains, say so plainly. The review "
-        "is advisory to the agent checklist.\n\n"
-        f"Deterministic layout signals:\n{json.dumps(deterministic, ensure_ascii=False)[:6000]}"
+        "fix plus a verification step. If no material defect remains, say so plainly. This review "
+        "informs the reviewing agent's judgment against the stage's standards.\n\n"
+        f"Automatically collected layout observations:\n{json.dumps(deterministic, ensure_ascii=False)[:6000]}"
     )
 
 
@@ -1217,8 +1217,8 @@ def _layout_review_markdown(result: dict[str, Any]) -> str:
     lines = [
         "# Layout Review",
         "",
-        "- Decision authority: `agent_checklist` (the reviewer agent decides; "
-        "the harness emits no quality verdict)",
+        "- Decision authority: `agent_checklist` (the reviewing agent decides; "
+        "the program makes no judgment of quality)",
         f"- Structural status: `{result.get('structural_status', 'ok')}`",
         f"- Review method: `{result.get('review_method', 'facts_only')}`",
         "",

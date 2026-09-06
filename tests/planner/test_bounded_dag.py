@@ -177,12 +177,12 @@ def test_bounded_planner_parses_real_fanout_fanin_dag(tmp_path) -> None:
     assert "`decision_rule`" in call["prompt"]
     assert "TASK_WORK_KIND" not in call["prompt"]
     assert "The Host owns execution and enforces review policy" in call["prompt"]
-    assert "Never create a review-only or validation-only task" in call["prompt"]
+    assert 'Never create a task solely for review or checking the work' in call["prompt"]
     assert "never declare an Engineer Skill unavailable from Planner visibility" in call[
         "prompt"
     ]
     assert "`develop`" in call["prompt"]
-    assert "feedback-producing experiment ran honestly" in call["prompt"]
+    assert 'experiment ran honestly and produced feedback' in call["prompt"]
 
 
 def test_bounded_planner_reads_policy_from_session_state(
@@ -459,7 +459,7 @@ def test_manager_direct_workflow_uses_compact_real_planner_signoff(tmp_path) -> 
     assert not plan.error
     assert len(plan.tasks) == 1
     prompt = runner.calls[0]["prompt"]
-    assert "Planner signing one Manager-approved coherent work package" in prompt
+    assert 'Planner confirming one coherent task agreed by Manager' in prompt
     assert "Issue exactly one executable DAG node" in prompt
     assert "A long job holds its slot" not in prompt
     assert "TASK_REQUIRE_INDEPENDENT_REVIEW=true" in prompt

@@ -42,7 +42,7 @@ def test_prompt_has_no_hardcoded_venue_names_and_keeps_abstract_contract() -> No
         p = _prompt(venue)
         for literal in ("EMNLP", "AAAI", "ACL", "NeurIPS"):
             assert literal not in p
-        assert "flat experiment checklist" in p
+        assert "flat list of experiments" in p
 
 
 def test_word_limit_journal_prompt_uses_word_budget_phrasing() -> None:

@@ -114,7 +114,7 @@ ABSTRACT_READER_HOSTILE_PATTERNS: tuple[tuple[str, str, str], ...] = (
         "abstract_references_layout_artifact",
         r"(?:\\(?:ref|autoref|cref)\s*\{|\b(?:appendix|supplement(?:ary)?)\s+"
         r"(?:figure|table|section)\b|\b(?:figure|table)\s*\d+[a-z]?\b)",
-        "abstract should not refer to appendix/figure/table layout artifacts; it must stand alone",
+        "the abstract must stand alone, without references to appendices, figures, or tables",
     ),
     (
         "abstract_mentions_internal_review_artifact",
@@ -122,7 +122,7 @@ ABSTRACT_READER_HOSTILE_PATTERNS: tuple[tuple[str, str, str], ...] = (
         r"evidence span|revision directive|source snapshot|artifact manifest|"
         r"result_to_claim|paper quality calibration)\b|"
         r"(?:paper|experiments|results|bench|research)/[A-Za-z0-9_.\-/]+",
-        "abstract contains validator/artifact vocabulary instead of reader-facing paper prose",
+        "the abstract describes internal checks or files instead of explaining the research to readers",
     ),
 )
 
@@ -288,9 +288,9 @@ def generate_academic_language_review(
         "blocking_issues": blocking_issues,
         "review_policy": {
             "rubric": venue.academic_language_rubric_id,
-            "decision_authority": "reviewer agent decides against the stage checklist; "
-            "the harness reports facts and relays the model reviewer's advisory "
-            "findings, and emits no quality verdict",
+            "decision_authority": "the reviewing agent judges the work against the stage's standards; "
+            "the program reports facts and shares the model reviewer's observations "
+            "without deciding whether the work is good enough",
             "adapted_from": "AI-Research-SKILLs MIT workflow concepts, no exemplar prose copied",
         },
     }
@@ -732,9 +732,9 @@ def _review_prompt(
     # a hardcoded special path.
     intro_label = venue.reviewer_persona
     abstract_standard = (
-        "Judge the abstract on whether its evidence-backed sentences connect the "
+        "Judge whether the abstract's sentences are supported by evidence and connect the "
         "problem, gap, method, selected headline result, and implication; "
-        "do not turn the abstract into a flat experiment checklist. "
+        "do not turn the abstract into a flat list of experiments. "
     )
     body_budget_phrase = (
         f"{venue.body_page_limit}-page body budget"
@@ -744,77 +744,77 @@ def _review_prompt(
     return (
         f"You are the final academic-language reviewer for a paper submitted to "
         f"{venue.display_name}. "
-        "Reject papers that read like generic agent output: template LLM openings, "
-        "unsupported hype, vague claims, weak contribution framing, experiment dumps "
-        "without a What/Why/So-What story, ungrouped related work, repeated "
+        "Send back papers that read like generic model output: stock LLM openings, "
+        "unsupported hype, vague claims, an unclear contribution, lists of experiments "
+        "that never explain what was studied, why, or what the results mean, ungrouped related work, repeated "
         "not-X-but-Y/benchmark-scoped caveats, or claims not tied "
         "to evidence. "
-        "Require ONE central thesis: a single sentence naming the idea the whole "
+        "Require ONE central thesis, expressed in a single sentence that names the idea the whole "
         "paper serves. The Method must read as the mechanism that implements that "
         "thesis, and every experiment must be framed as a test that supports, "
         "bounds, or refines it — not an undirected battery of numbers. The paper "
         "must state at least one non-trivial insight (a mechanism, regime, "
         "trade-off, or boundary the reader did not already know) explicitly in the "
-        "abstract and introduction and pay it off in the analysis. Reject papers "
+        "abstract and introduction and develop it in the analysis. Send back papers "
         "whose sections read as parallel unconnected experiments, whose "
         "contribution is only 'we ran X on Y', or where no single sentence could "
         "name what the paper is about. "
-        "Preserve the full scientific backend while judging the reader-facing "
-        "hierarchy. Classify evidence by what it does: headline evidence establishes "
+        "Preserve the full scientific record while judging how clearly the paper "
+        "orders it for the reader. Classify evidence by what it does: headline evidence establishes "
         "the thesis, mechanism evidence explains it, disambiguating controls rule out "
         "credible alternatives, scope-changing evidence bounds it, and completeness "
         "evidence keeps the comparison and reproduction record whole. Require the "
         "complete methods, baselines, controls, adverse results, uncertainty, and "
-        "result matrices to remain in an appropriate prose, table, Methods, caption, "
-        "Appendix, or cross-reference carrier. Do not require every matrix cell to be "
+        "result matrices to remain available in appropriate prose, tables, Methods, captions, "
+        "the Appendix, or material reached through cross-references. Do not require every matrix cell to be "
         "recited in prose. Exact headline numbers may recur in Abstract, Introduction, "
         "Results, captions, and Conclusion when each occurrence performs that section's "
-        "different job; never reject by a mechanical repetition count. Every figure and "
+        "different job; never send a paper back on the strength of a repetition count alone. Every figure and "
         "table caption still needs a numerical takeaway, but it should select the result "
         "that answers the figure's question and explain its inference rather than narrate "
-        "every row or bar. Treat the deterministic checklist/density matches below only "
-        "as places to inspect: distinguish necessary scientific density from flat report "
-        "recital, and also flag papers that are too sparse to support or interpret the "
+        "every row or bar. Treat the automatically identified lists of checks and dense passages below only "
+        "as places to inspect: distinguish necessary scientific detail from a flat recital "
+        "of results, and also flag papers that are too sparse to support or interpret the "
         "claim. "
-        "Evidence spans are reviewer-internal audit artifacts: do not ask "
-        "authors to paste source paths, appendix/figure references, validation-gate "
-        "vocabulary, or evidence quotes into the abstract to satisfy this review. Reject "
-        "papers that leave basic evaluated-system facts implicit: the Method/Experimental "
-        "Setup must let a reviewer identify the system under study, its paper-facing "
+        "Quoted evidence belongs in the reviewer's own working notes. Do not ask "
+        "authors to paste source paths, appendix/figure references, terms for internal "
+        "review requirements, or evidence quotes into the abstract to satisfy this review. Send back "
+        "papers that leave basic facts about the evaluated system implicit: the Method/Experimental "
+        "Setup must let a reviewer identify the system under study, its research "
         "framework, benchmark harness, or controller, the controller/skill/memory "
         "mechanism, baselines, task source, metrics, evaluated model/backend, and "
         "budget. Name evaluated models, scorers, decoding settings, and ranking "
         "protocols when they affect the result. Do not present the authoring daemon, "
         "internal agent roles, review tools, or orchestration model identifiers as "
-        "paper-method components. Experimental details should appear in reader-facing "
-        "prose or a compact table, not only comments or internal artifacts. Tables "
+        "components of the method. Experimental details should appear in the paper's "
+        "prose or a compact table, not only in comments or internal files. Tables "
         "must expose the sources, evaluated systems, task scale, metrics, protocol, "
         "and numerical takeaway needed to inspect the claim. Require multiple data "
         "sources or a cross-source matrix only when the paper claims broad transfer "
         "or generality; a focused contribution may use one well-justified evaluation "
-        "family with adequate baselines and uncertainty. Reject tables organized "
+        "family with adequate baselines and uncertainty. Send back tables organized "
         "around internal routes, components, or agent roles instead of experimental "
-        "facts. Reject "
-        "a paper whose abstract reads like a validator checklist, starts with a numeric "
+        "facts. Send back "
+        "a paper whose abstract reads like a list of checks rather than an argument, starts with a numeric "
         "result before the problem/gap, or spends its scarce space on defensive caveats "
         "instead of problem, method, result, and implication. "
         f"{abstract_standard}"
-        "Introduction word count is only a reviewer signal, not a pass/fail rule: "
-        "reject short or long introductions when they are missing the problem, "
+        "Introduction word count is only a clue for the reviewer, not a rule for deciding whether the prose holds up: "
+        "send back short or long introductions when they are missing the problem, "
         "literature gap, method insight, quantified evidence preview, contribution "
-        "roadmap, or scope; do not reject solely because a word counter is below a "
+        "roadmap, or scope; do not send an introduction back solely because its word count is below a "
         f"fixed target when the rendered paper uses the {body_budget_phrase} well. "
-        "Reject an Introduction that has fewer than three separate cited "
-        "prior-work/benchmark hooks before Related Work; packing many keys into "
-        "one or two citation macros does not create a normal literature-grounded "
-        f"opening. A normal {intro_label} introduction should use citations to establish "
+        "Send back an Introduction that has fewer than three separate references to "
+        "cited prior work or benchmarks before Related Work; packing many keys into "
+        "one or two citation macros does not create an opening grounded in the "
+        f"literature. A normal {intro_label} introduction should use citations to establish "
         "the gap, then explain the method insight, quantified evidence preview, "
-        "and contribution roadmap in natural prose. Also reject introductions "
-        "fragmented into many 50--80 word validator-shaped paragraphs or repeated "
+        "and contribution roadmap in natural prose. Also send back introductions "
+        "fragmented into many 50--80 word paragraphs shaped around individual review requirements or repeated "
         "stock starts such as 'The gap', 'The result', 'That framing', and "
         "'Put differently'; merge them into substantive paper paragraphs with "
-        "specific topic sentences. Reject stale-evidence "
-        "prose where method/control names sit next to result ratios that appear "
+        "specific topic sentences. Send back prose whose evidence appears out of date, "
+        "where method/control names sit next to result ratios that appear "
         "carried over from an older run, or where one section claims no external "
         "LLM/model calls while another reports a hosted/model-backed baseline. "
         "Short introductions should be fixed by adding source-backed problem framing, "
@@ -826,7 +826,7 @@ def _review_prompt(
         "analysis or limitations. "
         "When the method does not beat a baseline on a headline metric, do not "
         "reward a flat 'we are worse' concession and do not reward hiding the "
-        "comparison. Reward a multi-angle honest analysis: name the regime or "
+        "comparison. Reward an honest analysis that examines the result from several angles: name the regime or "
         "sub-population where the method wins or ties, state the mechanism or "
         "insight the result reveals, identify any confound or budget the baseline "
         "relies on, state the trade-off the method buys, scope the headline claim "
@@ -834,7 +834,7 @@ def _review_prompt(
         "it holds and where it fails; place this scoping and boundary analysis in "
         "the results, analysis, or limitations and keep the abstract and "
         "introduction focused on the supported contribution, not padded with "
-        "caveats. Integrity floor (hard, never relax): every "
+        "caveats. The following requirements for scientific integrity must never be relaxed: every "
         "planned, claim-relevant comparison that was run must stay visible in the "
         "tables and results — no cherry-picking the best metric while hiding "
         "others; genuine nulls belong in limitations or scope as honest findings; "
@@ -846,20 +846,20 @@ def _review_prompt(
         "unsupported concession or an over-broad claim, recommend scoping the claim "
         "to the supported regime and adding boundary analysis rather than telling the "
         "author to delete the losing comparison. "
-        "Make revision guidance stable: give at most one suggested repair per section. "
+        "Keep revision guidance consistent by giving at most one suggested repair per section. "
         "If the Introduction fails for "
         "problem/gap/contribution, quantified preview, contribution framing, or claim "
         "calibration, provide one coherent paragraph-level Introduction repair plan, "
-        "rather than separate micro-edits that cause local oscillation. "
-        "Calibrate severity tightly: distinguish publication-blocking defects from optional "
+        "rather than separate small edits that pull the section back and forth. "
+        "Judge severity carefully: distinguish defects that prevent publication from optional "
         "polish and minor wording preferences. Write a prose review, not JSON. Order findings "
         "by severity; for each material finding give the source path and line or section, quote "
         "the reader-facing evidence, and suggest a concrete fix. For underperformance versus a "
         "baseline, prefer scoping the claim and adding boundary analysis over deleting the "
-        "comparison. If no material defect remains, say so plainly. The review is advisory to "
-        "the agent checklist. Do not quote LaTeX boilerplate or comments as evidence.\n\n"
-        f"Deterministic signals:\n{json.dumps(deterministic, ensure_ascii=False)[:7000]}\n\n"
-        f"Reviewer source context:\n{source_context}"
+        "comparison. If no material defect remains, say so plainly. This review informs "
+        "the reviewing agent's judgment against the stage's standards. Do not quote LaTeX boilerplate or comments as evidence.\n\n"
+        f"Automatically collected observations:\n{json.dumps(deterministic, ensure_ascii=False)[:7000]}\n\n"
+        f"Source material for your review:\n{source_context}"
     )
 
 
@@ -1171,7 +1171,7 @@ def _abstract_quality_issue_specs(
                 "abstract_contains_internal_evidence_comment",
                 (
                     "abstract environment contains internal evidence/review comments; "
-                    "store evidence in audit artifacts or comments outside the abstract"
+                    "keep the evidence in the reviewer's working notes or in comments outside the abstract"
                 ),
                 0.6,
                 3.2,
@@ -1260,15 +1260,15 @@ def _review_source_context(source_text_by_path: Mapping[str, str]) -> str:
     chunks = []
     if structured.strip():
         chunks.append(
-            "Structured source digest for reviewer navigation. Use this to inspect "
+            "Use this overview of the source to find and inspect "
             "section flow, body floats, table captions, labels, and visible table "
-            "headers even when the numbered source excerpt is long. Evidence spans "
-            "must still quote verbatim from the reviewed LaTeX source.\n"
+            "headers even when the numbered source excerpt is long. Quotations used as evidence "
+            "must still reproduce the reviewed LaTeX source verbatim.\n"
             f"{structured}"
         )
     if pinned.strip():
         chunks.append(
-            "Pinned structural LaTeX excerpts. Check these before marking "
+            "These LaTeX excerpts preserve the paper's structure. Read them before reporting "
             "limitations, results matrices, captions, or table coverage absent.\n"
             f"{pinned}"
         )
@@ -1563,8 +1563,8 @@ def _review_markdown(result: dict[str, Any]) -> str:
     lines = [
         "# Academic Language Review",
         "",
-        "- Decision authority: `agent_checklist` (the reviewer agent decides; "
-        "the harness emits no quality verdict)",
+        "- Decision authority: `agent_checklist` (the reviewing agent decides; "
+        "the program makes no judgment of quality)",
         f"- Structural status: `{result.get('structural_status', 'ok')}`",
         f"- Review method: `{result.get('review_method', 'facts_only')}`",
         "",

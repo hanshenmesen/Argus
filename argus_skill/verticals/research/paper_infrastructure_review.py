@@ -188,8 +188,8 @@ def generate_paper_infrastructure_review(
         "blocking_issues": blocking_issues,
         "review_policy": {
             "rubric": "paper-facing-infrastructure-leak-v2",
-            "decision_authority": "reviewer agent decides against the stage checklist; "
-            "the harness reports leak findings only and emits no quality verdict",
+            "decision_authority": "the reviewing agent judges the work against the stage's standards; "
+            "the program reports disclosures of local infrastructure without judging the paper's quality",
             "required_checked_scope": list(REQUIRED_CHECKED_SCOPES),
             "paper_facing_target": "title, abstract, body prose, captions, tables, and appendix prose",
         },
@@ -288,11 +288,11 @@ def _review_prompt(
 ) -> str:
     numbered_source = _complete_numbered_source(source_text_by_path)
     return (
-        f"You are a strict {venue.reviewer_persona} paper reviewer checking only whether reader-facing "
-        "manuscript prose leaks local execution infrastructure irrelevant to the "
-        "scientific paper. Inspect title, abstract, body, captions, tables, and "
-        "appendix prose. Ignore LaTeX comments, build logs, and external artifacts "
-        "unless the manuscript renders them for readers. Reject leaks of local "
+        f"You are a strict {venue.reviewer_persona} paper reviewer. Your sole task is to check whether the "
+        "manuscript exposes details of the local computing environment that have no bearing on the "
+        "science. Inspect title, abstract, body, captions, tables, and "
+        "appendix prose. Ignore LaTeX comments, build logs, and files outside the manuscript "
+        "unless the manuscript renders them for readers. Flag disclosures of local "
         "hardware ordinals, local machine capacity, or device placement such as "
         "GPU card numbers, single local GPU, local GPU, workstation/node labels, "
         "cuda:6, CUDA_VISIBLE_DEVICES, local hardware IDs, cache directories such "
@@ -306,18 +306,18 @@ def _review_prompt(
         "project-specific experiment directories rendered as the paper's "
         "reproducibility interface. A reproducibility appendix may describe a "
         "neutral replay command alias, seed policy, public benchmark, metric, "
-        "split, and artifact types such as manifest/status/progress/raw rows/"
+        "split, and types of files or records such as manifest/status/progress/raw rows/"
         "summary TSV, but raw local CLI strings and path names must stay in "
-        "non-rendered manifests/logs or supplementary package metadata. Reject "
-        "body/setup/result prose that turns operational audit-bundle metadata "
-        "into scientific exposition: wall-clock logging, artifact hashes, status "
-        "snapshots, progress logs, STOP-file cancellation contracts, internal "
-        "manifest mechanics, or provenance-refresh workflow details belong in "
+        "non-rendered manifests/logs or metadata accompanying the supplementary files. Send back "
+        "body/setup/result prose that presents metadata from the execution and review records "
+        "as scientific exposition: wall-clock logging, file hashes, status "
+        "snapshots, progress logs, rules for cancellation through a STOP-file, internal "
+        "manifest mechanics, or details of how provenance records are refreshed belong in "
         "appendix replay notes, manifests, or supplementary metadata, not in the "
         "main narrative unless the paper explicitly studies that infrastructure. "
-        "Orchestration-daemon details, internal role/route labels, capability "
-        "vault configuration, validation or review artifacts, image-tool "
-        "plumbing, and authoring model identifiers when they are not evaluated "
+        "Also flag orchestration-daemon details, internal role/route labels, capability "
+        "vault configuration, files produced by internal checks or reviews, image-tool "
+        "internals, and authoring model identifiers when they are not evaluated "
         "systems. Allow legitimate "
         "paper-facing reproducibility facts: evaluated model/backend names, public "
         "dataset or benchmark versions, task counts, metrics, decoding or budget "
@@ -329,10 +329,10 @@ def _review_prompt(
         "review, not JSON. Order findings by severity; for every material finding give "
         "the source path and line or section, quote the reader-facing evidence, and "
         "suggest a concrete fix. If no leak is present, say so plainly. End with these "
-        "two tolerant named lines (semicolon-separate the inspected scopes):\n"
+        "two named lines (minor formatting differences are allowed; separate the inspected scopes with semicolons):\n"
         "LEAK_FREE=true or false\n"
         "CHECKED_SCOPE=title; abstract; body; captions; tables; appendix\n"
-        "The source inventory "
+        "The source collection "
         "below is complete and untruncated for the reviewed LaTeX files; if no "
         "appendix source appears, treat the appendix as absent rather than as an "
         "uninspected missing scope.\n\n"
@@ -387,8 +387,8 @@ def _review_markdown(result: dict[str, Any]) -> str:
     lines = [
         "# Paper Infrastructure Review",
         "",
-        "- Decision authority: `agent_checklist` (the reviewer agent decides; "
-        "the harness emits no quality verdict)",
+        "- Decision authority: `agent_checklist` (the reviewing agent decides; "
+        "the program makes no judgment of quality)",
         f"- Structural status: `{result['structural_status']}`",
         f"- Review method: `{result['review_method']}`",
         f"- Leak free (reviewer model): `{result['leak_free']}`",

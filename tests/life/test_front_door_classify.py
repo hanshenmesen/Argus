@@ -66,7 +66,13 @@ def test_front_door_prompt_has_a_strict_token_efficiency_budget(tmp_path) -> Non
         ).split()
     )
 
-    assert len(prompt) <= 3_000
+    # Cost budget for the highest-frequency model call. The old 3,000-char bar
+    # predates the shared how-to-write paragraph (RESEARCHER_VOICE, ~725 chars)
+    # that this prompt now carries so REPLY reads like a person wrote it; the
+    # rest of the prompt (~3,000 chars) is already the compact classifier body.
+    # 3,800 chars is roughly 950 input tokens per classify call, about 200
+    # tokens more than the old budget. Trim the prompt before raising this.
+    assert len(prompt) <= 3_800
     assert "live research" in prompt
     assert all(
         field in prompt
@@ -103,8 +109,8 @@ def test_front_door_prompt_has_a_strict_token_efficiency_budget(tmp_path) -> Non
         phrase in policy
         for phrase, policy in (
             ("casual unscoped work absent ongoing intent", prompt),
-            ("materially complete round", standing),
-            ("sentence stating its expected value and reason", standing),
+            ('completed rounds', standing),
+            ("Justify a new round's value in one sentence", standing),
             ("behavior reachable through a real entry point", standing),
         )
     )

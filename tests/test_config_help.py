@@ -56,6 +56,7 @@ def test_registry_covers_the_key_operator_knobs() -> None:
         "ARGUS_SKILL_ENGINEER_REASONING_EFFORT",
         "ARGUS_SKILL_REQUIRE_RELEASE_MATCH",
         "ARGUS_SKILL_SOURCE_ROOT",
+        "ARGUS_SKILL_LETTER_INTERVAL_HOURS",
     ):
         assert must in names
     # HAPI's per-role backend knobs are registered too (so they stop being invisible).

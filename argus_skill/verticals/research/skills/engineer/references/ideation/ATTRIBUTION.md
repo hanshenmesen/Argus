@@ -12,7 +12,7 @@ These are read progressively by the ideation skills:
 - **Research Idea Playbook — instantiation**: read the ONE selected
   `ideation-sub-patterns/C##.md` tactical card (its Step-by-Step + failure mode)
   to write the candidate.
-- **`novelty-check.md` / reviewer `kill-argument.md` — audit**: read the
+- **`novelty-check.md` / reviewer `strongest-argument-against.md` — reading**: read the
   sub-pattern failure-mode panels and `anti-patterns.md` to check the candidate
   clears the cluster's documented reject lessons.
 

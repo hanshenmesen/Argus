@@ -214,9 +214,24 @@ class PlannerOrchestrationMixin:
         changed_preview = ", ".join(changed_paths[:12]) or "(clean or unavailable)"
         if len(changed_paths) > 12:
             changed_preview += f", +{len(changed_paths) - 12} more"
+        # The machine's time, beside its space. A Planner that knows it is
+        # two in the morning and that nobody has written for seven hours
+        # sizes the night's work differently from one that thinks a reply is
+        # a minute away.
+        presence_lines: list[str] = []
+        try:
+            from ...core.operator_presence import operator_presence
+
+            presence = operator_presence(getattr(self.memory, "root", None))
+            presence_lines.append(f"- time_and_presence: {presence.describe()}")
+            if guidance := presence.guidance():
+                presence_lines.append(f"  {guidance}")
+        except Exception:  # noqa: BLE001 - presence is advisory
+            pass
         return "\n".join(
             [
                 "## Host current-reality digest",
+                *presence_lines,
                 f"- vertical: {pipeline.get('vertical') or '(unresolved)'}",
                 f"- workflow_mode: {pipeline.get('workflow_mode') or '(unset)'}",
                 f"- current_stage: {pipeline.get('current_stage') or self._current_pipeline_stage() or '(unset)'}",

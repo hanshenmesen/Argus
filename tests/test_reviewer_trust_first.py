@@ -43,9 +43,9 @@ def _prompt(*, measured: bool, monkeypatch) -> str:
 
 def test_directive_trusts_and_drops_reflexive_rerun():
     d = _verification_directive()
-    assert "Trust clear, consistent evidence" in d
-    assert "missing" in d
-    assert "contradictory" in d
+    assert 'Trust consistent evidence' in d
+    assert 'gaps' in d
+    assert 'contradictions' in d
     assert "identity drift" in d.lower()
     assert "git diff" in d.lower()
     assert "hashes" not in d.lower()
@@ -62,9 +62,9 @@ def test_paper_review_requires_idea_and_built_artifact_quality():
     assert "real evaluator" in block
     assert "strong same-information baselines" in block
     assert "positive controls" in block
-    assert "venue compliance" in block
+    assert "follows the venue's rules" in block
     assert "rendered layout" in block
-    assert "inside the verdict's `reason=` value" in block
+    assert "inside the `reason=` value of your closing lines" in block
     assert "never reopen selection or move backward" in block
 
 
@@ -154,7 +154,7 @@ def test_final_submission_forces_certify_over_operator_explore(tmp_path) -> None
 
 def test_build_prompt_uses_trust_first_not_old_rerun(monkeypatch):
     p = _prompt(measured=False, monkeypatch=monkeypatch)
-    assert "Trust clear, consistent evidence" in p
+    assert 'Trust consistent evidence' in p
     assert "use *your own* output as ground truth" not in p
     assert "## Evidence policy" not in p
 
@@ -162,33 +162,33 @@ def test_build_prompt_uses_trust_first_not_old_rerun(monkeypatch):
 def test_measured_mode_trusts_scorer_and_refocuses(monkeypatch):
     p = _prompt(measured=True, monkeypatch=monkeypatch)
     assert "TRUST the scorer, judge the IDEA" in p
-    assert "Do NOT re-run the scorer yourself" in p
-    assert "self-supervises correctness" in p
+    assert 'Do not rerun the scorer to confirm an honest, consistent number' in p
+    assert 'Engineer checks correctness by running it every round' in p
     # refocus on novelty judgement + high-level direction
-    assert "genuinely novel" in p
+    assert 'whether this mechanism was new or another adjustment' in p
     # explicit override of the generic demand-evidence rules
-    assert "OVERRIDES the generic" in p
+    assert 'takes precedence over the general rules' in p
 
 
 def test_non_measured_blocks_only_on_claim_critical_evidence(monkeypatch):
     p = _prompt(measured=False, monkeypatch=monkeypatch)
-    assert "Only missing claim-critical evidence means `continue`" in p
-    assert "optional evidence and minor weaknesses stay advisory" in p
+    assert 'Only claim-essential evidence gaps warrant `continue`' in p
+    assert 'optional evidence and minor weaknesses are advice' in p
 
 
 def test_done_tracks_the_current_verification_profile(monkeypatch):
     p = _prompt(measured=False, monkeypatch=monkeypatch)
 
-    assert "works at the current verification profile" in p
-    assert "not exhaustive proof or artifact completeness" in p
-    assert "Operator>objective>mission>preregistration" in p
-    assert "One timeout, failed attempt" in p
+    assert 'outcome meets this verification profile' in p
+    assert 'not exhaustive proof or every file' in p
+    assert 'operator>objective>mission>preregistration' in p
+    assert 'A timeout or failed attempt' in p
 
 
 def test_reviewer_separates_integrity_from_scientific_value(monkeypatch):
     p = _prompt(measured=False, monkeypatch=monkeypatch)
-    assert "Integrity is mandatory" in p
-    assert "not scientific value by itself" in p
+    assert 'Integrity is required' in p
+    assert 'not scientific value' in p
     assert "`replan_requested` for a wrong target" in p
 
 

@@ -128,7 +128,7 @@ def test_continuation_engineer_round_uses_compact_checkpoint_prompt(tmp_path: Pa
     assert "## Continuation turn" in prompts[1]
     assert "## Current mission task" not in prompts[1]
     assert len(prompts[1]) < len(prompts[0])
-    assert all("## Handoff" in prompt for prompt in prompts)
+    assert all('## Carrying context between rounds' in prompt for prompt in prompts)
 
 
 def test_shared_checkpoint_file_survives_across_missions(tmp_path: Path) -> None:

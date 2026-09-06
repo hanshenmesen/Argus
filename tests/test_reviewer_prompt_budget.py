@@ -116,10 +116,10 @@ def test_windows_fixed_contract_prose_within_budget(monkeypatch):
 def test_reviewer_scopes_product_acceptance_to_the_claim(monkeypatch):
     prompt = _prompt(measured=False, monkeypatch=monkeypatch)
 
-    assert "mission claims a user-facing" in prompt
-    assert "test the safe public entry point" in prompt
-    assert "Internal exploratory changes need no product ceremony" in prompt
-    assert "feedback experiment is the trial" in prompt
+    assert 'Test claimed UI/API/CLI/service flows' in prompt
+    assert 'at a safe public entry point' in prompt
+    assert 'Internal exploration needs its feedback experiment' in prompt
+    assert 'feedback experiment' in prompt
     assert "Never cause external or irreversible effects" in prompt
 
 
@@ -182,8 +182,8 @@ def test_the_verdict_vocabulary_is_stated_once(monkeypatch):
     # policy. Two definitions of the same four words is the redundancy this
     # budget exists to catch, and it cost more than the sentence it funded.
     p = _prompt(measured=False, monkeypatch=monkeypatch)
-    assert p.count("concrete in-scope material gap") == 1
-    assert p.count("wrong target or real boundary change") == 1
+    assert p.count('one material gap in scope') == 1
+    assert p.count('wrong target or scope change') == 1
 
 
 def test_reviewer_records_prompt_block_token_estimates(monkeypatch):
@@ -340,8 +340,8 @@ def test_reviewer_accepts_implementation_grounding_proportionally(
 ) -> None:
     prompt = _prompt(measured=False, monkeypatch=monkeypatch)
 
-    assert "primary-source grounding" in prompt
-    assert "community implementations may suffice for implementation details" in prompt
+    assert 'Use primary sources for external claims' in prompt
+    assert 'community code may ground implementation details' in prompt
     assert "`replan_requested` for a wrong target" in prompt
-    assert "Do not demand work outside the current profile" in prompt
-    assert "feedback-producing experiments or research" in prompt
+    assert 'Stay within this profile; require no future-proofing' in prompt
+    assert 'require experimental or research feedback' in prompt

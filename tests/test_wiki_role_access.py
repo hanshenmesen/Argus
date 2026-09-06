@@ -54,8 +54,8 @@ def test_manager_engineer_and_planner_share_direct_wiki_contract(
     assert "Procedures and checklists belong in Skills" in engineer
     assert "route durable project facts" in engineer
     assert "external algorithm" in planner
-    assert "starting context, not a" in planner
-    assert "fresh paper/source/issue/hardware investigation" in planner
+    assert 'beyond Wiki/Skills' in planner
+    assert 'Consult papers,\n  source, issues, or hardware when consequential' in planner
 
 
 def test_planner_uses_session_state_for_vertical_and_workspace_for_wiki(
@@ -103,4 +103,4 @@ def test_direct_workflow_planner_has_no_stage_gate(tmp_path: Path) -> None:
     assert "## Stage checklist" not in prompt
     assert "Downstream stages (LOCKED" not in prompt
     assert "## Current workflow stage" in prompt
-    assert "semantic context, not a hard boundary" in prompt
+    assert 'context, not a hard boundary' in prompt

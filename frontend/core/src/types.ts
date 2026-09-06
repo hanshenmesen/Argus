@@ -321,6 +321,7 @@ export interface MissionView {
     title: string;
     objective: string;
     summary: string;
+    final_output?: string;
     status: string;
     started_at: number | null;
     completed_at: number | null;

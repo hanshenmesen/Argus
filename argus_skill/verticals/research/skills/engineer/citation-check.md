@@ -1,9 +1,9 @@
 ---
-name: "Citation Verification"
-description: "Verify and repair material citations directly against primary sources during final scientific review."
+name: "Checking citations against primary sources"
+description: "Check and repair material citations directly against primary sources during the final scientific review."
 ---
 
-# Citation Verification
+# Checking citations against primary sources
 
 Use this in Review when a material statement depends on a citation. Work from
 the current manuscript and bibliography; do not create a citation report.
@@ -20,5 +20,5 @@ For each disputed or claim-critical citation:
 
 Do not infer bibliographic facts from model memory, impose a citation-count
 quota, or create per-citation JSON. Report any unresolved material citation
-through the scientific review so it remains a blocking issue in
-`paper/REVIEW.md`.
+through the scientific review so `paper/REVIEW.md` makes clear that the paper
+does not hold until that citation is resolved.

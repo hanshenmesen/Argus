@@ -89,6 +89,20 @@ def merge_mission_view_snapshot(
         else:
             mission["title"] = mission.get("title") or objective.splitlines()[0][:240]
     if active:
+        if (
+            str(active.get("id") or "") != owner_id
+            or mission.get("completed_at") is not None
+            or (
+                active.get("started_ts") is not None
+                and active["started_ts"] != mission.get("started_at")
+            )
+        ):
+            mission.update({
+                "summary": "",
+                "final_output": "",
+                "started_at": active.get("started_ts"),
+                "completed_at": None,
+            })
         mission["id"] = str(active.get("id") or mission.get("id") or "")
         mission["status"] = "working"
         mission["started_at"] = mission.get("started_at") or active.get("started_ts")

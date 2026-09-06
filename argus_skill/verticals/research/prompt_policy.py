@@ -10,8 +10,9 @@ import time
 from pathlib import Path
 
 from .library_preparation import STAGE_PLAYBOOK_PATHS
+from .notes import RESEARCH_NOTES_FILENAME, read_research_notes
 
-_HANDOFF_STAGES = frozenset({"idea", "experiment", "paper"})
+_NOTES_STAGES = frozenset({"idea", "experiment", "paper"})
 _CONTEXT_CHAR_LIMIT = 32_000
 
 # Stages whose work actually touches compute: sizing an idea, then building
@@ -315,8 +316,8 @@ def research_runtime_context(stage: str, project_root: Path | None = None) -> st
 def active_context_paths(stage: str) -> tuple[str, ...]:
     """Return the only normal cross-stage context path for ``stage``."""
     normalized = str(stage or "").strip().lower()
-    if normalized in _HANDOFF_STAGES:
-        return ("HANDOFF.md",)
+    if normalized in _NOTES_STAGES:
+        return (RESEARCH_NOTES_FILENAME,)
     if normalized == "review":
         return ("paper/REVIEW.md",)
     return ()
@@ -331,8 +332,8 @@ def _stage_playbook_block(stage: str) -> str:
         "## Authoritative stage playbook\n"
         f"Playbook: `{playbook}`. Open `{resolved}` before acting. It is "
         f"the single workflow playbook for `{stage}`. Other Skills are optional "
-        "tools: they cannot redefine the stage, its completion bar, HANDOFF.md, or "
-        "project-visible artifacts."
+        "tools: they cannot redefine the stage, its completion bar, the research "
+        "notes in RESEARCH_NOTES.md, or the files the project shows."
     )
 
 
@@ -343,11 +344,13 @@ def active_research_context(stage: str, project_root: Path | None) -> str:
     if not paths:
         return ""
     relative = paths[0]
-    path = Path(project_root) / relative
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        text = ""
+    if relative == RESEARCH_NOTES_FILENAME:
+        text = read_research_notes(project_root)
+    else:
+        try:
+            text = (Path(project_root) / relative).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
     if not text.strip():
         return (
             "## Active research context\n"
@@ -361,7 +364,7 @@ def active_research_context(stage: str, project_root: Path | None) -> str:
         "## Active research context\n"
         f"Loaded only from `{relative}`:\n\n{text.strip()}\n\n"
         "Treat this as the current upstream summary, not as permission to crawl "
-        "historical artifacts. Open an older file only if this document explicitly "
+        "historical files. Open an older file only if this document explicitly "
         "names it for a concrete dispute."
     )
 
@@ -381,11 +384,11 @@ def academic_paper_review_block() -> str:
         "size yourself; that inspection is the assessment, and the absence of host-side "
         "passes is never by itself a reason to withhold `done` or to wait for the host. "
         "Report scientific correctness and importance, rendered layout, visual "
-        "quality, academic argument and language, and venue compliance. Do not load "
-        "HANDOFF.md or recursively crawl old reports or history. Put all three results "
-        "inside the verdict's `REASON=` value as "
-        "`Scientific: ... | Visual: ... | Language: ...`; do not leave them only in prose "
-        "before the verdict. Do not edit files or change stage state. Never reopen "
+        "quality, academic argument and language, and whether the paper follows the "
+        "venue's rules. Do not load the research notes or crawl old reports or history. "
+        "Put all three results inside the `REASON=` value of your closing lines as "
+        "`Scientific: ... | Visual: ... | Language: ...`; do not leave them only in the "
+        "prose above. Do not edit files or change stage state. Never reopen "
         "selection or move backward. "
         + paper_reviewer_standard()
         + " For each required "
@@ -453,8 +456,8 @@ def _paper_narrative_packaging_block() -> str:
         "that change the current inference and explains why. A headline number may "
         "recur in the abstract, introduction, results, caption, and conclusion when it "
         "does each location's job; do not copy a flat method-by-dataset-by-metric "
-        "recital across sections. Translate any gate, validator, artifact-status, or "
-        "evidence-chain language into the scientific question, the result, the "
+        "recital across sections. Translate any workflow or evidence-bookkeeping "
+        "language into the scientific question, the result, the "
         "alternative explanation resolved, and the resulting inference."
     )
 
@@ -490,7 +493,7 @@ def _narrative_editor_block() -> str:
         "Keep the current manuscript as the starting point. Inspect it and the latest "
         "actionable Reviewer findings supplied for this round; edit only a located "
         "problem that impairs reader understanding or the argument. Use the current "
-        "paper, `HANDOFF.md` evidence roles, the venue drafting skill, and "
+        "paper, the evidence roles in the research notes (`RESEARCH_NOTES.md`), the venue drafting skill, and "
         "`engineer/references/paper-writing-craft.md` for how the repair should read. Do not "
         "search review history or internal diagnostic reports, or copy reviewer-response "
         "wording into the manuscript. Preserve clear content, structure, and wording. "
@@ -517,7 +520,7 @@ def _engineer_fragment(
     operation: str,
 ) -> str:
     narrative_edit = operation == "narrative_edit"
-    # HANDOFF supplies evidence roles; current repair feedback arrives through
+    # The research notes supply evidence roles; current repair feedback arrives through
     # the normal round context. Do not preload REVIEW.md or historical reports.
     context = active_research_context(
         "paper" if narrative_edit else stage,
@@ -572,7 +575,7 @@ def _reviewer_fragment(
         return (
             "## Rendered-PDF cold read\n"
             "Read only `paper/main.pdf` in the isolated working directory. Do not "
-            "look for TeX, HANDOFF, REVIEW.md, code, evidence files, history, or "
+            "look for TeX, the research notes, REVIEW.md, code, evidence files, history, or "
             "internal diagnostics. Judge whether the PDF makes one central finding "
             "recoverable after the first page; whether sections advance rather than "
             "replay a flat matrix; whether headline, mechanism, control, scope, and "
@@ -613,7 +616,7 @@ def _reviewer_fragment(
         )
     return "\n\n".join(
         block
-        # Live HANDOFF/REVIEW contents belong to the Reviewer's round delta, not
+        # Live notes/REVIEW contents belong to the Reviewer's round delta, not
         # this static policy fragment used to decide whether a session resumes.
         for block in (
             _stage_playbook_block(stage),
@@ -677,7 +680,7 @@ def render_role_prompt_fragment(
             + active_research_context(normalized_stage, project_root)
             + "\n\n## Forward-only stage authority\n"
             "Research stages never roll back. Hold the current stage and schedule "
-            "repairs there, or advance when its checklist is satisfied."
+            "repairs there, or advance when the stage's work is complete."
         ).strip()
     return ""
 

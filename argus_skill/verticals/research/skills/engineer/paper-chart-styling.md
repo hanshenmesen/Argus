@@ -1,33 +1,32 @@
 ---
-name: "Paper Chart Styling"
-description: "Give every DATA figure in a paper one consistent, journal-grade look instead of default-matplotlib ugliness. Use when generating accuracy/latency/ablation plots, bar/line charts, or any data-driven figure for a paper. Covers a shared publication style (SciencePlots + colour-blind-safe palettes), venue-aware figure sizing (single-column figure vs full-width figure*), redundant colour+marker encoding, highlighting the proposed method, correct PDF font embedding, and learning composition from open-access exemplar papers. Applies to any venue — column layout comes from the project's researched venue profile."
+name: "Styling data figures for publication"
+description: "Give every data figure in a paper a consistent style suitable for a journal. Use this for accuracy, latency, and ablation plots, bar and line charts, or any data-driven paper figure. Covers a shared publication style (SciencePlots + colour-blind-safe palettes), sizing for the venue (single-column figure vs full-width figure*), redundant colour+marker encoding, highlighting the proposed method, correct PDF font embedding, and learning composition from open-access exemplar papers. Applies to any venue; column layout comes from the project's researched venue profile."
 ---
 
-## Title
-Paper Chart Styling
+# Styling data figures for publication
 
-## Description
-Data figures generated ad-hoc look nothing like a real conference paper: default
-blue/orange, rainbow/`jet` colormaps, wrong font sizes, no font embedding, and
-colours that collapse under colour-blind simulation. This skill gives every data
-plot ONE shared, journal-grade style via a small helper, `paper_chart_style.py`,
+## Why a shared style matters
+Data figures drawn independently often miss the care of a finished conference
+paper: default blue/orange, rainbow/`jet` colormaps, wrong font sizes, no font
+embedding, and colours that collapse under colour-blind simulation. This skill gives every data
+plot one shared style suitable for a journal via a small helper, `paper_chart_style.py`,
 and a short set of composition rules learned from open-access papers. Conceptual
-figures (teaser/pipeline/architecture) are NOT covered here — route those through
-the research vertical's Research Visualization Router. This skill is only for
+figures (teaser/pipeline/architecture) are not covered here — route those through
+*Choosing how to draw a research figure*. This skill is only for
 **data/metric/result plots that are legitimately scripted from local data**.
 
 ## When to use
 - You are creating data-driven figures (curves, bars, scatter, heatmaps) for a
   paper from `paper/analysis/build_results.py` or similar.
-- The figures currently look inconsistent, off-palette, or "ugly" versus a real
-  conference paper.
+- The figures currently look inconsistent, use a mismatched palette, or lack
+  the visual finish of a conference paper.
 
-## When NOT to use
-- Conceptual/method/teaser/pipeline overview figures — use the Research
-  Visualization Router rather than disguising them as data plots.
+## When to use another approach
+- Conceptual/method/teaser/pipeline overview figures — use *Choosing how to draw
+  a research figure* rather than disguising them as data plots.
 - There is no local data to plot yet (run/analyze experiments first).
 
-## How to solve
+## How to draw the charts
 
 1. **Install the required plotting stack in the project venv**:
    ```bash
@@ -95,12 +94,12 @@ the research vertical's Research Visualization Router. This skill is only for
    caption already identifies the figure.
 
 8. **Save vector/high-dpi with embedded fonts** (the helper sets `pdf.fonttype=42`
-   and 600 dpi): generate PDF, SVG, and a high-DPI PNG review artifact from the
+   and 600 dpi): generate PDF, SVG, and a high-DPI PNG for inspection from the
    same plotting script. Embed the PDF in the paper; do not replace the data
    renderer with manually constructed SVG primitives.
 
 9. **Learn composition from real papers.** Before locking figure layouts, run the
-   **Paper Exemplar PDF Learning** skill and study how 2–3 open-access papers in
+   **Learning from strong published papers** skill and study how 2–3 open-access papers in
    the same area compose their data figures: how many panels, axis conventions,
    how they highlight their own method, legend placement, and caption phrasing.
    Match those conventions; do not copy their data or exact styling verbatim.
@@ -119,8 +118,8 @@ the research vertical's Research Visualization Router. This skill is only for
   is what your scripts import. Re-copy it if you upgrade.
 - SciencePlots is mandatory for this route. A missing package is an environment
   error, not permission to fall back to the retired ad-hoc data-figure method.
-- This skill styles data plots only. Conceptual/method figures use the
-  renderer-neutral Research Visualization Router.
+- This skill styles data plots only. For conceptual/method figures, use
+  *Choosing how to draw a research figure*, which considers the available renderers.
 - Figure width must still agree with the LaTeX float type: teaser and the main
   pipeline/architecture overview are the full-width `figure*` floats; sub-module
   and detail plots stay single-column `figure` (the layout review flags an

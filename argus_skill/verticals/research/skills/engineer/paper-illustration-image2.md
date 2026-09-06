@@ -1,13 +1,13 @@
 ---
-name: "Paper Illustration Image2"
-description: "Optionally generate a non-claim-bearing visual asset when the configured image route is available."
+name: "Using generated imagery in a paper figure"
+description: "Optionally generate a visual element that carries no scientific claim when the configured image route is available."
 ---
 
-# Paper Illustration Image2
+# Using generated imagery in a paper figure
 
-Use this only after the Research Visualization Router determines that generative
-imagery helps a conceptual figure and model API status reports an available
-image route. It is optional; absence never blocks the paper.
+Use this only after *Choosing how to draw a research figure* establishes that
+generative imagery helps a conceptual figure and model API status reports an available
+image route. It is optional; the paper can proceed without it.
 
 Use image generation for a background, texture, or non-semantic icon. Scientific
 labels, numbers, arrows, boundaries, and claim-bearing geometry must remain
@@ -20,5 +20,5 @@ editable and deterministic in the final figure.
 4. Place only the useful non-semantic asset into the editable figure source.
 
 Keep the prompt only when it is needed to regenerate the included asset. Do not
-create registration files or separate visual-review reports. Final acceptance
-happens in the single visual pass during Review.
+create registration files or separate visual-review reports. The final visual
+judgment is made in the single visual assessment during Review.

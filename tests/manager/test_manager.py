@@ -1028,9 +1028,9 @@ def test_vertical_decision_always_uses_repository_grounded_route(
     assert runner.calls[0]["options"].force_safe_mode is True
     assert runner.calls[0]["options"].dangerous_yolo is False
     assert "--available-tools=" not in runner.calls[0]["options"].extra_args
-    assert "inspect only when the fit is unclear" in runner.calls[0]["prompt"]
-    assert "Preserve stated paths, commands, order" in runner.calls[0]["prompt"]
-    assert "Omit `execution_task` for a standalone existing route" in (
+    assert 'inspect if the fit is unclear' in runner.calls[0]["prompt"]
+    assert 'Preserve paths, commands, order' in runner.calls[0]["prompt"]
+    assert 'omit it for a standalone existing route' in (
         runner.calls[0]["prompt"]
     )
     assert "at most one targeted" not in runner.calls[0]["prompt"]
@@ -1079,21 +1079,21 @@ def test_research_route_prompts_require_the_fields_the_parser_requires() -> None
 
     assert "always choose and output `research_target_level`" in fast
     assert "Always output `research_direction_mode`" in fast
-    assert "For a research-target vertical, always add `research_target_level`" in (
+    assert 'For research-target verticals, add `research_target_level`' in (
         grounded
     )
     assert "Add research target fields only when the operator stated them" not in fast
-    assert "`target_venue` only when the operator stated one" in grounded
+    assert '`target_venue` only if operator-stated' in grounded
     for prompt in (fast, grounded):
-        assert "Figures, plots, diagrams, a Figure 1" in prompt
-        assert "a revision of a research manuscript are `research`" in prompt
-        assert "only for that part and excludes a full campaign, choose `direct`" in prompt
+        assert 'Research figures, plots, diagrams, Figure 1' in prompt
+        assert 'manuscript revisions are `research`' in prompt
+        assert 'If only that part is requested and a full campaign excluded, choose `direct`' in prompt
         assert "START_STAGE=\n" in prompt
         assert "START_STAGE=<stage name or empty>" in prompt
-        assert "used only with WORKFLOW_MODE=direct" in prompt
-        assert "must be one of the chosen vertical's stages" in prompt
-        assert "Empty means its first stage" in prompt
-        assert "A staged workflow always starts at its first stage" in prompt
+        assert 'applies only to WORKFLOW_MODE=direct' in prompt
+        assert 'choose a stage of that vertical' in prompt
+        assert 'leave empty for its first stage' in prompt
+        assert 'Staged work always begins at its first stage' in prompt
 
 
 @pytest.mark.parametrize("fast", [True, False], ids=["fast", "grounded"])
@@ -1638,7 +1638,7 @@ def test_role_skill_block_can_omit_libraries_for_classification(tmp_path):
         "optimize a CUDA kernel", include_libraries=False
     )
     assert "Skill libraries" not in block
-    assert "Argus Manager Role" not in block
+    assert "The Manager's role" not in block
     assert mgr.mission.calls == 0
 
 

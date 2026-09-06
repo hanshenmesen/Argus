@@ -1,9 +1,9 @@
 ---
-name: "Research Grind"
-description: "How a result actually gets earned: treat the first implementation as a first draft, grind the gap down over many rounds, sit through the flat stretches, and let the idea change while you do it. Use whenever a method is short of its baseline, or a campaign is deciding whether it has done enough."
+name: "Working a research result into shape"
+description: "Treat the first implementation as a first draft, work down the gap over many rounds, stay with the flat stretches, and let the idea change as you learn. Use this whenever a method falls short of its baseline or the project is deciding whether it has done enough."
 ---
 
-# Research Grind
+# Working a research result into shape
 
 ## Why this exists
 
@@ -19,7 +19,7 @@ rounds making a benchmark harness correct will spend two on making the science
 work.
 
 That asymmetry is the whole problem, and it has nothing to do with capability.
-Bring the infrastructure appetite to the experiment.
+Bring the same persistence to the experiment that you bring to infrastructure.
 
 ## The first number is not a result
 
@@ -52,7 +52,7 @@ The loop is unglamorous and it is the job:
 
 1. Measure. Write the gap down with its size.
 2. Say what the gap is made of. One named cause, not a list of five.
-3. Buy the fix that addresses that cause, and only that cause.
+3. Make the change that addresses that cause, and only that cause.
 4. Measure again. Keep the number, keep the diff, keep what you learned.
 
 Ten rounds is normal. Thirty is not remarkable. Teams that publish these results
@@ -144,7 +144,7 @@ A loss does not become the paper. If the gap is still open, the campaign is not
 finished — it is mid-grind, which is a normal place to be and an honest thing to
 report internally.
 
-Deciding an idea is genuinely dead is the Manager's call, it is rare, and it
+Deciding that an idea has run its course is the Manager's call, it is rare, and it
 takes more than a stubborn number: sustained optimization already spent across
 implementation, data, scale and evaluator, the gap unmoved by any of it, and a
 reason the next round would fail that is not simply that the last one did.

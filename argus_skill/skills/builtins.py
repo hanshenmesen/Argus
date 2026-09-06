@@ -23,7 +23,7 @@ _MOVED_SKILL_MARKER = ".moved-from-global.json"
 _LEGACY_BUILTIN_SEED_HASHES = {
     "agent-md-optimize-project-template.md": "52fbd7e60f85042624a54b563945b26739a590120d21c830c8f2d4eda0b3db7d",
     "engineer/argus-engineer-role.md": "8823e0c01e377e1be5293d1529344213e0f1326ebe94a6863dc4ee0e2730dadd",
-    "engineer/environment-readiness-gate.md": "f8615f2a465cbe7b2ce838179c24a575baf4fbe6370730035c85cd4dd907de9b",
+    "engineer/environment-readiness.md": "f8615f2a465cbe7b2ce838179c24a575baf4fbe6370730035c85cd4dd907de9b",
     "engineer/mermaid-graphviz-diagrams.md": "d340f45b0aeb7ee5f239aa79f1c8f3ed94be4a56af036dd7b80a60cd72953542",
     "engineer/training-infrastructure-guide.md": "43d1cbc1017173a5376f2a47642ea3ba5bf007b879ba86737514f8aba28f3f39",
     "manager/argus-manager-role.md": "dc193f31dca3acd3041544745d97b832725c0e37b55a44bd9a93db5f97a631be",
@@ -32,6 +32,29 @@ _LEGACY_BUILTIN_SEED_HASHES = {
     "reviewer/argus-reviewer-role.md": "bc971a888bfcdc3acaca939b643410f509c328376737377ba8e898f1b4dee925",
 }
 _RETIRED_BUILTIN_SEED_HASHES = {
+    # Renamed on 2026-09-06 so that the library speaks like a researcher:
+    # reading the evidence, the strongest argument against, claims against
+    # evidence, a citation check, an environment readiness check, guiding the
+    # engineer. A seeded copy under the old name is removed when it still
+    # matches, archived otherwise.
+    "reviewer/experiment-audit.md": (
+        "67ab93f4bd258207d8eedf1f2c7b27455f50d76d746f61f07b4facd1a35dcff7"
+    ),
+    "reviewer/kill-argument.md": (
+        "a84fba34ce27bc8d2fcaba3a245d0ca4d49c5922f8401032c71e0f468eff0150"
+    ),
+    "engineer/citation-audit.md": (
+        "ee79f3b888dd2d60a36bd4e7efd771b345b24ca8bebf8827a4affd7d584834b2"
+    ),
+    "engineer/claims-evidence-audit.md": (
+        "de4fbd08530256ec6ac724051cf6d37e98917b0f7b24c120fbe198e4784474ce"
+    ),
+    "engineer/environment-readiness-gate.md": (
+        "a85d54656f5e5ffa7b5d8519456fc8e340e1df23d2f47f63a95f428bb75d7c71"
+    ),
+    "reviewer/reviewer-engineer-handoff.md": (
+        "e31210ceaab0cf524b0edc009615bf8aaee06e9c9c77656eb1509c1037a2f800"
+    ),
     "engineer/experiment-audit.md": (
         "d7fa41bfefaa0aaa8156f5febc8a4c1dc98874f3e7e24e6306f075266c49074e"
     ),

@@ -76,9 +76,9 @@ def test_route_prompt_has_two_labels_and_safe_default() -> None:
     assert "Argus itself" in p
     assert "Use SELF unless the requested outcome genuinely needs the team" in p
     assert "code/project modification" in p
-    assert "multiple coordinated artifacts" in p
+    assert 'several related outputs' in p
     assert "guided reading/tutoring" in p
-    assert "one low-risk summary/note/report artifact" in p
+    assert 'one low-risk summary, note, or report' in p
 
 
 def test_backend_exception_is_safe_default() -> None:
@@ -144,7 +144,7 @@ def test_build_simple_prompt_is_minimal() -> None:
 
     assert f"{runner_backend_label()} worker" in out
     assert "identify only as Argus Manager" in out
-    assert "do not invent extra tasks or artifacts" in out
+    assert 'do not invent extra tasks or outputs' in out
     assert "ask at most one question" in out
     assert "then wait" in out
     assert "time-by-category cross-slices" in out

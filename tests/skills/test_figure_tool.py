@@ -79,7 +79,7 @@ def test_review_prompt_with_rubric_is_rubric_authoritative() -> None:
         "findings, prohibited_content_present."
     )
     prompt = figure_tool._review_prompt(original_prompt="a diagram", rubric=rubric)
-    assert "AUTHORITATIVE" in prompt
+    assert "Follow the Rubric below as the authority for this review" in prompt
     assert "keep_or_regenerate" in prompt
     assert "score_1_to_5" not in prompt
     # the caller's rubric text is passed through verbatim
@@ -137,7 +137,7 @@ def test_review_image_threads_rubric_into_authoritative_prompt(
         env=env,
     )
     sent_text = captured["body"]["input"][0]["content"][0]["text"]
-    assert "AUTHORITATIVE" in sent_text
+    assert "Follow the Rubric below as the authority for this review" in sent_text
     assert "confirmed_labels" in sent_text
     assert "score_1_to_5" not in sent_text
     # the paper wrapper preserves the "rubric" field the domain-neutral

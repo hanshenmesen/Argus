@@ -1,6 +1,6 @@
 """Research vertical stage definitions and active role policy.
 
-Research uses one forward-only four-stage pipeline:
+Research moves through four stages, always forward:
 ``idea -> experiment -> paper -> review``. Experiment covers both building
 the method and running the experiments, so the design can be revised freely
 while the evidence comes in.
@@ -63,17 +63,17 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             id="idea.selection",
             statement=(
                 "For a staged broad paper mission, the selector makes one resumable "
-                "choice; project-root `HANDOFF.md` carries the winner plus one "
-                "single-line rejection reason for every other route into Experiment. "
-                "For a staged operator-locked paper direction, `HANDOFF.md` instead "
-                "validates and positions the supplied idea without inventing a selector "
-                "or rejected routes. It replaces the previous text rather than appending "
-                "history. The selection itself is what completes this stage; a missing "
-                "or thin note is written on the way out, not a reason to hold. "
-                "A direct Idea-only request returns its independently reviewed result "
-                "without writing that file."
+                "choice; the project-root research notes, `RESEARCH_NOTES.md`, carry "
+                "the winner into Experiment, with a one-line reason for setting aside "
+                "every other route. For a staged direction the operator has fixed, the "
+                "research notes instead examine and position the supplied idea without "
+                "inventing a selector or routes that were set aside. The notes replace "
+                "the previous text rather than accumulating history. The selection "
+                "itself completes this stage; missing or thin notes are written on the "
+                "way out and are never a reason to hold. A direct Idea-only request "
+                "returns its independently reviewed result without writing that file."
             ),
-            evidence_hint="the selected idea in internal pipeline state",
+            evidence_hint="the selected idea in the project's stage record",
         ),
     ),
     "experiment": _checklist(
@@ -96,7 +96,7 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "Trace the actual call path and confirm the method, baseline, controls, "
                 "information boundary, and evaluator test the selected idea. Repair "
                 "implementation or setup defects in place; do not reopen selection or "
-                "move the pipeline backward. A hypothesis-to-code mapping must name the "
+                "move the work backward. A hypothesis-to-code mapping must name the "
                 "executed quantities and path rather than merely matching labels."
             ),
             evidence_hint="implemented entry points and their direct test output",
@@ -159,19 +159,20 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             evidence_hint="repaired work products and the next decisive comparison",
         ),
         ChecklistItem(
-            id="experiment.handoff",
+            id="experiment.notes",
             statement=(
-                "When the Paper entry bar is met, overwrite project-root `HANDOFF.md` with "
-                "the thesis, winning comparisons, strongest baseline, essential losses or "
-                "limits, figures/data to use, and the minimum reproducibility pointers "
-                "needed to write the paper. Classify the complete evidence as headline, "
-                "mechanism, disambiguating control, scope-changing, or completeness "
-                "evidence, and name its canonical and repeat locations. The evidence "
-                "decides whether Experiment is done; a missing or stale note "
-                "is written by the round that advances, never a reason to hold a stage "
-                "whose science is complete."
+                "When the bar for entering Paper is met, overwrite the project-root "
+                "research notes, `RESEARCH_NOTES.md`, with the thesis, the comparisons "
+                "that establish it, the strongest baseline, the essential losses or "
+                "limits, the figures and data to use, and the minimum pointers a writer "
+                "needs to reproduce the results. Sort the complete evidence into "
+                "headline, mechanism, disambiguating-control, scope-changing, and "
+                "completeness evidence, and say where each lives, including repeats. "
+                "The evidence decides whether Experiment is done; missing or stale notes "
+                "are written by the round that advances and are never a reason to hold "
+                "a stage whose science is complete."
             ),
-            evidence_hint="HANDOFF.md, written when advancing",
+            evidence_hint="RESEARCH_NOTES.md, written when advancing",
         ),
     ),
     "paper": _checklist(
@@ -180,7 +181,7 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             statement=(
                 "Produce a complete paper draft led by the contribution and strongest "
                 "result. Include every claim-bearing experiment, intended figure and "
-                "table, citation, and venue-required section. Select and package evidence "
+                "table, citation, and venue-required section. Select and arrange evidence "
                 "by its headline, mechanism, disambiguating-control, scope-changing, or "
                 "completeness role: keep complete matrices in Methods, tables, or the "
                 "Appendix while prose interprets the comparisons that change the current "
@@ -208,7 +209,7 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             statement=(
                 "The manuscript, bibliography, figures, included source files, and rendered "
                 "output are present, mutually consistent, and compile under the selected "
-                "venue's current official rules. Method pipelines use an editable SVG "
+                "venue's current official rules. A method overview figure uses an editable SVG "
                 "grounded in the manuscript and executed code, compact horizontal and "
                 "staggered geometry, Times New Roman, and an included vector PDF export. "
                 "Reuse a suitable existing figure; draw only when needed. Default PDF "
@@ -220,14 +221,14 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             evidence_hint="paper/main.tex, rendered output, bibliography, figures, and includes",
         ),
         ChecklistItem(
-            id="paper.handoff",
+            id="paper.notes",
             statement=(
-                "Keep project-root `HANDOFF.md` as the single upstream context for Paper, "
-                "rewritten rather than accumulated. Do not create parallel project-visible "
-                "context files. Its presence or wording never decides whether Paper is "
-                "done; the manuscript does."
+                "Keep the project-root research notes, `RESEARCH_NOTES.md`, as the single "
+                "upstream context for Paper, rewritten rather than accumulated. Do not "
+                "create parallel project-visible context files. Neither their presence "
+                "nor their wording decides whether Paper is done; the manuscript does."
             ),
-            evidence_hint="HANDOFF.md as context only",
+            evidence_hint="RESEARCH_NOTES.md as context only",
         ),
     ),
     "review": _checklist(
@@ -244,8 +245,8 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "internal; the integrated Reviewer "
                 "records their adjudicated result only in `paper/REVIEW.md`. Until calibration "
                 "promotes them, new semantic-loss and cold-read diagnostics run in shadow mode "
-                "and cannot be the sole reason to block. These passes assist the Reviewer; "
-                "they are not a precondition of its verdict. When the host supplies none, "
+                "and cannot by themselves be the reason a paper is held back. These passes "
+                "assist the Reviewer; they are not a precondition of its judgment. When the host supplies none, "
                 "the Reviewer's own page-by-page inspection is the assessment, and their "
                 "absence is never by itself a reason to withhold `done`."
             ),
@@ -271,8 +272,9 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             id="review.authoritative",
             statement=(
                 "Each authoritative review overwrites `paper/REVIEW.md` with the strongest "
-                "accept case, scientific/visual/reader-facing assessment, reject-level defects, "
-                "and next action. Do not create another review file or review history."
+                "case for accepting the paper, the scientific, visual, and reader-facing "
+                "assessment, the defects a venue reviewer would reject it for, and the "
+                "next step. Do not create another review file or review history."
             ),
             evidence_hint="paper/REVIEW.md",
         ),
@@ -297,11 +299,12 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "Inspect every rendered page and every figure and table at publication "
                 "scale. Any visible overlap, clipping, overflow, connector penetration, "
                 "wrong arrow, unreadable label, malformed table, misleading plot, abnormal "
-                "whitespace, broken float placement, or inconsistent typography blocks "
-                "acceptance. Method pipelines must match the manuscript and executed "
-                "code, with compact horizontal, staggered SVG geometry, Times New Roman, "
-                "and a legible included vector export. A successful render alone is not "
-                "visual acceptance. The whole paper must look publication-ready."
+                "whitespace, broken float placement, or inconsistent typography means "
+                "the paper does not yet hold visually. A method overview figure must "
+                "match the manuscript and the executed code, with compact horizontal, "
+                "staggered SVG geometry, Times New Roman, and a legible included vector "
+                "export. That the paper compiled says nothing about how it looks. The "
+                "whole paper must look publication-ready."
             ),
             evidence_hint="the complete rendered paper and all included figures and tables",
         ),
@@ -323,7 +326,7 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             id="review.integrated",
             statement=(
                 "Perform one integrated final review of scientific content, visual quality, "
-                "language, and venue compliance on the current recompiled paper, using any "
+                "language, and conformity to the venue's rules on the current recompiled paper, using any "
                 "internal pass results the host supplied and your own inspection where it "
                 "did not. Keep all repairs inside Review without moving to an earlier stage."
             ),
@@ -332,9 +335,9 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
         ChecklistItem(
             id="review.terminal",
             statement=(
-                "Review is the terminal certified stage. Return done only when the current "
-                "paper clears the objective and venue bar and `paper/REVIEW.md` records the "
-                "authoritative verdict."
+                "Review is the final stage. Return done only when the current paper "
+                "meets the objective and the venue's standard and `paper/REVIEW.md` "
+                "records the final judgment."
             ),
             evidence_hint="paper/REVIEW.md and the current rendered paper",
         ),
@@ -454,7 +457,7 @@ def stage_completion_issues(
         return tuple(portfolio_issues)
     if normalized == "experiment":
         # Experiment is judged on its evidence by the Reviewer and Manager; the
-        # handoff note is context for Paper, not a completion condition.
+        # research notes are context for Paper, not a completion condition.
         return ()
     if normalized == "paper":
         return _paper_issue(root)
@@ -479,7 +482,7 @@ def iteration_assessment(
     mission: Any,
     outcome: Any,
 ) -> IterationAssessment | None:
-    """The Reviewer's final verdict is the judgment; nothing re-grades it.
+    """The Reviewer's final judgment stands; nothing re-grades it.
 
     This hook used to re-open a ``done`` final review whenever the structured
     ``research_result`` grades fell short of the target level (a Reviewer
@@ -541,9 +544,10 @@ REQUIRE_INDEPENDENT_REVIEW = True
 _AMBITIOUS_RESEARCH_POLICY = (
     "Build a paper around a real contribution and a result worth defending. "
     "Treat mixed or weak development evidence as a prompt to improve the method, "
-    "implementation, evaluator, controls, or experiment. Enter Paper only after "
-    "mechanism-relevant wins clearly exceed losses, the headline comparisons win, "
-    "and the strongest same-information baseline is beaten. When evidence supports "
+    "implementation, evaluator, controls, or experiment. Enter Paper only when "
+    "credible evidence, at the scale the claim needs, supports a scientifically "
+    "meaningful claim; a claim of superiority must beat the strongest "
+    "same-information baseline. When evidence supports "
     "a strong claim, state it plainly instead of burying it under defensive caveats."
 )
 
@@ -551,9 +555,9 @@ _PLANNER_RESEARCH_ORCHESTRATION = (
     _AMBITIOUS_RESEARCH_POLICY
     + " Plan only work for the current stage. Research stages are forward-only: "
     "schedule any upstream method, experiment, or paper repair in the current stage "
-    "and never request rollback. Use project-root HANDOFF.md as the sole normal "
-    "cross-stage context until Review; Review uses paper/main.tex, its rendered output "
-    "and direct dependencies, and paper/REVIEW.md."
+    "and never request rollback. The project-root research notes, RESEARCH_NOTES.md, "
+    "are the sole normal cross-stage context until Review; Review uses paper/main.tex, "
+    "its rendered output and direct dependencies, and paper/REVIEW.md."
 )
 
 _ENGINEER_RESEARCH_EXECUTION = (
@@ -561,8 +565,8 @@ _ENGINEER_RESEARCH_EXECUTION = (
     + " Verify current models, benchmark versions, and APIs from live sources instead "
     "of memory. Preserve reproducibility through code, explicit configuration, and raw output, "
     "not extra reporting files. Repair defects in the current stage and never move the "
-    "research pipeline backward. Keep experiments adaptive and rewrite HANDOFF.md with "
-    "only what the next stage needs."
+    "work backward. Keep experiments adaptive and rewrite the research notes, "
+    "RESEARCH_NOTES.md, with only what the next stage needs."
 )
 
 _REVIEWER_RESEARCH_JUDGEMENT = (
@@ -577,19 +581,20 @@ _MANAGER_RESEARCH_STEWARDSHIP = (
     + " Keep the current stage while scheduling repairs. Never move a research project "
     "backward. Advance when the stage's scientific work is done and independently "
     "reviewed; Review is terminal. Judge the science, not the bookkeeping: a missing "
-    "or outdated HANDOFF.md, review note, template detail, or file marker is repair "
-    "work for the next round, never by itself a reason to hold a stage. A Reviewer "
-    "verdict rendered on the current mission is the current review of the work it "
-    "inspected; do not demand a separate re-review of edits the Reviewer already read."
+    "or outdated research notes, review note, template detail, or file marker is "
+    "repair work for the next round, never by itself a reason to hold a stage. A "
+    "Reviewer judgment reached on the current mission is the current review of the "
+    "work it inspected; do not demand a separate re-review of edits the Reviewer "
+    "already read."
 )
 
 
 def import_legacy_state(*, source_root: object, state_root: object) -> None:
-    """Carry pre-isolation research artifacts into the isolated state root.
+    """Carry pre-isolation research files into the isolated state root.
 
     Runs once, right after legacy Manager state naming this vertical is copied
     into the new state root: old stage names are rewritten to the current
-    four-stage pipeline, and any idea-selection record made under the legacy
+    four-stage order, and any idea-selection record made under the legacy
     layout is brought along so the campaign does not reopen its portfolio.
     """
     from ...skills.stage_machine import migrate_legacy_research_stage
