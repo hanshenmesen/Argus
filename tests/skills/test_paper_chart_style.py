@@ -144,8 +144,11 @@ def test_research_data_figures_have_one_renderer_path() -> None:
     assert "single SciencePlots/Matplotlib data-figure path" in normalized_analysis
     assert "Any paper data/metric/result chart" in normalized_router
     assert (
-        "Conceptual, method, architecture, or teaser figure | "
+        "Other conceptual or teaser figure | "
         "Paper Framework Figure Studio"
+    ) in normalized_router
+    assert (
+        "Method pipeline or architecture overview | Research SVG Pipeline"
     ) in normalized_router
 
 
