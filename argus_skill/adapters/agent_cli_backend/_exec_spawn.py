@@ -25,7 +25,10 @@ from typing import TYPE_CHECKING, Any
 
 from ...core.event_catalog import EventType
 from ...core.models import RunnerResult
-from ...core.runner_errors import result_has_pre_provider_refusal
+from ...core.runner_errors import (
+    is_model_catalog_startup_error,
+    result_has_pre_provider_refusal,
+)
 from ...core.secret_guard import redact_secrets_text
 from ...core.token_usage import extract_token_usage
 from ...provider_integrations.authorization_retry import (
@@ -334,7 +337,11 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
         "turn_completed": getattr(cli_result, "turn_completed", None),
         "turn_failed": getattr(cli_result, "turn_failed", None),
         "fatal_error": redact_secrets_text(
-            str(getattr(cli_result, "fatal_error", "") or ""),
+            str(
+                translated.fatal_error
+                if is_model_catalog_startup_error(translated.fatal_error)
+                else getattr(cli_result, "fatal_error", "") or ""
+            ),
             known_values=backend._known_secret_values,
         ) or None,
         "tool_activity_observed": bool(

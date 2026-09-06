@@ -244,6 +244,8 @@ def test_stale_resume_error_with_observed_premium_usage_stays_partial() -> None:
     "Error: Access denied by policy settings. Your Copilot CLI policy is disabled.",
     "Your Copilot subscription does not include this feature",
     "Required policies have not been enabled for Copilot CLI",
+    "Error: Failed to load models (Request ID: request-1)",
+    "Copilot could not retrieve the list of available models.",
 ])
 def test_copilot_startup_policy_refusal_is_unbilled_for_new_and_existing_records(
     tmp_path: Path, error: str
@@ -265,7 +267,13 @@ def test_copilot_startup_policy_refusal_is_unbilled_for_new_and_existing_records
 
 
 @pytest.mark.parametrize("evidence", ["tokens", "aiu", "premium", "provider_cost"])
-def test_policy_error_after_metered_work_preserves_billing(tmp_path: Path, evidence: str) -> None:
+@pytest.mark.parametrize("error", [
+    "Error: Access denied by policy settings",
+    "Error: Failed to load models (Request ID: request-1)",
+])
+def test_policy_error_after_metered_work_preserves_billing(
+    tmp_path: Path, evidence: str, error: str
+) -> None:
     kwargs = {
         "tokens": {"token_usage": _known_usage(input_tokens=100, output_tokens=20)},
         "aiu": {"total_nano_aiu": 432_724_659_000},
@@ -276,7 +284,7 @@ def test_policy_error_after_metered_work_preserves_billing(tmp_path: Path, evide
         call_id="policy-after-work", project_root=tmp_path / "p1", mission_id=None,
         provider="opencode" if evidence == "provider_cost" else "copilot",
         model="gpt-5.6-sol", run_label="reviewer", started_at=1, completed_at=2,
-        status="error", error="Error: Access denied by policy settings",
+        status="error", error=error,
         **kwargs,
     )
     assert record.pricing_status != "not_billed"
