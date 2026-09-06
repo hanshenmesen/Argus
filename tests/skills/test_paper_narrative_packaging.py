@@ -15,7 +15,11 @@ from argus_skill.core.pipeline_state import read_pipeline_state, write_pipeline_
 from argus_skill.reviewer._core import ReviewerConfig, _parallel_final_review_passes
 from argus_skill.roles.prompts import ChecklistMode, resolve_role_prompt
 from argus_skill.roles.prompts.engineer import NARRATIVE_EDIT, mission_request
-from argus_skill.roles.prompts.reviewer import COLD_READ, evaluate_request
+from argus_skill.roles.prompts.reviewer import (
+    COLD_READ,
+    SCIENCE_LOSS_CHECK,
+    evaluate_request,
+)
 from argus_skill.skills.vertical_select import persist_vertical
 from argus_skill.verticals._base import load_vertical_contract
 from argus_skill.verticals.research.academic_language_review import (
@@ -202,6 +206,30 @@ def test_prompt_catalog_accepts_research_operations(tmp_path: Path) -> None:
     assert "cold_read" in cold.fragment_ids[-1]
 
     contract = load_vertical_contract("research", project_root=tmp_path)
+    science = resolve_role_prompt(
+        evaluate_request(
+            tmp_path, vertical="research", stage="review",
+            checklist_mode=ChecklistMode.NONE, operation=SCIENCE_LOSS_CHECK,
+        )
+    )
+    integrated = resolve_role_prompt(
+        evaluate_request(
+            tmp_path, vertical="research", stage="review",
+            checklist_mode=ChecklistMode.NONE,
+        )
+    )
+    assert cold.role_banner == render_role_prompt_fragment(
+        role="reviewer", operation=COLD_READ, stage="review", scope="",
+        project_root=tmp_path,
+    )
+    assert science.role_banner == render_role_prompt_fragment(
+        role="reviewer", operation=SCIENCE_LOSS_CHECK, stage="review", scope="",
+        project_root=tmp_path,
+    )
+    assert "overwrite paper/REVIEW.md" not in cold.role_banner
+    assert "overwrite paper/REVIEW.md" not in science.role_banner
+    assert contract.banner("reviewer") in integrated.role_banner
+    assert "overwrite paper/REVIEW.md" in integrated.role_banner
     assert contract.engineer_operation("paper") == "author_draft"
     assert contract.engineer_operation("review") == "narrative_edit"
 

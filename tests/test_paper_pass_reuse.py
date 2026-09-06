@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from argus_skill.core.manuscript_narrative_runtime import prepare_narrative_snapshot
+from argus_skill.core.models import RunnerResult
 from argus_skill.core.pipeline_state import read_pipeline_state, write_pipeline_state
 from argus_skill.reviewer._core import ReviewerConfig, _parallel_final_review_passes
 from argus_skill.skills.vertical_select import persist_vertical
@@ -71,6 +72,61 @@ def test_unchanged_paper_skips_loss_and_reuses_pdf_assessments(paper_review):
     assert second.status == "continue"  # Cached passes never certify the mission.
     assert "reviewer-visual: pass" in second.reason
     assert "reviewer-coldread: pass" in second.reason
+
+
+def test_only_complete_final_assessments_are_forwarded_and_cached(paper_review, monkeypatch):
+    _, config = paper_review
+    from argus_skill.reviewer import _core
+
+    calls = []
+
+    def assess(_runner, **kwargs):
+        assert "complete assessment and all required repairs in your final response" in kwargs["prompt"]
+        label = kwargs["run_label"]
+        calls.append(label)
+        return RunnerResult(
+            exit_code=0,
+            agent_messages=[
+                "I will inspect the PDF.",
+                "Tentative concern: the control might be missing.",
+                f"{label}: fail. Page 2: labels overlap; separate them. "
+                "The control is present in Table 1.",
+            ],
+            input_tokens=30,
+            output_tokens=12,
+        )
+
+    monkeypatch.setattr(_core, "gateway_run_exec", assess)
+    first = _parallel_final_review_passes(PaperRunner(), config)
+    assert len(calls) == 2
+    for label in calls:
+        assert f"{label}: fail. Page 2: labels overlap; separate them." in first.reason
+    assert first.reason.count("The control is present in Table 1.") == 2
+    assert "I will inspect" not in first.reason
+    assert "Tentative concern" not in first.reason
+    assert (first.input_tokens, first.output_tokens) == (60, 24)
+    assert first.status == "continue"
+
+    cached = _parallel_final_review_passes(PaperRunner(), config)
+    assert len(calls) == 2
+    assert cached.reason == first.reason
+    assert cached.input_tokens == cached.output_tokens == 0
+
+
+def test_empty_final_assessment_does_not_promote_progress_to_evidence(paper_review, monkeypatch):
+    _, config = paper_review
+    from argus_skill.reviewer import _core
+
+    monkeypatch.setattr(
+        _core, "gateway_run_exec",
+        lambda *_args, **_kwargs: RunnerResult(
+            exit_code=0, agent_messages=["I will inspect the PDF.", "   "],
+        ),
+    )
+    result = _parallel_final_review_passes(PaperRunner(), config)
+    assert result.backend_unavailable
+    assert "returned no assessment" in result.reason
+    assert not config.paper_pass_cache
 
 
 def test_source_change_is_reviewed_even_when_rendered_bytes_match(paper_review):
