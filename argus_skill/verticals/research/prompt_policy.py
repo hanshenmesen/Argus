@@ -433,7 +433,8 @@ def _planner_fragment(stage: str, project_root: Path | None) -> str:
                 "re-derivation of the thesis from what the evidence establishes and its "
                 "confirmation on untouched data at the scale the claim needs. In `paper`, "
                 "schedule writing; a run belongs there only for a specific evidence gap "
-                "the manuscript exposed."
+                "the manuscript exposed. Retire the refuted family's pending tasks "
+                "with RETIRE_TASK."
             ),
         )
         if block

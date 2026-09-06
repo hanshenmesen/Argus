@@ -1014,8 +1014,7 @@ class PlanningCycleMixin(
         project_done normalization, the no-new-tasks rejection, and finally
         backlog dedupe/enqueue/commit. Each phase mutates a shared
         ``_PlanCycleState`` scratch object and returns ``None`` to continue the
-        cycle, or a non-``None`` result that the caller should return
-        immediately.
+        cycle, or a non-``None`` result to return after applying task retirement.
         """
         state = _PlanCycleState(revision_request)
         for phase in (
@@ -1033,7 +1032,11 @@ class PlanningCycleMixin(
         ):
             result = phase(state)
             if result is not None:
-                return result
+                break
+        if state.verdict is not None and not state.verdict.error:
+            self._pc_retire_tasks(state)
+        if result is not None:
+            return result
         return self._pc_emit_final_verdict(state)
 
     def _pc_reconcile_reviewed_stage(

@@ -1386,6 +1386,35 @@ class PlanningCycleEnqueueMixin:
             )
         return None
 
+    def _pc_retire_tasks(self, state: _PlanCycleState) -> None:
+        """Apply retirement even when the cycle returns without enqueueing work."""
+        if not state.verdict.retire_tasks:
+            return
+        if not state.new_plan_id:
+            state.new_plan_id = state.expected_plan_id or f"plan-{BacklogItem.new_id()}"
+        skipped: list[str] = []
+        for item_id, reason in state.verdict.retire_tasks:
+            superseded = self.memory.backlog.supersede_items(
+                item_ids=(item_id,),
+                reason=reason,
+                superseded_by_plan_id=state.new_plan_id,
+            )
+            for retired_id in superseded:
+                self._emit({
+                    "type": EventType.LIFE_PLAN_NODE_SUPERSEDED,
+                    "item_id": retired_id,
+                    "superseded_by_plan_id": state.new_plan_id,
+                    "reason": reason,
+                    "source": "planner",
+                })
+            if not superseded:
+                skipped.append(item_id)
+        if skipped:
+            log.info(
+                "planner retirement skipped unknown, running or terminal items: %s",
+                ", ".join(skipped),
+            )
+
     def _pc_emit_final_verdict(self, state: _PlanCycleState) -> Any:
         verdict = state.verdict
         delivered = self._emit_planner_verdict(
@@ -1440,6 +1469,8 @@ class PlanningCycleEnqueueMixin:
                     "planner: repeated stage certification rejected; a substantive "
                     "same-stage repair must complete before recertification"
                 )
+            elif verdict.retire_tasks and not verdict.new_tasks:
+                self._emit_status("planner: processed task retirements; retrying after backoff")
             else:
                 self._emit_status(
                     "planner: all proposed tasks were filtered; retrying after backoff"

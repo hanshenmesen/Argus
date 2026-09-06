@@ -429,7 +429,7 @@ class PlanningCycleCompletionMixin:
     def _pc_reject_if_no_tasks(self, state: _PlanCycleState) -> Any | None:
         verdict = state.verdict
         revision_request = state.revision_request
-        if verdict.new_tasks:
+        if verdict.new_tasks or verdict.retire_tasks:
             return None
         if revision_request is not None:
             self._emit(

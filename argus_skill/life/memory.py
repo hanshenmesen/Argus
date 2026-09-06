@@ -1476,6 +1476,35 @@ class Backlog:
                 self._save(items)
         return tuple(superseded)
 
+    def supersede_items(
+        self,
+        *,
+        item_ids: Iterable[str],
+        reason: str,
+        superseded_by_plan_id: str,
+    ) -> tuple[str, ...]:
+        """Atomically retire named items, leaving running and terminal work alone."""
+        selected = set(item_ids)
+        superseded: list[str] = []
+        with self._locked():
+            items = self._load()
+            now = time.time()
+            for item in items:
+                if (
+                    item.id not in selected
+                    or item.status in _TERMINAL_STATUSES
+                    or item.status == "running"
+                ):
+                    continue
+                item.status = "superseded"
+                item.finished_ts = now
+                item.superseded_by_plan_id = superseded_by_plan_id
+                item.superseded_reason = reason
+                superseded.append(item.id)
+            if superseded:
+                self._save(items)
+        return tuple(superseded)
+
     def apply_plan_revision(
         self,
         *,

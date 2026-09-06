@@ -43,13 +43,13 @@ _BOUNDED_DAG_FOOTER = decision_footer_instruction(
 )
 
 _PLAN_UPDATE_INSTRUCTION = """
-The footer may optionally end with `PLAN_UPDATE=` followed by the complete
-multi-line Markdown for RESEARCH_PLAN.md. Put it after every `TASK_*` block.
+The footer may end with `PLAN_UPDATE=` and the full Markdown for RESEARCH_PLAN.md,
+after all task and retirement lines.
 """
 
 _PLANNER_CORE_CONTRACT = """
 ## Planner read-only delegation contract
-Read state, choose work, and delegate implementation to Engineer.
+Read state and delegate implementation to Engineer.
 Do not edit project files; Engineer owns edits, commands, tests, iteration.
 
 - Reuse Manager/completed decisions; give Engineer one task with its decision,
@@ -78,31 +78,31 @@ Do not edit project files; Engineer owns edits, commands, tests, iteration.
   `TASK_GOAL_CONTRIBUTION`, `TASK_EXPECTED_REGRESSIONS`, `TASK_DECISION_RULE`,
   `TASK_ACCEPTANCE_CHECK`, `TASK_PARALLEL_SAFE`, `TASK_OWNS_PATHS`, and
   `TASK_VERTICAL`.
+- Optional `RETIRE_TASK=<item id> | <one-sentence reason>`: one line per item;
+  reason required. When the evidence has refuted a hypothesis or closed a line of work,
+  retire its pending tasks with RETIRE_TASK so they are not executed later under another title;
+  running work and done work cannot be retired.
 - External waits: `blocker_fingerprint`, `recheck_condition`, `recheck_token`, semantically
   `wake_on` (synonyms/combined sources), and `watched_paths`; `operator_action_required`
   is operator-only. Host chooses an event or a timed recheck.
-- REASON and PLAN_REASON are operator-facing. In the operator's language, state
-  what was decided and its next consequence in one clear sentence. Do not emit
+- REASON and PLAN_REASON are operator-facing: one clear sentence in the operator's
+  language stating the decision and next action. Do not emit
   field names or status tokens in their values.
 """ + _PLANNER_DECISION_FOOTER + _PLAN_UPDATE_INSTRUCTION
 
 _RESEARCH_PLAN_CONTRACT = """## Research plan (living document)
-Planner owns `RESEARCH_PLAN.md` in the daemon state directory. If there is no
-valid plan below, create it now from the Manager mission brief/OBJECTIVE.md and
-journal. Update it whenever a hypothesis changes status, an experiment settles,
-or the program changes direction. Return the complete replacement in the
-optional final `PLAN_UPDATE` block; otherwise the file stays unchanged.
+Planner owns `RESEARCH_PLAN.md` in daemon state. Create absent/invalid plans from
+Manager brief/OBJECTIVE.md and journal. Update on hypothesis status, experiment
+outcomes, or direction changes. Optional final `PLAN_UPDATE` replaces it in full;
+omit to keep it.
 
-Keep it under ~300 lines and use exactly this section order: `# Research plan`
-then an objective one-liner; `## Central hypotheses` (numbered, each marked
-untested/supported/refuted/abandoned with a one-line evidence pointer);
-`## Experiment program` (what runs next and why each is the highest-information
-move, without fixed numeric pass/fail thresholds); `## Established results`
-with evidence refs; `## Dead ends` with what was tried and why abandoned; and
-`## Next milestone` naming any scientifically valuable improvement that could
-support a scoped paper. Never delete a Dead
-ends entry. If the projection says it was truncated, prune repetition while
-preserving those entries.
+Under ~300 lines, ordered: `# Research plan` and objective one-liner;
+`## Central hypotheses` (numbered, untested/supported/refuted/abandoned, with
+one-line evidence pointers); `## Experiment program` (next experiments and why
+each is highest-information, without fixed numeric pass/fail thresholds); `## Established results`
+(evidence refs); `## Dead ends` (attempts and why abandoned); `## Next milestone`
+(scientifically valuable improvement supporting a scoped paper). Never delete
+Dead ends entries; prune repetition if the projection reports truncation.
 
 Current document:
 """

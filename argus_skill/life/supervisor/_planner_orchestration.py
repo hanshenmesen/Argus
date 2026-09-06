@@ -223,6 +223,11 @@ class PlannerOrchestrationMixin:
                 f"- current_stage: {pipeline.get('current_stage') or self._current_pipeline_stage() or '(unset)'}",
                 f"- stage_statuses: {', '.join(stage_rows) or '(none)'}",
                 f"- backlog_counts: {json.dumps(backlog_counts, sort_keys=True)}",
+                *(
+                    f"- pending task {item.id}: {item.title}"
+                    for item in backlog_rows
+                    if item.status == "pending"
+                ),
                 *([live_subagent_line] if live_subagent_line else []),
                 (
                     "- awaiting_operator_answer: "
