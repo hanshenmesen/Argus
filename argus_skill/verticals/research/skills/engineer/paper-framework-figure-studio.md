@@ -1,138 +1,101 @@
 ---
 name: "Paper Framework Figure Studio"
-description: "Design and audit a publication-grade Figure 1 teaser, method, framework, architecture, or taxonomy before rendering it with PPT Master, browser-rendered HTML, FigureSpec, Draw.io, Mermaid/Graphviz, or optional image-2. Renderer-neutral S0-S7 workflow; use after the Research Visualization Router identifies a conceptual paper figure."
+description: "Create one publication-ready conceptual figure from the current paper and direct evidence, composed the way strong published figures are."
 ---
 
 # Paper Framework Figure Studio
 
-This is the renderer-neutral design workflow for a research paper's Figure 1.
-It carries the useful design stages from
-`paper-framework-figure-studio-pro-v3.1.4a` without coupling them to image-2.
-The Research Visualization Router chooses the renderer only after the figure's
-facts, reader path, layout, labels, caption, and audit contract are defined.
+Use this in Paper for Figure 1 or another conceptual, method, architecture, or
+taxonomy figure. Read `HANDOFF.md`, the current manuscript, the executed method,
+and direct result sources. Create only the editable figure source and the final
+export included by the paper.
 
-Do not skip directly from "we need a diagram" to drawing boxes. Do not use
-generic placeholders. Read the actual paper and evidence first.
+## Choose a composition archetype first
 
-## S0 — Freeze the factual contract
+Strong published figures reuse a small set of compositions. Pick the one that
+fits the paper's actual claim before drawing anything:
 
-Read the current research brief, manuscript, method source, claim/evidence map,
-and results report. Record:
+| Archetype | Use when | Structure | Exemplars |
+|---|---|---|---|
+| Pipeline strip | The contribution is a method with a traceable forward pass (the default) | One horizontal band: input at far left, two to four enclosed modules, output at far right; training or feedback signals drawn as visually distinct arrows over the flow; stages may be numbered and walked in order by the caption | RAG, InstructGPT, DreamFusion |
+| Contrast diptych | The contribution is best stated as a delta against a standard approach | Two panels, old left and new right, drawn as the same diagram differing in exactly one visible attribute — a deleted box, a changed loss, one added matrix; the method panel may get more area | DPO, Chain-of-Thought, ReAct |
+| Lineage progression | The contribution generalizes a known paradigm | Three lettered panels: two familiar paradigms, then the contribution in the terminal position; panel letters cited from the body text | VAR |
+| Overview plus zoom | The novelty lives inside one block of an otherwise standard pipeline | Panel (a): the full pipeline at cartoon level showing where the block sits; panel (b): the single novel unit magnified with its internal wiring and dimensions | Stable Diffusion 3, NSA |
+| Results-first teaser | The strongest claim is empirical | Figure 1 carries no architecture: a sample grid, a filmstrip contrast, or one headline plot with a bold takeaway sentence opening the caption; the mechanism moves to Figure 2 | VAR, Genie, Rho-1 |
+| Coverage map | Benchmark, dataset, or evaluation papers | A color-coded taxonomy tree, spectrum bar, or specimen grid whose legend marks which parts are new; the caption carries most of the explanation | DecodingTrust, Aya |
 
-- exact module/component names;
-- input, output, data flow, control flow, and arrow directions;
-- the load-bearing contribution and its visible internal steps;
-- baseline/status-quo path and proposed path;
-- evidence anchors and the claim boundary;
-- facts that must not appear or must not be invented.
+## Design
 
-The core contribution cannot be an empty box. Show its mechanism with nested
-cards, an inset, a loop, or a compact internal panel.
+1. State the figure's one-sentence scientific takeaway.
+2. List the exact modules, labels, and connections, including each connection's
+   source, target, direction, boundary port, and meaning.
+3. Make the contribution unmistakable through subtraction or one minimal
+   difference wherever possible — delete a box the baseline needs, mark the
+   inherited parts frozen, change one token — so the baseline diagram is one
+   visual edit away from yours. When subtraction is impossible, use exactly one
+   highlighting device: terminal panel position, one reserved accent color
+   against a muted base, an ours-versus-existing legend, or extra area. Render
+   standard inherited machinery in quiet gray; a figure where everything is
+   equally loud says nothing.
+4. Keep color semantic: one color means one concept, identically in every panel
+   and matched to the results charts. If a legend line cannot state what a
+   color means, remove the color. Stay within about six categorical colors,
+   color-blind safe, and legible in grayscale.
+5. Budget on-canvas text by role and architectural depth: keep module labels
+   short, but expose the important internal components, interfaces, and feedback
+   in a complex system. Do not impose a fixed word cap that erases its mechanism.
+   Use compact nested groups and additional horizontal bands when needed;
+   preserve readable type and move explanatory prose into the caption.
+6. Where it helps comprehension, run one concrete example through the diagram —
+   an actual input and its intermediate artifacts — rather than only abstract
+   labels.
+7. Write the caption to stand alone: open with the takeaway (bold it when the
+   venue style allows), walk the panels in reading order, decode every color,
+   symbol, and badge, and name the contrast explicitly. Reuse panel letters and
+   stage numbers as anchors in the body text. Never caption a figure "System
+   architecture."
 
-## S1 — Choose the reader path
+## Geometry and typography
 
-Write one sentence stating what a reader should understand in five seconds.
-Choose a figure grammar that supports it:
+- one entry point and one exit, with a single dominant left-to-right reading
+  direction; return or training arrows are the sanctioned exception and must
+  look different (dashed or a distinct color);
+- connectors terminate at explicit node boundaries; no shaft or arrowhead
+  enters an unrelated node, label, or panel; if arrows must cross, fix the
+  layout rather than the arrows;
+- one shape class per concept, used identically everywhere; every element in
+  one step persists visibly into the next or its removal is the labeled action;
+- annotate real dimensions where they matter and mark arbitrary counts with an
+  ellipsis or a multiplier, so drawn counts are never accidentally readable as
+  exact;
+- no decorative 3D or gradients: every visual property either encodes a
+  declared meaning or stays neutral;
+- set the canvas to the final single- or double-column width before drawing,
+  keep text at or above eight points at that size, and export vector;
+- gloss any named component a general reviewer may not know — no bare acronym
+  in a box;
+- every visible name, direction, and value matches the paper and executed
+  method verbatim; regenerate the figure when notation changes.
 
-- horizontal input → mechanism → output/evidence;
-- nested offline/online or training/inference containers;
-- central method with baseline and evidence side panels;
-- multi-panel A/B/C for problem, mechanism, and outcome;
-- taxonomy or explanatory geometry for survey/theory work.
+## Production route
 
-Decide what belongs in pixels, caption, legend, and body text. The figure carries
-structure and reader path; the caption carries definitions, caveats, and detail.
+Never generate the figure as a raster image in one shot: emit an editable
+structured source, render it, inspect the render, and revise until it passes.
+Decompose complex figures — build panels and modules separately, then compose.
 
-## S2 — Explore layout directions
-
-Sketch at least two materially different layouts in a lightweight design spec.
-Stop once one direction clearly wins; do not grind out variants.
-
-Useful patterns include central hero, horizontal swimlanes, nested containers,
-hub-and-spoke, zig-zag pipeline, compact research poster, grayscale-accent,
-color-coded phases, and overlapping A/B/C panels. Reject layouts with weak
-hierarchy, large dead areas, crossing arrows, or repeated identical boxes.
-
-## S3 — Select the structural direction
-
-Choose the layout that best satisfies:
-
-1. paper fidelity;
-2. core-mechanism visibility;
-3. immediate reader path;
-4. compact information density;
-5. editability and reliable final-size export.
-
-Record why the rejected direction was weaker so later revisions do not repeat it.
-
-## S4 — Co-design figure, caption, and body callout
-
-Freeze a candidate contract containing:
-
-- exact title and visible labels;
-- source-backed nodes and arrows;
-- color/shape legend;
-- caption plan;
-- the sentence in the manuscript that calls out Figure 1;
-- the claim boundary that remains visible;
-- final physical width and target export format.
-
-Use actual project terminology. Never expose raw paths, code identifiers, daemon
-terms, GPU IDs, or generic labels such as "quality gate" when the paper names a
-specific mechanism.
-
-## S5 — Render through the selected deterministic or generative route
-
-Return to the Research Visualization Router and use one renderer:
-
-- PPT Master for rich editable composition and native PPTX;
-- browser-rendered HTML for bespoke exact layouts;
-- FigureSpec, Draw.io, Mermaid/Graphviz for explicit topology;
-- image-2 only when configured and semantically appropriate.
-
-Preserve editable source and export a real SVG/PDF/PNG for the manuscript.
-Rendering must be deterministic whenever the chosen route supports it.
-
-### Renderer-neutral design system
-
-- Landscape, paper-width composition with one dominant reading direction.
-- Clean Figma-like grouped modules; rounded cards only where grouping benefits.
-- Warm white or white background; dark-gray strokes; restrained low-saturation
-  accents with redundant shape/line encoding.
-- Strong title and section hierarchy; short labels; no paragraph-sized text.
-- Consistent connectors and arrowheads behind nodes.
-- Compact but not crowded; minimal decorative icons and no logo wall.
-- No heavy gradients, glassmorphism, photorealism, stock art, heavy shadows,
-  sketch fonts, arbitrary blobs, dashboard chrome, or marketing decoration.
-- At final paper width, every label must remain readable without zooming.
-
-Reference tokens for a 1536×1024-class canvas: background `#fbfaf7`, stroke
-`#1f2933`, 2 px; corner radius 10–16 px; card gap 12–24 px; title 38–52 px,
-section headers 22–30 px, card labels 16–22 px. Scale proportionally for SVG.
-
-## S6 — Integrate the figure-text bundle
-
-Embed the exported asset with `\includegraphics` or `\includesvg`, add a
-substantive caption and label, and reference it in the body. Rebuild the paper.
-The source, render, caption, and manuscript terminology must agree.
-
-A LaTeX table, boxed paragraph, or `\rule` bars inside a `figure` environment
-are not a Figure 1 render.
-
-## S7 — Joint final audit
-
-Inspect the rendered PDF at actual page size and verify:
-
-| Check | Pass condition |
+| Composition | Primary route |
 |---|---|
-| Paper fidelity | Names and arrows match the manuscript and evidence |
-| Core mechanism | Contribution internals are visible, not an empty box |
-| Reader path | The intended five-second takeaway is obvious |
-| Label accuracy | No invented, clipped, tiny, or inconsistent labels |
-| Visual hierarchy | Proposed mechanism dominates; support material recedes |
-| Figure-text split | Figure shows structure; caption explains detail |
-| Claim boundary | Unsupported scope is not implied visually |
-| Print quality | Legible in grayscale and at final paper width |
+| Pipeline strip or method architecture | Research SVG Pipeline (`research-svg-pipeline.md`): model-authored compact horizontal SVG grounded in code and paper, staggered geometry, Times New Roman, cropped vector PDF export |
+| Contrast diptych, lineage panels | Editable native objects through PPT Master; for a contrast diptych draw one diagram and apply the delta programmatically so the panels are guaranteed identical except the edit |
+| Panels of verbatim text (prompts, trajectories, rubrics) | HTML/CSS with inline SVG rendered headlessly to vector PDF — the only route with a real text-layout engine; verify the render visually since headless failures are silent |
+| Exact load-bearing topology, taxonomy trees | Graphviz for layout coordinates, restyled through SVG; or FigureSpec, Draw.io, browser SVG |
+| Results teaser | Matplotlib through Paper Chart Styling |
 
-Return `PASS`, `TEXT-REPAIR`, `RENDER-REPAIR`, or `DIRECTION-REPAIR`. Repair the
-editable source and rerender; never patch only the exported SVG/PDF.
+Inspect every render at actual publication size against the design rules above:
+reading direction, one highlighting device, decodable legend, text budget,
+notation match, font size, no crossings, and a caption with takeaway, panel
+walk, and color decode.
+
+Paper needs a complete, credible figure and a successful compile. Do not create
+layout reports, exemplar collections, provenance records, or visual-review
+files. Strict page-by-page visual acceptance happens once, in Review.

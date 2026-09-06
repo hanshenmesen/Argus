@@ -33,16 +33,13 @@ import re
 from typing import Any, Iterable, Mapping
 
 _FENCE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*$")
-_SENTENCE_END = re.compile(r"[.!?。！？]")
+_DECISION_FOOTER = re.compile(
+    r"(?im)^\s*(?:final\s+)?decision\s*:\s*$"
+)
 
 #: What may sit immediately before a key for it to still be starting a footer.
 #:
 #: A character-class *fragment*, spliced into the lookbehind below — distinct
-#: from ``_SENTENCE_END`` above, which is a compiled pattern scanned for
-#: boundaries inside an already-read line. The two constants answer different
-#: questions and are deliberately not the same class: this one is about where a
-#: footer may begin, that one about where a sentence ended.
-#:
 #: Deliberately only sentence terminators. A model that writes
 #: ``...the requested Lean source.STATUS=done`` has ended its prose and begun
 #: its verdict; a model that writes ``end with `MILESTONE_STATUS=done|continue``
@@ -51,6 +48,18 @@ _SENTENCE_END = re.compile(r"[.!?。！？]")
 #: therefore not here. An underscore is not here either, which is what keeps
 #: ``STATUS`` from being found inside ``MILESTONE_STATUS``.
 _SENTENCE_END_CLASS = r"[.!?)\]\"']"
+
+
+def decision_footer_text(text: str) -> str:
+    """Return the final decision footer when one is explicitly delimited.
+
+    Older sessions have no marker and keep the tolerant whole-message parser.
+    New prompts put the actionable lines after ``Decision:`` so quoted task
+    text or a discarded earlier thought cannot impersonate the final verdict.
+    """
+    source = str(text or "")
+    matches = tuple(_DECISION_FOOTER.finditer(source))
+    return source[matches[-1].end() :] if matches else source
 
 
 def _split_glued_keys(text: str, keys: Iterable[str]) -> str:
@@ -79,7 +88,7 @@ def _split_glued_keys(text: str, keys: Iterable[str]) -> str:
         return str(text or "")
     joined = "|".join(re.escape(name) for name in names)
     return re.sub(
-        r"(?<=" + _SENTENCE_END_CLASS + r")[ \t]*"
+        r"(?<=" + _SENTENCE_END_CLASS + r")"
         r"((?:ARGUS_)?(?:" + joined + r")[`*_]*\s*[:=])",
         r"\n\1",
         str(text or ""),
@@ -115,7 +124,11 @@ def read_key_values(text: str, keys: Iterable[str]) -> dict[str, str]:
     line-based pass has had its say and only for the keys that pass did not
     find — so no reply that parses today can be reinterpreted by the rescue.
     """
-    found = _read_key_values(text, keys)
+    original = str(text or "")
+    source = decision_footer_text(original)
+    found = _read_key_values(source, keys)
+    if not found and source != original:
+        found = _read_key_values(original, keys)
     missing = [
         key
         for key in keys
@@ -123,7 +136,7 @@ def read_key_values(text: str, keys: Iterable[str]) -> dict[str, str]:
     ]
     if missing:
         for key, value in _read_key_values(
-            _split_glued_keys(text, missing), missing
+            _split_glued_keys(source, missing), missing
         ).items():
             found.setdefault(key, value)
     return found
@@ -138,13 +151,6 @@ def _read_key_values(text: str, keys: Iterable[str]) -> dict[str, str]:
             continue
         line = line.strip("`").strip()
         match = pattern.match(line)
-        if match is None:
-            # Streaming models occasionally omit the newline between their
-            # introductory sentence and the first named field.
-            for boundary in reversed(tuple(_SENTENCE_END.finditer(line))):
-                match = pattern.match(line[boundary.end() :].lstrip())
-                if match is not None:
-                    break
         if match is None:
             continue
         found[match.group("key").upper()] = match.group("value").strip().strip("`").strip()
@@ -170,11 +176,16 @@ def read_records(
     records after the weld and silently drops the one before it. The rescue
     runs instead whenever splitting recovers strictly more records.
     """
-    records = _read_records(text, keys, start_key=start_key)
+    original = str(text or "")
+    source = decision_footer_text(original)
+    records = _read_records(source, keys, start_key=start_key)
     rescued = _read_records(
-        _split_glued_keys(text, keys), keys, start_key=start_key
+        _split_glued_keys(source, keys), keys, start_key=start_key
     )
-    return rescued if len(rescued) > len(records) else records
+    best = rescued if len(rescued) > len(records) else records
+    if not best and source != original:
+        return _read_records(original, keys, start_key=start_key)
+    return best
 
 
 def _read_records(
@@ -216,10 +227,15 @@ def read_block(text: str, key: str, keys: Iterable[str]) -> str:
     verdict that explains it, so the value continues until the next recognised
     key or the end of the reply.
     """
-    value = _read_block(text, key, keys)
+    original = str(text or "")
+    source = decision_footer_text(original)
+    value = _read_block(source, key, keys)
     if value:
         return value
-    return _read_block(_split_glued_keys(text, keys), key, keys)
+    value = _read_block(_split_glued_keys(source, keys), key, keys)
+    if value or source == original:
+        return value
+    return _read_block(original, key, keys)
 
 
 def _read_block(text: str, key: str, keys: Iterable[str]) -> str:
@@ -316,8 +332,29 @@ def read_optional(values: Mapping[str, str], key: str) -> str:
 def strip_named_lines(text: str, keys: Iterable[str]) -> str:
     pattern = _line_pattern(keys)
     return "\n".join(
-        line for line in str(text or "").splitlines() if pattern.match(line) is None
+        line
+        for line in str(text or "").splitlines()
+        if pattern.match(line) is None and _DECISION_FOOTER.match(line) is None
     ).strip()
+
+
+def strip_control_footer(text: str, keys: Iterable[str]) -> str:
+    """Remove named control fields even after a summary collapsed newlines."""
+    names = sorted(
+        {str(key).strip().upper() for key in keys if str(key).strip()},
+        key=len,
+        reverse=True,
+    )
+    cleaned = strip_named_lines(text, names)
+    if not names:
+        return cleaned
+    marker = re.search(
+        r"(?i)(?:^|(?<=" + _SENTENCE_END_CLASS + r")\s+)(?:ARGUS_)?(?:"
+        + "|".join(re.escape(name) for name in names)
+        + r")\s*=",
+        cleaned,
+    )
+    return cleaned[: marker.start()].rstrip() if marker else cleaned
 
 
 def legacy_json_object(text: str) -> dict[str, Any] | None:
@@ -345,6 +382,7 @@ def legacy_json_object(text: str) -> dict[str, Any] | None:
 
 
 __all__ = [
+    "decision_footer_text",
     "legacy_json_object",
     "read_block",
     "read_bool",
@@ -354,5 +392,6 @@ __all__ = [
     "read_list_semicolon",
     "read_optional",
     "read_records",
+    "strip_control_footer",
     "strip_named_lines",
 ]

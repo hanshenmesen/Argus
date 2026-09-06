@@ -767,7 +767,13 @@ def _daemon_status_payload(config: Any, *, started_at_iso: str) -> dict[str, Any
         from ..agent_cli.runner_backend import resolve_available_runner
         from ..core.knobs import resolve_role_backend
 
-        requested = resolve_role_backend("engineer")
+        # default=config.backend: this payload REPORTS the daemon's backend,
+        # so when no knob overrides it the honest answer is the backend the
+        # daemon was launched with — the same value the `except` below already
+        # falls back to.
+        requested = resolve_role_backend(
+            "engineer", default=str(config.backend or "") or None
+        )
         configured = (
             os.environ.get("ARGUS_SKILL_ENGINEER_RUNNER_BIN", "").strip()
             or os.environ.get("ARGUS_SKILL_RUNNER_BIN", "").strip()
@@ -1463,7 +1469,7 @@ def stop_daemon(
     *,
     timeout: float = 10.0,
     drain: bool = False,
-    drain_timeout: float = 1800.0,
+    drain_timeout: float | None = None,
     force: bool = False,
     preserve_upgrade_request: bool = False,
 ) -> int:
@@ -1564,9 +1570,10 @@ def stop_daemon(
         return 1
 
     wait_for = drain_timeout if drain else timeout
-    deadline = time.monotonic() + wait_for
-    next_heartbeat = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
+    wait_started = time.monotonic()
+    deadline = wait_started + wait_for if wait_for is not None else None
+    next_heartbeat = wait_started + 30.0
+    while deadline is None or time.monotonic() < deadline:
         if not _instance_alive():
             if force:
                 _terminate_captured_descendants(forced_descendants)
@@ -1576,7 +1583,7 @@ def stop_daemon(
             sys.stdout.write(f"argus-skill: daemon (pid {pid}) stopped.\n")
             return 0
         if drain and time.monotonic() >= next_heartbeat:
-            elapsed = int(wait_for - (deadline - time.monotonic()))
+            elapsed = int(time.monotonic() - wait_started)
             sys.stdout.write(
                 f"argus-skill: draining... still finishing current mission "
                 f"({elapsed}s elapsed).\n"

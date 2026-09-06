@@ -12,7 +12,6 @@ from ..core.portable_filename import normalized_logical_identifier
 from ..core.prompt_example_tasks import is_prompt_example_task
 from ..core.role_decision import latest_role_decision
 from ..core.run_gateway import run_exec as gateway_run_exec
-from .work_kind import parse_work_kind
 
 
 @dataclass(frozen=True)
@@ -21,12 +20,15 @@ class BoundedDagNode:
     deps: tuple[str, ...]
     title: str
     objective: str
+    hypothesis: str = ""
+    goal_contribution: str = ""
+    expected_regressions: str = ""
+    decision_rule: str = ""
     acceptance_check: str = ""
     non_goals: tuple[str, ...] = ()
     vertical: str = ""
     execution_workdir: str = ""
-    work_kind: str = "scope"
-    require_independent_review: bool = False
+    require_independent_review: bool = True
 
 
 @dataclass(frozen=True)
@@ -41,30 +43,55 @@ class BoundedDagPlan:
     premium_requests: float = 0.0
 
 
-def _prompt(objective: str) -> str:
-    from ..roles.prompts.planner import build_bounded_dag_prompt
+def _prompt(
+    objective: str,
+    project_root: Path | str,
+    *,
+    state_root: Path | str | None = None,
+    require_independent_review: bool = True,
+    single_package: bool = False,
+) -> str:
+    from ..roles.prompts.planner import (
+        build_bounded_dag_prompt,
+        build_bounded_single_task_prompt,
+    )
 
-    return build_bounded_dag_prompt(objective)
+    builder = (
+        build_bounded_single_task_prompt
+        if single_package
+        else build_bounded_dag_prompt
+    )
+    return builder(
+        objective,
+        project_root=project_root,
+        state_root=state_root,
+        require_independent_review=require_independent_review,
+    )
 
 
 def _extract(result: Any) -> str:
     messages = list(getattr(result, "agent_messages", None) or [])
     if messages:
+        # The OpenCode consumer now accumulates a reply on the write side into a
+        # single element (see ``_event_consumers``), so the last element IS the
+        # whole reply — including a Planner footer split across stream chunks.
         return str(messages[-1] or "").strip()
     return str(getattr(result, "last_agent_message", "") or "").strip()
 
 
 _PLAN_LINE = re.compile(
-    r"^(?P<key>PLAN_REASON|TASK_KEY|TASK_DEPS|TASK_TITLE|TASK_OBJECTIVE|"
-    r"TASK_ACCEPTANCE_CHECK|TASK_NON_GOALS|TASK_VERTICAL|TASK_WORKDIR|"
-    r"TASK_WORK_KIND|"
-    r"TASK_REQUIRE_INDEPENDENT_REVIEW)"
+    r"^(?P<key>(?:TASK_)?(?:PLAN_REASON|KEY|DEPS|TITLE|OBJECTIVE|"
+    r"HYPOTHESIS|GOAL_CONTRIBUTION|EXPECTED_REGRESSIONS|DECISION_RULE|"
+    r"ACCEPTANCE_CHECK|NON_GOALS|VERTICAL|WORKDIR|"
+    r"REQUIRE_INDEPENDENT_REVIEW))"
     r"\s*[:=]\s*(?P<value>.*)$",
     re.IGNORECASE,
 )
 
 
 def _parse_key_value_plan(text: str) -> dict[str, Any]:
+    from ..core.role_reply import decision_footer_text
+
     reason = ""
     tasks: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
@@ -72,17 +99,22 @@ def _parse_key_value_plan(text: str) -> dict[str, Any]:
         "TASK_KEY": "key",
         "TASK_TITLE": "title",
         "TASK_OBJECTIVE": "objective",
+        "TASK_HYPOTHESIS": "hypothesis",
+        "TASK_GOAL_CONTRIBUTION": "goal_contribution",
+        "TASK_EXPECTED_REGRESSIONS": "expected_regressions",
+        "TASK_DECISION_RULE": "decision_rule",
         "TASK_ACCEPTANCE_CHECK": "acceptance_check",
         "TASK_VERTICAL": "vertical",
         "TASK_WORKDIR": "execution_workdir",
-        "TASK_WORK_KIND": "work_kind",
     }
-    for raw_line in text.splitlines():
+    for raw_line in decision_footer_text(text).splitlines():
         line = raw_line.strip().strip("`").strip()
         match = _PLAN_LINE.match(line)
         if match is None:
             continue
         key = match.group("key").upper()
+        if key != "PLAN_REASON" and not key.startswith("TASK_"):
+            key = "TASK_" + key
         value = match.group("value").strip()
         if key == "PLAN_REASON":
             reason = value
@@ -171,7 +203,7 @@ def _validate(payload: object) -> tuple[str, tuple[BoundedDagNode, ...]]:
             )
         else:
             raise ValueError("planner task non_goals must be text or an array")
-        raw_review = row.get("require_independent_review", False)
+        raw_review = row.get("require_independent_review", True)
         if isinstance(raw_review, bool):
             require_independent_review = raw_review
         elif str(raw_review).strip().casefold() in {"true", "false"}:
@@ -189,6 +221,14 @@ def _validate(payload: object) -> tuple[str, tuple[BoundedDagNode, ...]]:
                 deps=tuple(deps),
                 title=title,
                 objective=objective,
+                hypothesis=str(row.get("hypothesis") or "").strip(),
+                goal_contribution=str(
+                    row.get("goal_contribution") or ""
+                ).strip(),
+                expected_regressions=str(
+                    row.get("expected_regressions") or ""
+                ).strip(),
+                decision_rule=str(row.get("decision_rule") or "").strip(),
                 acceptance_check=str(row.get("acceptance_check") or "").strip(),
                 non_goals=non_goals,
                 vertical=str(row.get("vertical") or "").strip(),
@@ -197,7 +237,6 @@ def _validate(payload: object) -> tuple[str, tuple[BoundedDagNode, ...]]:
                     or row.get("workdir")
                     or ""
                 ).strip(),
-                work_kind=parse_work_kind(row.get("work_kind")),
                 require_independent_review=require_independent_review,
             )
         )
@@ -229,6 +268,9 @@ def plan_bounded_dag(
     objective: str,
     *,
     workdir: Path | str,
+    state_root: Path | str | None = None,
+    require_independent_review: bool = True,
+    single_package: bool = False,
     model: str | None = None,
     reasoning_effort: str = "high",
 ) -> BoundedDagPlan:
@@ -239,7 +281,17 @@ def plan_bounded_dag(
         "reasoning_output_tokens": 0,
         "premium_requests": 0.0,
     }
-    prompt = _prompt(objective)
+    prompt = _prompt(
+        objective,
+        workdir,
+        state_root=state_root,
+        require_independent_review=require_independent_review,
+        single_package=single_package,
+    )
+    backend_name = str(
+        getattr(runner, "backend", "")
+        or getattr(runner, "_backend_name", "")
+    ).strip().lower()
     for attempt in range(2):
         try:
             result = gateway_run_exec(
@@ -252,6 +304,10 @@ def plan_bounded_dag(
                     working_dir=str(Path(workdir).expanduser().resolve()),
                     dangerous_yolo=True,
                     skip_git_repo_check=True,
+                    disable_tools=True,
+                    extra_args=(
+                        ["--ephemeral"] if backend_name == "codex" else None
+                    ),
                 ),
                 run_label=(
                     "planner.bounded_dag"
@@ -304,6 +360,10 @@ def plan_bounded_dag(
                     objective,
                     output,
                     validation_error,
+                    project_root=workdir,
+                    state_root=state_root,
+                    require_independent_review=require_independent_review,
+                    single_package=single_package,
                 )
                 continue
             return BoundedDagPlan(

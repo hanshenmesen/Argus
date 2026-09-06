@@ -24,7 +24,7 @@ from argus_skill.reviewer import Reviewer
 from argus_skill.reviewer._parsing import _PLAN_SIGNALS, parse_decision_text
 from argus_skill.skills.store import SkillStore
 
-_SHOWN_SIGNAL = re.compile(r'"plan_signal"\s*:\s*"([^"]+)"')
+_SHOWN_SIGNAL = re.compile(r"(?im)^\s*PLAN_SIGNAL\s*=\s*([a-z_]+)")
 
 
 def _reviewer_prompt(tmp_path) -> str:
@@ -57,6 +57,9 @@ def test_the_reviewer_is_told_the_word_that_challenges_the_plan(tmp_path) -> Non
     assert "reconsider" in prompt
     for field in ("plan_challenge", "plan_alternative", "authority_impact"):
         assert field in prompt
+    assert "new evidence lowers the current plan's expected value" in prompt
+    assert "plan_alternative` only when you actually have" in prompt
+    assert "STATUS=replan_requested" in prompt
 
 
 def test_the_reviewer_is_told_a_team_authored_plan_is_revisable(tmp_path) -> None:
@@ -69,7 +72,7 @@ def test_the_reviewer_is_told_a_team_authored_plan_is_revisable(tmp_path) -> Non
 def test_a_flat_decision_event_carries_the_challenge_to_the_manager() -> None:
     """The documented event shape must survive parsing and reach a decision."""
     decision = parse_decision_text(json.dumps({
-        "status": "continue",
+        "status": "replan_requested",
         "reason": "Each round repairs a different symptom of one cohort protocol.",
         "next_action": "Certify per cell instead of per cohort.",
         "forward_progress": False,
@@ -90,10 +93,30 @@ def test_a_flat_decision_event_carries_the_challenge_to_the_manager() -> None:
     assert routed.alternative == "Certify admissible cells and narrow the claim."
 
 
+def test_done_verdict_keeps_plan_challenge_advisory() -> None:
+    decision = parse_decision_text(json.dumps({
+        "status": "done",
+        "reason": "The new result lowers the current plan's expected value.",
+        "next_action": "Reassess the remaining route from the new evidence.",
+        "forward_progress": True,
+        "plan_signal": "reconsider",
+        "plan_challenge": "The current mechanism no longer explains the result.",
+        "authority_impact": "technical",
+    }))
+
+    assert decision is not None
+    routed = adjudicate_plan_challenge(
+        decision.planner_report,
+        reviewer_status=decision.status,
+    )
+    assert routed.action == "keep"
+    assert routed.alternative == ""
+
+
 def test_an_operator_owned_challenge_still_goes_back_to_the_operator() -> None:
     """Reading the flat shape must not let the Reviewer overrule the operator."""
     decision = parse_decision_text(json.dumps({
-        "status": "continue",
+        "status": "replan_requested",
         "reason": "The exhaustive sweep the operator required is what costs the time.",
         "next_action": "Ask whether a narrower sweep is acceptable.",
         "plan_signal": "reconsider",

@@ -14,7 +14,7 @@ from argus_skill.verticals.research import paper_infrastructure_review as infras
 from argus_skill.verticals.research._reviewer_runner_fallback import (
     ReviewerRunnerError,
 )
-from argus_skill.verticals.research.venue_profiles import EMNLP_PROFILE
+from tests.skills.researched_venues import EIGHT_PAGE_CONFERENCE
 
 
 def _explicit_env() -> dict[str, str]:
@@ -65,6 +65,8 @@ def test_fallback_uses_canonical_reviewer_config_and_timeout(
 
     assert raw == '{"accepted":true}'
     assert label == "runner:claude:claude-reviewer"
+    assert "answer in clear prose" in captured["prompt"]
+    assert "ONLY the single JSON" not in captured["prompt"]
     assert captured["backend_kwargs"] == {
         "backend": "claude",
         "runner_bin": "/opt/reviewer",
@@ -118,6 +120,46 @@ def test_explicit_shared_runner_bin_beats_persisted_role_bin(
     )
 
     assert captured["runner_bin"] == "/env/shared"
+
+
+def test_reviewer_backend_override_ignores_persisted_shared_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from argus_skill.adapters import agent_cli_backend
+    from argus_skill.core import knob_store, run_gateway
+
+    captured = {}
+    monkeypatch.setattr(
+        knob_store,
+        "read_persisted_knobs",
+        lambda: {
+            "ARGUS_SKILL_RUNNER_BACKEND": "dsh",
+            "ARGUS_SKILL_RUNNER_BIN": "/persisted/dsh",
+        },
+    )
+    monkeypatch.setattr(
+        agent_cli_backend,
+        "AgentCliBackend",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        run_gateway,
+        "run_exec",
+        lambda *args, **kwargs: RunnerResult(
+            exit_code=0,
+            agent_messages=['{"accepted":true}'],
+        ),
+    )
+
+    fallback.run_reviewer_prompt_via_runner(
+        "review this",
+        run_label="research.test_review",
+        env={"ARGUS_SKILL_REVIEWER_BACKEND": "copilot"},
+        timeout=5.0,
+    )
+
+    assert captured["backend"] == "copilot"
+    assert captured["runner_bin"] is None
 
 
 def test_malformed_runner_extra_args_becomes_handled_error() -> None:
@@ -210,9 +252,8 @@ def test_gate_converts_runner_failure_to_handled_review_error(
     with pytest.raises(error_type, match="runner failed"):
         module._run_model_review(
             root=tmp_path,
-            threshold=4.0,
             env={},
             timeout=7.0,
-            venue=EMNLP_PROFILE,
+            venue=EIGHT_PAGE_CONFERENCE,
             **kwargs,
         )

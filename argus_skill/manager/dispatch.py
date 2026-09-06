@@ -13,6 +13,10 @@ from . import front_door
 DEFAULT_MANAGER_CONFIG = DEFAULT_LIFE_CONFIG
 
 
+class MissionPersistenceError(front_door.ManagerHandoffError):
+    """A Manager-authored mission could not be written to the backlog."""
+
+
 def _resolve_manager_workdir(mem: Any) -> Path:
     from ..core.session import read_session_meta, resolve_session_workdir
 
@@ -21,8 +25,7 @@ def _resolve_manager_workdir(mem: Any) -> Path:
     root = Path(global_root) if global_root is not None else life_dir.parent.parent
     meta = read_session_meta(root, life_dir.name)
     if meta is not None and (
-        str(getattr(meta, "workdir", "") or "").strip()
-        or str(getattr(meta, "cwd", "") or "").strip()
+        meta.workdir.strip() or meta.cwd.strip()
     ):
         base = resolve_session_workdir(meta, state_dir=life_dir)
     else:
@@ -105,6 +108,8 @@ def _plan_bounded_execution(
     chat_state: dict[str, Any],
     *,
     root_task_id: str | None = None,
+    require_independent_review: bool = True,
+    single_package: bool = False,
 ) -> Any:
     runner = front_door._ensure_manager_runner(chat_state, mem)
     backend = getattr(runner, "planner_backend", None) if runner is not None else None
@@ -125,6 +130,9 @@ def _plan_bounded_execution(
             backend,
             execution_body,
             workdir=workdir,
+            state_root=getattr(mem, "project_root", None),
+            require_independent_review=require_independent_review,
+            single_package=single_package,
             model=model,
             reasoning_effort=resolve_role_reasoning_effort(
                 "ARGUS_SKILL_BOUNDED_DAG_REASONING_EFFORT",
@@ -215,7 +223,7 @@ def enqueue_mission(
     chat_state: dict[str, Any],
     *,
     iterate: bool = True,
-    max_cycles: int = 6,
+    max_cycles: int = 0,
     root_task_id: str | None = None,
     cancelled: Callable[[], bool] | None = None,
     prepared_handoff: front_door.PreparedManagerHandoff | None = None,
@@ -319,7 +327,14 @@ def enqueue_mission(
                 original_objective=execution_body,
                 manager_decision=decision_evidence(division) or {"routed": True},
             )
-            mem.backlog.add(item)
+            try:
+                mem.backlog.add(item)
+            except OSError as exc:
+                chat_state.setdefault("_pending_missions", []).append((item,))
+                raise MissionPersistenceError(
+                    f"Could not persist mission to {mem.backlog.path}: {exc}. "
+                    "The mission remains pending in memory and was not dispatched."
+                ) from exc
             persisted["item"] = item
             try:
                 from ..life.event_log import JsonlEventSink
@@ -371,6 +386,25 @@ def enqueue_mission(
         alive, pid = _daemon_status(life_dir)
         return item, alive, pid
 
+    if prepared_handoff is None:
+        prepared_handoff = front_door.prepare_manager_execution_task(
+            mem,
+            body,
+            chat_state,
+            root_task_id=root_task_id,
+        )
+
+    direct_workflow = (
+        str(
+            getattr(
+                getattr(prepared_handoff, "decision", None),
+                "workflow_mode",
+                "",
+            )
+            or ""
+        ).strip().lower()
+        == "direct"
+    )
     planned: dict[str, Any] = {}
 
     def _hydrate_context_refs(nodes: list[Any]) -> dict[str, list[dict[str, Any]]]:
@@ -390,7 +424,7 @@ def enqueue_mission(
                 except ValueError:
                     if (
                         str(getattr(node, "execution_workdir", "") or "").strip()
-                        and list(getattr(node, "deps", ()) or ())
+                        and list(node.deps)
                         and not raw_refs
                     ):
                         context_root = None
@@ -412,19 +446,53 @@ def enqueue_mission(
             raise front_door.ManagerHandoffError(
                 "Manager request cancelled before bounded DAG planning"
             )
+        if direct_workflow:
+            from types import SimpleNamespace
+
+            compact = " ".join(execution_body.split()).replace("`", "")
+            node = SimpleNamespace(
+                key="manager_direct",
+                deps=(),
+                title=compact if len(compact) <= 96 else compact[:93] + "...",
+                objective=execution_body,
+                stage_closing=True,
+                require_independent_review=True,
+            )
+            planned["plan"] = None
+            planned["nodes"] = [node]
+            planned["hydrated_refs"] = {node.key: []}
+            return
         plan = _plan_bounded_execution(
             mem,
             execution_body,
             chat_state,
             root_task_id=root_task_id,
+            require_independent_review=bool(
+                getattr(
+                    getattr(prepared_handoff, "decision", None),
+                    "require_independent_review",
+                    True,
+                )
+            ),
+            single_package=(
+                str(
+                    getattr(
+                        getattr(prepared_handoff, "decision", None),
+                        "workflow_mode",
+                        "",
+                    )
+                    or ""
+                ).strip().lower()
+                == "direct"
+            ),
         )
-        nodes = _stable_topological_nodes(tuple(getattr(plan, "tasks", ()) or ()))
+        nodes = _stable_topological_nodes(tuple(plan.tasks))
         if not nodes:
             raise front_door.ManagerHandoffError("bounded Planner produced no tasks")
         for node in nodes:
             stage_closing = bool(getattr(node, "stage_closing", False))
             require_review = bool(
-                getattr(node, "require_independent_review", False)
+                getattr(node, "require_independent_review", True)
             )
             skip_stage_transition = bool(
                 getattr(node, "skip_stage_transition", False)
@@ -459,10 +527,12 @@ def enqueue_mission(
         hydrated_refs = dict(planned.get("hydrated_refs") or {})
         from ..life.memory import BacklogItem
 
-        plan_id = f"bounded-{uuid.uuid4().hex[:12]}"
+        plan_id = "" if direct_workflow else f"bounded-{uuid.uuid4().hex[:12]}"
         from ..life.supervisor.backlog_guard import decision_evidence
 
         manager_decision = decision_evidence(_division) or {"routed": True}
+        if direct_workflow:
+            manager_decision["route_source"] = "manager"
         learned_candidate = (
             manager_decision.get("learned_vertical_status") == "candidate"
         )
@@ -507,8 +577,10 @@ def enqueue_mission(
             stage = current_stage(node_workdir)
             stage_closing = bool(getattr(node, "stage_closing", False))
             require_review = bool(
-                getattr(node, "require_independent_review", False)
-            ) or learned_candidate
+                getattr(node, "require_independent_review", True)
+            ) or learned_candidate or bool(
+                manager_decision.get("require_independent_review")
+            )
             skip_stage_transition = bool(
                 getattr(node, "skip_stage_transition", False)
             )
@@ -516,6 +588,10 @@ def enqueue_mission(
                 hydrated_refs.get(node.key, []),
                 context_refs,
             )
+            hypothesis = str(getattr(node, "hypothesis", "") or "").strip()
+            decision_rule = str(
+                getattr(node, "decision_rule", "") or ""
+            ).strip()
             node_manager_decision = dict(manager_decision)
             node_vertical = str(getattr(node, "vertical", "") or "").strip()
             if node_vertical:
@@ -540,8 +616,11 @@ def enqueue_mission(
                 priority=priority + index,
                 tags=[
                     "manager",
-                    "planner",
-                    "bounded_dag_node",
+                    *(
+                        ["manager_direct"]
+                        if direct_workflow
+                        else ["planner", "bounded_dag_node"]
+                    ),
                     "scope:bounded",
                     *(
                         ["stage_closing"]
@@ -551,6 +630,11 @@ def enqueue_mission(
                     *(
                         ["review:required"]
                         if stage_closing or require_review
+                        else []
+                    ),
+                    *(
+                        ["review:waived"]
+                        if not stage_closing and not require_review
                         else []
                     ),
                     *(
@@ -565,30 +649,36 @@ def enqueue_mission(
                     ),
                     *([f"stage:{stage}"] if stage else []),
                 ],
-                iterate=False,
-                iteration_max_cycles=1,
+                iterate=not direct_workflow,
+                iteration_max_cycles=1 if direct_workflow else 3,
                 deps=[ids[dep] for dep in node.deps],
                 plan_id=plan_id,
-                plan_version=1,
-                node_key=node.key,
+                plan_version=0 if direct_workflow else 1,
+                node_key="" if direct_workflow else node.key,
                 context_refs=item_context_refs,
-                work_kind=str(getattr(node, "work_kind", "") or ""),
                 acceptance_check=str(getattr(node, "acceptance_check", "") or ""),
-                plan_hypothesis=str(getattr(node, "hypothesis", "") or ""),
+                plan_hypothesis=hypothesis,
                 goal_contribution=str(
                     getattr(node, "goal_contribution", "") or ""
                 ),
                 expected_regressions=str(
                     getattr(node, "expected_regressions", "") or ""
                 ),
-                decision_rule=str(getattr(node, "decision_rule", "") or ""),
+                decision_rule=decision_rule,
                 execution_workdir=persisted_workdir,
                 non_goals=list(getattr(node, "non_goals", ()) or ()),
                 manager_decision=node_manager_decision,
             )
             item.original_objective = execution_body
             items.append(item)
-        mem.backlog.add_many(items)
+        try:
+            mem.backlog.add_many(items)
+        except OSError as exc:
+            chat_state.setdefault("_pending_missions", []).append(tuple(items))
+            raise MissionPersistenceError(
+                f"Could not persist mission to {mem.backlog.path}: {exc}. "
+                "The mission remains pending in memory and was not dispatched."
+            ) from exc
         item = items[0]
         try:
             from ..core.planner_verdict import (
@@ -598,26 +688,45 @@ def enqueue_mission(
             from ..life.event_log import JsonlEventSink
 
             sink = JsonlEventSink(None, life_dir=Path(life_dir))
-            reason = str(getattr(plan, "reason", "") or "bounded DAG")
-            sink.append(build_planner_verdict_event(
-                status=PlannerVerdictStatus.PLANNED,
-                reason=reason,
-                project_id=Path(life_dir).name,
-                mission_id=plan_id,
-                plan_id=plan_id,
-                enqueued_tasks=len(items),
-                new_tasks=len(items),
-                text=f"bounded Planner created {len(items)} DAG node(s)",
-            ))
+            reason = str(
+                getattr(plan, "reason", "")
+                or ("Manager direct package" if direct_workflow else "bounded DAG")
+            )
+            if not direct_workflow:
+                sink.append(build_planner_verdict_event(
+                    status=PlannerVerdictStatus.PLANNED,
+                    reason=reason,
+                    project_id=Path(life_dir).name,
+                    mission_id=plan_id,
+                    plan_id=plan_id,
+                    enqueued_tasks=len(items),
+                    new_tasks=len(items),
+                    text=f"bounded Planner created {len(items)} DAG node(s)",
+                ))
             for node_item in items:
-                sink.append({
+                task_added = {
                     "type": "life.planner.task_added",
                     "item_id": node_item.id,
                     "title": node_item.title,
                     "deps": list(node_item.deps),
                     "plan_id": plan_id,
                     "node_key": node_item.node_key,
-                })
+                }
+                if direct_workflow:
+                    task_added["source"] = "manager_direct"
+                    task_added["objective"] = node_item.objective
+                    task_added["priority"] = node_item.priority
+                sink.append(task_added)
+                if "review:waived" in node_item.tags:
+                    sink.append({
+                        "type": "life.review.waived",
+                        "item_id": node_item.id,
+                        "text": (
+                            "independent review waived: bounded Planner explicitly "
+                            "set require_independent_review=false"
+                        ),
+                        "reason": reason,
+                    })
         except Exception:  # noqa: BLE001
             pass
         front_door._maybe_name_session(
@@ -685,12 +794,18 @@ def maybe_promote_to_continuous(
 
     life_dir = Path(front_door._life_dir_for(mem))
     daemon_status = read_daemon_status(life_dir)
+    # default="codex": this value is only ever compared against "memory" (see
+    # daemon.state.continuous_mode_error, which rejects continuous mode on the
+    # in-process test backend). Any real backend passes the same gate, so an
+    # unconfigured host must not fail an operator's chat turn here.
     backend = (
         str(daemon_status.life_backend or "")
         if daemon_status.alive
-        else resolve_role_backend("")
+        else resolve_role_backend("", default="codex")
     )
-    error = continuous_mode_error(backend or resolve_role_backend(""), True, body)
+    error = continuous_mode_error(
+        backend or resolve_role_backend("", default="codex"), True, body
+    )
     if error:
         raise front_door.ManagerHandoffError(error)
     persisted = read_continuous_state(life_dir)
@@ -714,6 +829,7 @@ def maybe_promote_to_continuous(
 
 __all__ = [
     "DEFAULT_MANAGER_CONFIG",
+    "MissionPersistenceError",
     "enqueue_mission",
     "maybe_promote_to_continuous",
     "resume_done_lifecycle_for_team_dispatch",

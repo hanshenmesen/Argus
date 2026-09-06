@@ -7,6 +7,7 @@ subcommand.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -31,12 +32,27 @@ def test_public_help_distinguishes_human_and_automation_surfaces() -> None:
     assert "wiki" not in help_text
 
 
-def test_version_reports_release_identity(capsys) -> None:
+def test_version_reports_package_version(capsys) -> None:
     with pytest.raises(SystemExit, match="0"):
         build_parser().parse_args(["--version"])
     rendered = capsys.readouterr().out
-    assert "argus-skill 0.1.2" in rendered
-    assert "0.1.2+" in rendered
+    assert rendered == "argus-skill 0.1.1\n"
+
+
+def test_main_pins_pip_user_off_before_any_child_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI counterpart of the daemon boot pin: the default engineer spawn is
+    dangerous_yolo, whose codex child inherits this process env untouched, so
+    main() itself must neutralize pip's silent user-install fallback (the
+    2026-09-05 launcher hijack) before any command runs. Dropping the
+    configure_framework_python_env call from main must fail HERE."""
+    monkeypatch.setenv("PIP_USER", "1")
+
+    with pytest.raises(SystemExit, match="0"):
+        main(["--version"])
+
+    assert os.environ["PIP_USER"] == "0"
 
 
 def test_debug_help_still_exposes_internal_flags(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,6 +74,7 @@ def test_parser_exposes_doctor_and_repair_subcommands() -> None:
     for backend in ("qoder", "dsh"):
         parsed = build_parser().parse_args(["doctor", "--advisor", backend])
         assert parsed.advisor == backend
+    assert build_parser().parse_args(["doctor"]).advisor == "none"
 
     repair = build_parser().parse_args(["repair", "--safe", "--json"])
     assert repair.command == "repair"
@@ -123,6 +140,11 @@ def test_parser_accepts_stage_targeted_notify() -> None:
     assert args.notify_stage == "optimize"
 
 
+def test_parser_accepts_ask_question() -> None:
+    args = build_parser().parse_args(["--ask", "what is 2+2?"])
+    assert args.ask == "what is 2+2?"
+
+
 def test_parser_accepts_noninteractive_backend_setup_contract() -> None:
     args = build_parser().parse_args(
         [
@@ -132,7 +154,6 @@ def test_parser_accepts_noninteractive_backend_setup_contract() -> None:
             "codex",
             "--auth-mode",
             "subscription_cli",
-            "--accept-house-rules",
             "--allow-prerelease",
         ]
     )
@@ -141,7 +162,6 @@ def test_parser_accepts_noninteractive_backend_setup_contract() -> None:
     assert args.non_interactive is True
     assert args.backend == "codex"
     assert args.auth_mode == "subscription_cli"
-    assert args.accept_house_rules is True
     assert args.allow_prerelease is True
 
 
@@ -422,7 +442,9 @@ def test_main_exports_decided_vertical_skills(
     assert rc == 0
     assert "vertical: research" in out
     assert (target / "engineer/research-visualization-router.md").exists()
-    assert (target / "engineer/auto-research-pipeline.md").exists()
+    for stage in ("idea", "experiment", "paper", "review"):
+        assert (target / f"research-{stage}-playbook.md").exists()
+    assert not (target / "engineer/auto-research-pipeline.md").exists()
 
 
 def test_export_target_does_not_inherit_unrelated_cwd_vertical(
@@ -599,26 +621,10 @@ def test_main_rejects_continuous_on_persisted_memory_backend(
     assert "cannot plan" in err
 
 
-def _seed_trusted_special_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Create one trusted operator directive so the lifetime entry gate passes.
-
-    chmod 0644 is required because the trust check rejects group/world-writable
-    files (the sandbox umask otherwise yields 0664).
-    """
-    sp = tmp_path / "special_prompts"
-    sp.mkdir()
-    f = sp / "10-house-rules.md"
-    f.write_text("Operational house rules for this box.\n", encoding="utf-8")
-    f.chmod(0o644)
-    monkeypatch.setenv("ARGUS_SKILL_SPECIAL_PROMPTS_DIR", str(sp))
-
-
 def test_main_forwards_continuous_objective_to_ink(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ARGUS_SKILL_LIFE_BACKEND", "codex")
-    _seed_trusted_special_prompt(tmp_path, monkeypatch)
 
     captured: dict[str, object] = {}
 
@@ -641,9 +647,6 @@ def test_main_forwards_real_process_argv_to_ink(
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(sys, "argv", ["argus-skill", "--resume", "s-session01"])
-    monkeypatch.setattr(
-        "argus_skill.apps.cli._core._lifetime_entry_error", lambda args: ""
-    )
 
     def fake_run_tui(argv):
         captured["argv"] = argv
@@ -658,11 +661,9 @@ def test_main_forwards_real_process_argv_to_ink(
 def test_main_bare_launch_enters_ink_without_objective(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A bare ``argus-skill`` enters the single supported Ink cockpit."""
     monkeypatch.setenv("ARGUS_SKILL_LIFE_BACKEND", "codex")
-    _seed_trusted_special_prompt(tmp_path, monkeypatch)
     monkeypatch.setenv("ARGUS_SKILL_HOME", str(tmp_path / "home"))
 
     called = {"hit": False}
@@ -678,14 +679,12 @@ def test_main_bare_launch_enters_ink_without_objective(
     assert called["hit"] is True
 
 
-def test_main_ink_launch_requires_special_prompt(
+def test_main_ink_launch_allows_empty_special_prompt_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Cockpit may wait for an objective, but never without machine rules."""
+    """Cockpit startup does not require machine-specific prompt files."""
     monkeypatch.setenv("ARGUS_SKILL_LIFE_BACKEND", "codex")
-    # Point the special-prompts dir at an empty location so the gate trips.
     monkeypatch.setenv(
         "ARGUS_SKILL_SPECIAL_PROMPTS_DIR", str(tmp_path / "empty_special")
     )
@@ -699,9 +698,8 @@ def test_main_ink_launch_requires_special_prompt(
     monkeypatch.setattr("argus_skill.apps.tui_launcher.main", fake_run_tui)
 
     rc = main(["--continuous", "--objective", "hardening objective"])
-    assert rc == 2
-    assert called["hit"] is False
-    assert "special prompt" in capsys.readouterr().err.lower()
+    assert rc == 0
+    assert called["hit"] is True
 
 
 def test_wiki_ingest_init_flag_parses_without_abbreviation_collision():

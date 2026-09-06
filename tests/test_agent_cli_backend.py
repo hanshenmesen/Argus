@@ -19,8 +19,11 @@ the underlying ``AgentCliRunner.run_exec`` to return a synthetic
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -30,12 +33,14 @@ import pytest
 
 from argus_skill.adapters.agent_cli_backend import (
     AgentCliBackend,
-    _sum_token_counts,
     build_agent_cli_backend_from_env,
 )
 from argus_skill.adapters.agent_cli_backend._core import _RepeatedToolCallGuard
 from argus_skill.core.models import RunnerOptions
-from argus_skill.core.token_usage import extract_token_usage
+from argus_skill.core.token_usage import extract_token_usage, sum_token_counts
+from argus_skill.provider_integrations.authorization_retry import (
+    BackendLoginRequired,
+)
 from argus_skill.provider_integrations.copilot_usage import (
     CopilotCallUsage,
     CopilotModelUsage,
@@ -154,7 +159,9 @@ class AgentCliRunner:
 @pytest.fixture(autouse=True)
 def fake_agent_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     pkg = ModuleType("argus_skill.agent_cli")
-    setattr(pkg, "__path__", [])
+    # Fake the runner boundary while allowing newly imported supervisor
+    # helpers to resolve untouched bundled modules such as process control.
+    setattr(pkg, "__path__", [str(Path(__file__).resolve().parents[1] / "argus_skill" / "agent_cli")])
 
     runner_mod = ModuleType("argus_skill.agent_cli.agent_cli_runner")
     runner_mod.__dict__["AgentCliRunner"] = AgentCliRunner
@@ -231,6 +238,149 @@ def _make_cli_result(
         fatal_error=fatal_error,
         usage_model=usage_model,
     )
+
+
+def _configure_relay_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    token: str,
+    *,
+    environment_token: str | None = None,
+) -> Path:
+    from argus_skill.provider_integrations import authorization_retry
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        'model_provider = "copilot_relay"\n'
+        '[model_providers.copilot_relay]\n'
+        'base_url = "http://127.0.0.1:41419/v1"\n'
+        'env_key = "COPILOT_RELAY_TOKEN"\n',
+        encoding="utf-8",
+    )
+    relay_dir = tmp_path / ".config" / "copilot-codex-relay"
+    relay_dir.mkdir(parents=True)
+    credential_path = relay_dir / "env"
+    credential_path.write_text(
+        f"COPILOT_RELAY_TOKEN={token}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        authorization_retry.Path,
+        "home",
+        classmethod(lambda cls: tmp_path),
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv(
+        "COPILOT_RELAY_TOKEN",
+        token if environment_token is None else environment_token,
+    )
+    return credential_path
+
+
+def test_concurrent_401s_coordinate_one_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential_path = _configure_relay_credential(
+        tmp_path,
+        monkeypatch,
+        "fresh-relay-token",
+        environment_token="rejected-relay-token",
+    )
+    backends = [AgentCliBackend(backend="codex") for _ in range(2)]
+    barrier = threading.Barrier(2)
+    state_lock = threading.Lock()
+    calls_by_runner: dict[int, int] = {}
+    replay_tokens: list[str] = []
+    endpoint_expired = True
+    refreshes = 0
+
+    def fake_run_exec(self: Any, **_kwargs: Any) -> AgentRunResult:
+        nonlocal endpoint_expired, refreshes
+        with state_lock:
+            runner_id = id(self)
+            calls_by_runner[runner_id] = calls_by_runner.get(runner_id, 0) + 1
+            call_number = calls_by_runner[runner_id]
+        if call_number == 1:
+            barrier.wait(timeout=5)
+            return _make_cli_result(
+                exit_code=1,
+                fatal_error="401 Missing bearer",
+                stderr_lines=["401 Missing bearer"],
+            )
+        with state_lock:
+            needs_refresh = endpoint_expired
+            replay_tokens.append(os.environ["COPILOT_RELAY_TOKEN"])
+            if needs_refresh:
+                refreshes += 1
+        if needs_refresh:
+            time.sleep(0.05)
+            credential_path.write_text(
+                "COPILOT_RELAY_TOKEN=newer-relay-token\n",
+                encoding="utf-8",
+            )
+            with state_lock:
+                endpoint_expired = False
+        return _make_cli_result(agent_messages=["ok"])
+
+    monkeypatch.setattr(AgentCliRunner, "run_exec", fake_run_exec, raising=True)
+    options = RunnerOptions(skip_git_repo_check=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                backend.run_exec,
+                prompt="answer",
+                options=options,
+                run_label="manager-pending-answer",
+            )
+            for backend in backends
+        ]
+        results = [future.result(timeout=5) for future in futures]
+
+    assert [result.last_agent_message for result in results] == ["ok", "ok"]
+    assert sorted(calls_by_runner.values()) == [2, 2]
+    assert replay_tokens == ["fresh-relay-token", "newer-relay-token"]
+    assert refreshes == 1
+
+
+def test_second_401_requires_login_without_third_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_relay_credential(
+        tmp_path,
+        monkeypatch,
+        "fresh-relay-token",
+        environment_token="rejected-relay-token",
+    )
+    backend = AgentCliBackend(backend="codex")
+    calls = 0
+
+    def fake_run_exec(self: Any, **_kwargs: Any) -> AgentRunResult:
+        nonlocal calls
+        calls += 1
+        return _make_cli_result(
+            exit_code=1,
+            fatal_error="401 Missing bearer",
+            stderr_lines=["401 Missing bearer"],
+        )
+
+    monkeypatch.setattr(AgentCliRunner, "run_exec", fake_run_exec, raising=True)
+
+    with pytest.raises(BackendLoginRequired) as caught:
+        backend.run_exec(
+            prompt="answer",
+            options=RunnerOptions(skip_git_repo_check=True),
+            run_label="manager-pending-answer",
+        )
+
+    assert calls == 2
+    assert caught.value.phase == "backend"
+    assert caught.value.cause == "401 Missing bearer"
+    assert caught.value.attempts == 2
+    assert "login_required" in str(caught.value)
 
 
 def test_explicit_secret_snapshot_survives_per_call_refresh(
@@ -640,7 +790,7 @@ def test_settled_call_cost_blocks_the_next_call_at_global_cap(
     assert "global daily budget exhausted" in str(denied.fatal_error)
 
 
-def test_unpriced_call_is_observed_without_blocking_next_provider_spawn(
+def test_unpriced_call_blocks_next_provider_spawn_when_policy_is_block(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -687,9 +837,10 @@ def test_unpriced_call_is_observed_without_blocking_next_provider_spawn(
 
     assert first.pricing_status == "unpriced"
     assert first.cost_usd is None
-    assert calls == ["engineer-r1", "reviewer"]
-    assert second.fatal_error is None
-    assert second.pricing_status == "priced"
+    assert calls == ["engineer-r1"]
+    assert "unresolved provider cost" in second.fatal_error
+    assert second.stop_kind == "budget_exhausted"
+    assert second.pricing_status == "not_billed"
     state = json.loads((root / "cost-control.json").read_text())
     assert [row["call_id"] for row in state["unresolved"]] == [first.call_id]
 
@@ -1521,9 +1672,9 @@ def test_run_exec_handles_generic_exception(
 
 
 def test_token_count_extraction_handles_missing_events():
-    in_tok, cached_tok, out_tok, reasoning_out_tok = _sum_token_counts(None)
+    in_tok, cached_tok, out_tok, reasoning_out_tok = sum_token_counts(None)
     assert (in_tok, cached_tok, out_tok, reasoning_out_tok) == (0, 0, 0, 0)
-    in_tok, cached_tok, out_tok, reasoning_out_tok = _sum_token_counts([])
+    in_tok, cached_tok, out_tok, reasoning_out_tok = sum_token_counts([])
     assert (in_tok, cached_tok, out_tok, reasoning_out_tok) == (0, 0, 0, 0)
 
 
@@ -1545,7 +1696,7 @@ def test_token_count_extraction_picks_latest_nonzero():
             "output_tokens": 80,
         },
     ]
-    in_tok, cached_tok, out_tok, reasoning_out_tok = _sum_token_counts(events)
+    in_tok, cached_tok, out_tok, reasoning_out_tok = sum_token_counts(events)
     assert (in_tok, cached_tok, out_tok, reasoning_out_tok) == (250, 25, 80, 0)
 
 
@@ -1566,7 +1717,7 @@ def test_token_count_extraction_uses_final_usage_tuple_even_with_zero_cached():
             },
         },
     ]
-    in_tok, cached_tok, out_tok, reasoning_out_tok = _sum_token_counts(events)
+    in_tok, cached_tok, out_tok, reasoning_out_tok = sum_token_counts(events)
     assert (in_tok, cached_tok, out_tok, reasoning_out_tok) == (150, 0, 40, 0)
 
 
@@ -1577,7 +1728,7 @@ def test_token_count_extraction_handles_nested_content():
             "content": {"input_tokens": 42, "cached_input_tokens": 5, "output_tokens": 7},
         }
     ]
-    in_tok, cached_tok, out_tok, reasoning_out_tok = _sum_token_counts(events)
+    in_tok, cached_tok, out_tok, reasoning_out_tok = sum_token_counts(events)
     assert (in_tok, cached_tok, out_tok, reasoning_out_tok) == (42, 5, 7, 0)
 
 
@@ -1590,14 +1741,14 @@ def test_token_count_extraction_handles_top_level_cached_tokens():
             "output_tokens": 3,
         }
     ]
-    in_tok, cached_tok, out_tok, reasoning_out_tok = _sum_token_counts(events)
+    in_tok, cached_tok, out_tok, reasoning_out_tok = sum_token_counts(events)
     assert (in_tok, cached_tok, out_tok, reasoning_out_tok) == (17, 4, 3, 0)
 
 
 def test_token_count_extraction_reads_codex_0_121_usage_field():
     """codex-cli >=0.121 emits usage on turn.completed.
 
-    Regression test for the $0.0000 cost bug: previously _sum_token_counts
+    Regression test for the $0.0000 cost bug: previously sum_token_counts
     only inspected top-level / nested-content fields, so the usage payload
     on turn.completed was silently ignored.
     """
@@ -1610,7 +1761,7 @@ def test_token_count_extraction_reads_codex_0_121_usage_field():
             "usage": {"input_tokens": 12944, "cached_input_tokens": 1234, "output_tokens": 75},
         },
     ]
-    in_tok, cached_tok, out_tok, reasoning_out_tok = _sum_token_counts(events)
+    in_tok, cached_tok, out_tok, reasoning_out_tok = sum_token_counts(events)
     assert (in_tok, cached_tok, out_tok, reasoning_out_tok) == (12944, 1234, 75, 0)
 
 
@@ -1627,7 +1778,7 @@ def test_token_count_extraction_reads_reasoning_tokens_from_turn_completed_usage
             },
         },
     ]
-    in_tok, cached_tok, out_tok, reasoning_out_tok = _sum_token_counts(events)
+    in_tok, cached_tok, out_tok, reasoning_out_tok = sum_token_counts(events)
     assert (in_tok, cached_tok, out_tok, reasoning_out_tok) == (
         954691,
         846976,
@@ -2157,6 +2308,31 @@ def test_build_agent_cli_backend_from_env_uses_env(monkeypatch):
     assert backend._default_watchdog_hard_idle_seconds == 900
 
 
+def test_fork_creates_independent_runner_with_same_usage_context(tmp_path: Path) -> None:
+    backend = AgentCliBackend(
+        backend="copilot",
+        runner_bin="/bin/echo",
+        default_extra_args=["--trace"],
+        default_watchdog_soft_idle_seconds=11,
+        default_watchdog_stalled_idle_seconds=22,
+        default_watchdog_hard_idle_seconds=33,
+    )
+    backend.set_usage_context(
+        project_root=tmp_path / "project",
+        global_root=tmp_path,
+        mission_id="review",
+    )
+
+    forked = backend.fork()
+
+    assert forked is not backend
+    assert forked._runner is not backend._runner
+    assert forked._runner.agent_bin == backend._runner.agent_bin
+    assert forked._runner.default_extra_args == ["--trace"]
+    assert forked._usage_context_snapshot() == backend._usage_context_snapshot()
+    forked.close_acp_clients()
+
+
 def test_build_agent_cli_backend_from_env_strips_legacy_auto_max_profile(
     monkeypatch,
 ):
@@ -2186,4 +2362,38 @@ def test_build_agent_cli_backend_from_env_defaults(monkeypatch):
     assert backend._runner.default_extra_args == []
     assert backend._default_watchdog_soft_idle_seconds == 600
     assert backend._default_watchdog_stalled_idle_seconds == 1800
-    assert backend._default_watchdog_hard_idle_seconds == 2700
+    assert backend._default_watchdog_hard_idle_seconds == 0
+
+
+def test_build_backend_default_does_not_reuse_persisted_dsh_runner(
+    monkeypatch,
+):
+    from argus_skill.adapters.agent_cli_backend import _core
+    from argus_skill.core import knob_store
+
+    monkeypatch.setattr(
+        knob_store,
+        "read_persisted_knobs",
+        lambda: {
+            "ARGUS_SKILL_RUNNER_BACKEND": "dsh",
+            "ARGUS_SKILL_RUNNER_BIN": "/persisted/dsh",
+        },
+    )
+    captured = {}
+    monkeypatch.setattr(
+        _core,
+        "AgentCliBackend",
+        lambda **kwargs: captured.update(kwargs) or captured,
+    )
+
+    for configured_backend in (None, "   "):
+        if configured_backend is None:
+            monkeypatch.delenv("ARGUS_SKILL_RUNNER_BACKEND", raising=False)
+        else:
+            monkeypatch.setenv("ARGUS_SKILL_RUNNER_BACKEND", configured_backend)
+        monkeypatch.delenv("ARGUS_SKILL_RUNNER_BIN", raising=False)
+        captured.clear()
+
+        assert build_agent_cli_backend_from_env() is captured
+        assert captured["backend"] == "codex"
+        assert captured["runner_bin"] is None

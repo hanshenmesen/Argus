@@ -9,7 +9,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 VERTICAL_CONTRACT_VERSION = 1
 _COMPLETION_GATES = frozenset({"none", "metric", "certified"})
@@ -95,11 +95,52 @@ class RolePromptFragment(Protocol):
     ) -> str: ...
 
 
+class IterationAssessmentHook(Protocol):
+    """Optional vertical-owned decision at a would-be successful settlement."""
+
+    def __call__(
+        self,
+        *,
+        stage: str,
+        scope: str,
+        project_root: Path,
+        state_root: Path,
+        mission: Any,
+        outcome: Any,
+    ) -> "IterationAssessment | None": ...
+
+
+@dataclass(frozen=True)
+class IterationAssessment:
+    """A vertical's domain-specific reason to continue or stop iteration.
+
+    ``objective`` is non-empty only when the current result is a trusted
+    optimization signal and the same backlog item should be re-armed.
+    ``blocking_issues`` names integrity defects that make such optimization
+    unsafe; settlement records them but never turns them into an iteration.
+    ``None`` from the provider means the chartered result did not fall short.
+    """
+
+    shortfall: str
+    objective: str = ""
+    blocking_issues: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlannerReviewPurchaseDecision:
+    """A vertical-owned decision about a proposed review purchase."""
+
+    defer_reason: str = ""
+    discard_semantic_duplicate: bool = False
+    release_stage_closing_blocker: bool = False
+
+
 @dataclass(frozen=True)
 class VerticalLibraryContext:
     """Core-owned inputs for optional provider-owned Skill preparation."""
 
     workdir: Path
+    state_root: Path
     stage: str
     objective: str
     direction: str
@@ -136,28 +177,25 @@ class VerticalContract:
     library_preparer: Callable[[VerticalLibraryContext], None] | None = None
     stage_completion_validator: Callable[..., object] | None = None
     planner_task_validator: Callable[[str, Path, Any], object] | None = None
+    review_purchase_policy: Callable[..., PlannerReviewPurchaseDecision] | None = None
+    iteration_assessor: IterationAssessmentHook | None = None
     # Optional: records the operator's stated objective at project setup, for a
     # vertical that cannot pick a completion bar on its own. See
     # ``adopt_operator_objective``.
     operator_objective_adopter: Callable[[Path, str], object] | None = None
-    stage_checks: dict[str, tuple[tuple[str, str], ...]] | None = None
+    # Optional: carries this vertical's own pre-isolation artifacts (stage
+    # names, selection records) when legacy Manager state is imported into an
+    # isolated state root. Keyword-only forwarding; see ``import_legacy_state``.
+    legacy_state_importer: Callable[..., object] | None = None
     stage_primary_deliverables: dict[str, tuple[str, ...]] | None = None
+    # Optional role-operation routing by canonical stage. The framework keeps
+    # the fallback operation domain-blind; each vertical owns any specialization.
+    engineer_stage_operations: dict[str, str] | None = None
     # Stages whose Engineer round runs with live web search enabled. ``None``
     # means "this vertical declares nothing", which is NOT the same as an
     # explicitly declared empty set ("never search"): the former keeps the
     # framework default, the latter overrides it off.
     engineer_live_search_stages: frozenset[str] | None = None
-    # Optional work-kind-specific stage declarations. Core forwards only the
-    # persisted mission field; verticals own which domain work kinds need search.
-    engineer_live_search_work_kinds: dict[str, frozenset[str]] | None = None
-
-    @property
-    def assurance_level(self) -> str:
-        if self.stage_checks or self.stage_completion_validator is not None:
-            return "hybrid"
-        if self.checklist_optional_stages == frozenset(self.stage_order):
-            return "runtime-authored"
-        return "reviewer"
 
     def banner(self, role: str) -> str:
         if self.role_guidance is None:
@@ -198,32 +236,34 @@ class VerticalContract:
     def primary_deliverables(self, stage: str) -> tuple[str, ...]:
         return tuple((self.stage_primary_deliverables or {}).get(stage, ()))
 
+    def engineer_operation(self, stage: str, *, default: str = "mission") -> str:
+        return str((self.engineer_stage_operations or {}).get(stage, default))
+
     def live_search_stages(
         self,
         default: frozenset[str],
         *,
-        work_kind: str = "",
         preserve_configured: bool = False,
     ) -> frozenset[str]:
         """Stages in which THIS vertical's Engineer runs with live web search.
 
         Core owns ``default`` and never enumerates vertical stage names: a
         vertical whose pipeline has no research stage would otherwise never
-        reach a live-search stage at all. Stage names and work-kind policy are
-        vertical-local, so two verticals sharing a stage name (``review``) never
-        leak into each other. An existing all-mission stage declaration retains
-        its historical precedence. Work-kind declarations are mission defaults
-        and therefore do not replace a caller's custom Engineer configuration.
+        reach a live-search stage at all. Stage policy is vertical-local, so two
+        verticals sharing a stage name (``review``) never leak into each other.
+        An existing all-mission stage declaration retains its historical precedence.
         """
         if self.engineer_live_search_stages is not None:
             return self.engineer_live_search_stages
         if preserve_configured:
             return default
-        normalized_kind = str(work_kind or "").strip()
-        by_work_kind = self.engineer_live_search_work_kinds or {}
-        if normalized_kind in by_work_kind:
-            return by_work_kind[normalized_kind]
-        return default
+        # Current literature, official implementations, provider behaviour and
+        # hardware facts can change in every kind of work and at every stage.
+        # Restricting the fallback to a stage literally named `research` left
+        # math, kernel and software verticals without live search at all, and
+        # froze research campaigns to what they knew at idea selection. A
+        # vertical can still declare an explicit empty set to turn search off.
+        return frozenset(self.stage_order) or default
 
     def completion_issues(
         self,
@@ -235,17 +275,35 @@ class VerticalContract:
         if self.stage_completion_validator is None:
             return ()
         validator = self.stage_completion_validator
-        accepts_state_root = False
-        if state_root is not None:
-            try:
-                parameter = inspect.signature(validator).parameters.get("state_root")
-                accepts_state_root = parameter is not None
-            except (TypeError, ValueError):
-                accepts_state_root = False
-        value = (
-            validator(stage, project_root, state_root=state_root)
-            if accepts_state_root
-            else validator(stage, project_root)
+        try:
+            parameters = inspect.signature(validator).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        kwargs: dict[str, object] = {}
+        if state_root is not None and "state_root" in parameters:
+            kwargs["state_root"] = state_root
+        if "verification_profile" in parameters:
+            from .verification_policy import resolve_policy
+
+            final_scope = (
+                "final_submission"
+                if self.completion_gate == "certified"
+                and self.stage_order
+                and stage == self.stage_order[-1]
+                else None
+            )
+            policy = resolve_policy(
+                state_root if state_root is not None else project_root,
+                scope=final_scope,
+                stage=stage,
+                vertical=self.name,
+                stage_profiles=self.verification_stage_profiles,
+            )
+            kwargs["verification_profile"] = policy.profile
+        value = validator(
+            stage,
+            project_root,
+            **kwargs,
         )
         if value is None:
             return ()
@@ -273,6 +331,59 @@ class VerticalContract:
             if str(issue).strip()
         )
 
+    def review_purchase(
+        self,
+        *,
+        project_root: Path,
+        task: Any,
+        existing_items: Iterable[Any],
+        semantic_duplicate: Any | None,
+        stage_reviewed_at: float | None,
+    ) -> PlannerReviewPurchaseDecision | None:
+        if self.review_purchase_policy is None:
+            return None
+        value = self.review_purchase_policy(
+            project_root=project_root,
+            task=task,
+            existing_items=existing_items,
+            semantic_duplicate=semantic_duplicate,
+            stage_reviewed_at=stage_reviewed_at,
+        )
+        if isinstance(value, PlannerReviewPurchaseDecision):
+            return value
+        raise VerticalContractError(
+            f"vertical {self.name!r} review purchase policy returned "
+            f"{type(value).__name__}, expected PlannerReviewPurchaseDecision"
+        )
+
+    def assess_iteration(
+        self,
+        *,
+        stage: str,
+        scope: str,
+        project_root: Path,
+        state_root: Path,
+        mission: Any,
+        outcome: Any,
+    ) -> IterationAssessment | None:
+        """Ask the active vertical whether a trusted result missed its charter."""
+        if self.iteration_assessor is None:
+            return None
+        value = self.iteration_assessor(
+            stage=stage,
+            scope=scope,
+            project_root=project_root,
+            state_root=state_root,
+            mission=mission,
+            outcome=outcome,
+        )
+        if value is None or isinstance(value, IterationAssessment):
+            return value
+        raise VerticalContractError(
+            f"vertical {self.name!r} iteration assessor returned "
+            f"{type(value).__name__}, expected IterationAssessment or None"
+        )
+
     def adopt_operator_objective(self, project_root: Path, request: str) -> bool:
         """Let the vertical record the operator's stated objective, if it wants one.
 
@@ -295,6 +406,19 @@ class VerticalContract:
             return False
         self.operator_objective_adopter(project_root, str(request or ""))
         return True
+
+    def import_legacy_state(self, *, source_root: Path, state_root: Path) -> None:
+        """Carry this vertical's pre-isolation artifacts into the state root.
+
+        Called once, right after legacy Manager state naming this vertical has
+        been copied into an isolated state root. The framework knows only that
+        an import happened; whatever stage-name or selection migration the
+        vertical needs stays vertical-local behind this hook, so the state
+        importer never has to name a domain.
+        """
+        if self.legacy_state_importer is None:
+            return
+        self.legacy_state_importer(source_root=source_root, state_root=state_root)
 
     def prepare_mission(
         self,
@@ -456,6 +580,16 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         raise VerticalContractError(
             f"vertical {name!r} has a non-callable planner task validator"
         )
+    review_purchase_policy = getattr(provider, "review_purchase_policy", None)
+    if review_purchase_policy is not None and not callable(review_purchase_policy):
+        raise VerticalContractError(
+            f"vertical {name!r} has a non-callable review purchase policy"
+        )
+    iteration_assessor = getattr(provider, "iteration_assessment", None)
+    if iteration_assessor is not None and not callable(iteration_assessor):
+        raise VerticalContractError(
+            f"vertical {name!r} has a non-callable iteration assessor"
+        )
     operator_objective_adopter = getattr(provider, "adopt_operator_objective", None)
     if operator_objective_adopter is not None and not callable(
         operator_objective_adopter
@@ -463,38 +597,11 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         raise VerticalContractError(
             f"vertical {name!r} has a non-callable operator objective adopter"
         )
-    raw_stage_checks = getattr(provider, "STAGE_CHECKS", {}) or {}
-    if not isinstance(raw_stage_checks, dict):
-        raise VerticalContractError(f"vertical {name!r} stage checks are not a mapping")
-    unknown_stage_checks = sorted(set(raw_stage_checks) - set(stage_order))
-    if unknown_stage_checks:
+    legacy_state_importer = getattr(provider, "import_legacy_state", None)
+    if legacy_state_importer is not None and not callable(legacy_state_importer):
         raise VerticalContractError(
-            f"vertical {name!r} has checks for unknown stages: "
-            f"{', '.join(unknown_stage_checks)}"
+            f"vertical {name!r} has a non-callable legacy state importer"
         )
-    stage_checks: dict[str, tuple[tuple[str, str], ...]] = {}
-    for stage, checks in raw_stage_checks.items():
-        if not isinstance(checks, (list, tuple)):
-            raise VerticalContractError(
-                f"vertical {name!r} checks for {stage!r} are not a sequence"
-            )
-        normalized_checks: list[tuple[str, str]] = []
-        for check in checks:
-            if not isinstance(check, (list, tuple)) or len(check) != 2:
-                raise VerticalContractError(
-                    f"vertical {name!r} check for {stage!r} is not a label-command pair"
-                )
-            label, command = check
-            if not isinstance(label, str) or not label.strip():
-                raise VerticalContractError(
-                    f"vertical {name!r} check for {stage!r} has an empty label"
-                )
-            if not isinstance(command, str) or not command.strip():
-                raise VerticalContractError(
-                    f"vertical {name!r} check for {stage!r} has an empty command"
-                )
-            normalized_checks.append((label.strip(), command.strip()))
-        stage_checks[stage] = tuple(normalized_checks)
     raw_primary_deliverables = (
         getattr(provider, "STAGE_PRIMARY_DELIVERABLES", {}) or {}
     )
@@ -518,6 +625,24 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         )
         for stage, values in raw_primary_deliverables.items()
     }
+    raw_stage_operations = getattr(provider, "ENGINEER_STAGE_OPERATIONS", {}) or {}
+    if not isinstance(raw_stage_operations, dict):
+        raise VerticalContractError(
+            f"vertical {name!r} Engineer stage operations are not a mapping"
+        )
+    unknown_operation_stages = sorted(
+        set(raw_stage_operations) - set(stage_order)
+    )
+    if unknown_operation_stages:
+        raise VerticalContractError(
+            f"vertical {name!r} has Engineer operations for unknown stages: "
+            f"{', '.join(unknown_operation_stages)}"
+        )
+    engineer_stage_operations = {
+        str(stage): str(operation).strip()
+        for stage, operation in raw_stage_operations.items()
+        if str(operation).strip()
+    }
     raw_live_search_stages = getattr(provider, "ENGINEER_LIVE_SEARCH_STAGES", None)
     engineer_live_search_stages: frozenset[str] | None = None
     if raw_live_search_stages is not None:
@@ -527,24 +652,6 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         # permanent, unreported "live search off".
         engineer_live_search_stages = _normalize_live_search_stages(
             name, raw_live_search_stages, stage_order
-        )
-    raw_live_search_work_kinds = getattr(
-        provider, "ENGINEER_LIVE_SEARCH_WORK_KINDS", None
-    )
-    if raw_live_search_work_kinds is None:
-        raw_live_search_work_kinds = {}
-    if not isinstance(raw_live_search_work_kinds, dict):
-        raise VerticalContractError(
-            f"vertical {name!r} live search work kinds are not a mapping"
-        )
-    engineer_live_search_work_kinds: dict[str, frozenset[str]] = {}
-    for raw_kind, raw_stages in raw_live_search_work_kinds.items():
-        if not isinstance(raw_kind, str) or not raw_kind.strip():
-            raise VerticalContractError(
-                f"vertical {name!r} declares an invalid live search work kind"
-            )
-        engineer_live_search_work_kinds[raw_kind.strip()] = (
-            _normalize_live_search_stages(name, raw_stages, stage_order)
         )
     raw_verification_profiles = (
         getattr(provider, "VERIFICATION_STAGE_PROFILES", {}) or {}
@@ -600,7 +707,7 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         ),
         evidence_schema=getattr(provider, "EVIDENCE_SCHEMA", None),
         requires_independent_review=bool(
-            getattr(provider, "REQUIRE_INDEPENDENT_REVIEW", False)
+            getattr(provider, "REQUIRE_INDEPENDENT_REVIEW", True)
         ),
         completion_contract_version=max(
             0, int(getattr(provider, "COMPLETION_CONTRACT_VERSION", 0) or 0)
@@ -631,19 +738,22 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         ),
         stage_completion_validator=stage_completion_validator,
         planner_task_validator=planner_task_validator,
+        review_purchase_policy=review_purchase_policy,
+        iteration_assessor=iteration_assessor,
         operator_objective_adopter=operator_objective_adopter,
-        stage_checks=stage_checks,
+        legacy_state_importer=legacy_state_importer,
         stage_primary_deliverables=stage_primary_deliverables,
+        engineer_stage_operations=engineer_stage_operations,
         engineer_live_search_stages=engineer_live_search_stages,
-        engineer_live_search_work_kinds=(
-            engineer_live_search_work_kinds or None
-        ),
     )
 
 
 __all__ = [
     "VERTICAL_CONTRACT_VERSION",
     "MissionPrelude",
+    "IterationAssessment",
+    "IterationAssessmentHook",
+    "PlannerReviewPurchaseDecision",
     "RolePromptFragment",
     "VerticalContract",
     "VerticalContractError",

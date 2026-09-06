@@ -111,20 +111,20 @@ def test_replace_of_live_search_field_with_default_marks_it_explicit() -> None:
     assert updated._live_search_stages_explicit is True
 
 
-def test_stage_gate_research_on_others_off():
+def test_stage_gate_on_for_named_stages_off_elsewhere():
     d = tempfile.mkdtemp()
-    os.makedirs(os.path.join(d, "research"), exist_ok=True)
-    stages = frozenset({"research"})
+    os.makedirs(os.path.join(d, ".argus"), exist_ok=True)
+    stages = frozenset({"idea"})
 
     def _set(stage: str) -> None:
-        with open(os.path.join(d, "research", "PIPELINE_STATE.json"), "w") as fh:
+        with open(os.path.join(d, ".argus", "PIPELINE_STATE.json"), "w") as fh:
             json.dump({"current_stage": stage}, fh)
 
-    _set("research")
+    _set("idea")
     assert _engineer_live_search(d, stages) is True
-    _set("plan")
+    _set("experiment")
     assert _engineer_live_search(d, stages) is False
-    _set("run")
+    _set("paper")
     assert _engineer_live_search(d, stages) is False
 
 
@@ -163,46 +163,34 @@ def _kernel_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_math_engineer_gets_live_search_in_solve(tmp_path: Path) -> None:
-    """The regression: math has no ``research`` stage, so the framework default
-    never fired and its Engineer could never do live literature work."""
+def test_every_math_stage_gets_live_search(tmp_path: Path) -> None:
+    """Current literature, official implementations and provider behaviour can
+    change while solving and while reviewing, not only while scoping."""
+    contract = load_vertical_contract("math")
+    assert contract.engineer_live_search_stages is None
     stages = _resolved_stages("math")
-    assert stages == frozenset({"scope", "solve"})
-
-    workdir = _math_project(tmp_path, "solve")
-    assert _engineer_live_search(workdir, stages) is True
-    # ...and the old hardcoded default would have refused exactly this round.
-    assert _engineer_live_search(workdir, DEFAULT_LIVE_SEARCH_STAGES) is False
-
-
-def test_math_live_search_follows_its_own_stage_machine(tmp_path: Path) -> None:
-    stages = _resolved_stages("math")
-
-    assert _engineer_live_search(_math_project(tmp_path / "a", "scope"), stages) is True
-    assert _engineer_live_search(_math_project(tmp_path / "b", "solve"), stages) is True
-    # ``review`` is independent verification; the Reviewer owns source checks.
-    assert _engineer_live_search(_math_project(tmp_path / "c", "review"), stages) is False
+    assert stages == frozenset(contract.stage_order)
+    for index, stage in enumerate(contract.stage_order):
+        assert _engineer_live_search(
+            _math_project(tmp_path / str(index), stage), stages
+        ) is True
 
 
-def test_research_vertical_live_search_is_unchanged(tmp_path: Path) -> None:
-    """The research vertical declares nothing and must behave exactly as before."""
-    assert load_vertical_contract("research").engineer_live_search_stages is None
+def test_research_live_search_covers_working_stages_not_review(tmp_path: Path) -> None:
+    contract = load_vertical_contract("research")
+    assert contract.engineer_live_search_stages == frozenset(
+        {"idea", "experiment", "paper"}
+    )
     stages = _resolved_stages("research")
-    assert stages == DEFAULT_LIVE_SEARCH_STAGES == frozenset({"research"})
+    assert stages == frozenset({"idea", "experiment", "paper"})
 
     persist_vertical(tmp_path, "research")
     state_path = tmp_path / ".argus" / "PIPELINE_STATE.json"
-
-    def _at(stage: str) -> bool:
+    for stage in contract.stage_order:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         payload["current_stage"] = stage
         state_path.write_text(json.dumps(payload), encoding="utf-8")
-        return _engineer_live_search(tmp_path, stages)
-
-    assert _at("research") is True
-    assert _at("plan") is False
-    assert _at("run") is False
-    assert _at("review") is False
+        assert _engineer_live_search(tmp_path, stages) is (stage != "review")
 
 
 def test_vertical_without_declaration_takes_the_default_path(tmp_path: Path) -> None:
@@ -211,12 +199,13 @@ def test_vertical_without_declaration_takes_the_default_path(tmp_path: Path) -> 
         contract = load_vertical_contract(vertical)
         assert contract.engineer_live_search_stages is None, vertical
         assert contract.live_search_stages(DEFAULT_LIVE_SEARCH_STAGES) == (
-            DEFAULT_LIVE_SEARCH_STAGES
+            frozenset(contract.stage_order)
         ), vertical
 
-    # A "software" project sits in ``delivery`` and, as before, gets no search.
+    # A software project searches in delivery too: current dependencies,
+    # provider behaviour and official docs do not stop changing after scope.
     persist_vertical(tmp_path, "software")
-    assert _engineer_live_search(tmp_path, _resolved_stages("software")) is False
+    assert _engineer_live_search(tmp_path, _resolved_stages("software")) is True
 
 
 def _done_review() -> CannedResponse:
@@ -272,7 +261,6 @@ def _run_one_round(
     *,
     live_search_stages: frozenset[str] | None = None,
     vertical_state_root: Path | None = None,
-    work_kind: str = "",
     task: str = "Do the work.",
 ) -> CoreOpts:
     """Run one real SkillLoop round and return the engineer's RunnerOptions."""
@@ -286,44 +274,22 @@ def _run_one_round(
         task,
         workdir=tmp_path,
         scope="bounded",
-        work_kind=work_kind,
     )
     return _engineer_options(backend)
 
 
-_KERNEL_KEYWORD_NOISE = (
-    "Algorithm discovery and optimization are mentioned identically; use live search "
-    "only when the persisted mission structure permits it."
-)
-
-
-@pytest.mark.parametrize(
-    ("work_kind", "expected"),
-    [
-        ("algorithm_discovery", True),
-        ("engineering_optimization", False),
-        ("", False),
-    ],
-)
-def test_kernel_skill_loop_live_search_routes_only_by_persisted_work_kind(
-    tmp_path: Path,
-    work_kind: str,
-    expected: bool,
-) -> None:
-    """Same optimize stage and prose; only mission.work_kind may change routing."""
+def test_kernel_skill_loop_keeps_search_available(tmp_path: Path) -> None:
     _kernel_project(tmp_path)
 
     options = _run_one_round(
         tmp_path,
         "kernel_engineering",
-        work_kind=work_kind,
-        task=_KERNEL_KEYWORD_NOISE,
     )
 
-    assert options.live_search is expected
+    assert options.live_search is True
 
 
-def test_separated_state_root_enables_kernel_algorithm_discovery(
+def test_separated_state_root_enables_kernel_live_search(
     tmp_path: Path,
 ) -> None:
     """The contract and stage gate must read the same production state root."""
@@ -335,7 +301,6 @@ def test_separated_state_root_enables_kernel_algorithm_discovery(
         execution_root,
         "kernel_engineering",
         vertical_state_root=state_root,
-        work_kind="algorithm_discovery",
     )
 
     # State is optimize, while the execution tree is research. Reading the
@@ -343,37 +308,15 @@ def test_separated_state_root_enables_kernel_algorithm_discovery(
     assert options.live_search is True
 
 
-@pytest.mark.parametrize("work_kind", ["engineering_optimization", ""])
-def test_separated_state_root_does_not_enable_other_kernel_work_kinds(
-    tmp_path: Path,
-    work_kind: str,
-) -> None:
-    state_root = _kernel_project(tmp_path / "state")
-    execution_root = tmp_path / "execution"
-    persist_vertical(execution_root, "research")
-
-    options = _run_one_round(
-        execution_root,
-        "kernel_engineering",
-        vertical_state_root=state_root,
-        work_kind=work_kind,
-    )
-
-    # These kinds retain the research-stage framework default. Reading the
-    # execution tree would therefore enable search even though state is optimize.
-    assert options.live_search is False
-
-
 @pytest.mark.parametrize(
-    ("work_kind", "custom", "expected"),
+    ("custom", "expected"),
     [
-        ("engineering_optimization", frozenset({"optimize"}), True),
-        ("algorithm_discovery", frozenset(), False),
+        (frozenset({"optimize"}), True),
+        (frozenset(), False),
     ],
 )
-def test_kernel_work_kind_default_does_not_replace_caller_live_search_config(
+def test_kernel_default_does_not_replace_caller_live_search_config(
     tmp_path: Path,
-    work_kind: str,
     custom: frozenset[str],
     expected: bool,
 ) -> None:
@@ -383,8 +326,6 @@ def test_kernel_work_kind_default_does_not_replace_caller_live_search_config(
         tmp_path,
         "kernel_engineering",
         live_search_stages=custom,
-        work_kind=work_kind,
-        task=_KERNEL_KEYWORD_NOISE,
     )
 
     assert options.live_search is expected
@@ -398,13 +339,12 @@ def test_explicit_framework_default_keeps_caller_provenance(tmp_path: Path) -> N
         tmp_path,
         "kernel_engineering",
         live_search_stages=frozenset({"research"}),
-        work_kind="algorithm_discovery",
     )
 
     assert options.live_search is False
 
 
-def test_standard_replace_custom_live_search_overrides_kernel_work_kind_default(
+def test_standard_replace_custom_live_search_overrides_kernel_default(
     tmp_path: Path,
 ) -> None:
     _kernel_project(tmp_path)
@@ -418,14 +358,13 @@ def test_standard_replace_custom_live_search_overrides_kernel_work_kind_default(
         "Do the work.",
         workdir=tmp_path,
         scope="bounded",
-        work_kind="engineering_optimization",
     )
 
     assert loop.supervised.engineer_config._live_search_stages_explicit is True
     assert _engineer_options(backend).live_search is True
 
 
-def test_replaced_live_search_config_overrides_kernel_work_kind_default(
+def test_replaced_live_search_config_overrides_kernel_default(
     tmp_path: Path,
 ) -> None:
     _kernel_project(tmp_path)
@@ -438,13 +377,12 @@ def test_replaced_live_search_config_overrides_kernel_work_kind_default(
         "Do the work.",
         workdir=tmp_path,
         scope="bounded",
-        work_kind="algorithm_discovery",
     )
 
     assert _engineer_options(backend).live_search is False
 
 
-def test_replaced_default_live_search_config_overrides_kernel_work_kind_default(
+def test_replaced_default_live_search_config_overrides_kernel_default(
     tmp_path: Path,
 ) -> None:
     _kernel_project(tmp_path)
@@ -457,7 +395,6 @@ def test_replaced_default_live_search_config_overrides_kernel_work_kind_default(
         "Do the work.",
         workdir=tmp_path,
         scope="bounded",
-        work_kind="algorithm_discovery",
     )
 
     assert _engineer_options(backend).live_search is False
@@ -480,12 +417,12 @@ def test_skill_loop_keeps_research_engineer_behaviour(tmp_path: Path) -> None:
     assert _run_one_round(tmp_path, "research").live_search is True
 
 
-def test_skill_loop_leaves_undeclared_vertical_on_the_default_path(
+def test_skill_loop_gives_undeclared_vertical_search_in_its_stage(
     tmp_path: Path,
 ) -> None:
     persist_vertical(tmp_path, "software")
 
-    assert _run_one_round(tmp_path, "software").live_search is False
+    assert _run_one_round(tmp_path, "software").live_search is True
 
 
 def test_undeclared_vertical_preserves_a_caller_configured_live_search_set(
@@ -526,9 +463,9 @@ def test_mission_never_mutates_the_shared_supervised_engineer(
 
     loop.run("Do the work.", workdir=tmp_path, scope="bounded")
 
-    # math declares {"scope", "solve"}, so this mission DID resolve something
-    # different from the caller's baseline...
-    assert _engineer_options(backend).live_search is True
+    # An explicit caller policy is an opt-out from the vertical default, and
+    # solve is outside this caller's scope-only set.
+    assert _engineer_options(backend).live_search is False
     # ...yet nothing was written back onto the shared object.
     assert loop.supervised is shared_before
     assert loop.supervised.engineer_config is config_before

@@ -33,6 +33,22 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 
+def test_static_module_workers_use_a_javascript_mime_on_windows(
+    tmp_path: Path,
+) -> None:
+    dist = Path(server.__file__).resolve().parents[2] / "frontend" / "web" / "dist"
+    workers = list((dist / "assets").glob("pdf.worker*.mjs"))
+    if not workers:
+        pytest.skip("built PDF worker is not present")
+
+    response = TestClient(server.create_app(global_root=tmp_path)).get(
+        f"/assets/{workers[0].name}"
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/javascript")
+
+
 def test_project_label_does_not_use_raw_operator_transcript(tmp_path: Path) -> None:
     sid = "s-rawlabel"
     life_dir = tmp_path / "projects" / sid
@@ -462,7 +478,7 @@ def test_project_limit_backfills_sessions_shadowed_by_primary_root(
 ) -> None:
     primary = tmp_path / "private"
     machine = tmp_path / "machine"
-    activity_base = time.time() + 1_000
+    newest = time.time() + 100
     for index in range(3):
         sid = f"s-duplicate{index}"
         (primary / "projects" / sid).mkdir(parents=True)
@@ -472,7 +488,7 @@ def test_project_limit_backfills_sessions_shadowed_by_primary_root(
             SessionMeta(
                 id=sid,
                 display_name=f"Shadowed {index}",
-                last_active=activity_base + 100 - index,
+                last_active=newest - index,
             ),
         )
     for index in range(2):
@@ -483,7 +499,7 @@ def test_project_limit_backfills_sessions_shadowed_by_primary_root(
             SessionMeta(
                 id=sid,
                 display_name=f"Unique {index}",
-                last_active=activity_base + 90 - index,
+                last_active=newest - 10 - index,
             ),
         )
     client = TestClient(
@@ -532,7 +548,7 @@ def test_api_meta_identifies_protocol_capabilities_and_loaded_checkout(
     assert meta["runtime"]["pid"] > 0
     assert meta["runtime"]["desktop_launch_nonce"] == "desktop-launch-test"
     runtime = meta["runtime"]
-    assert runtime["release_id"].startswith("0.1.2+")
+    assert runtime["release_id"].startswith("0.1.1+")
     assert runtime["release_matches_source"] is (
         runtime["manifest_source_digest"] == runtime["runtime_source_digest"]
     )
@@ -545,6 +561,26 @@ def test_web_serve_refuses_strict_release_mismatch(monkeypatch) -> None:
     )
 
     with pytest.raises(RuntimeError, match="webapi refused inconsistent release"):
+        server.serve()
+
+
+def test_web_serve_refuses_a_mismatched_source_root(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "argus_skill.core.runtime_identity.source_root_preflight_error",
+        lambda: "source-root mismatch",
+    )
+
+    with pytest.raises(RuntimeError, match="webapi refused mismatched source root"):
+        server.serve()
+
+
+def test_web_serve_refuses_a_configured_root_the_launcher_did_not_load(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ARGUS_SKILL_SOURCE_ROOT", str(tmp_path / "other-worktree"))
+
+    with pytest.raises(RuntimeError, match="webapi refused mismatched source root"):
         server.serve()
 
 
@@ -924,7 +960,7 @@ def test_get_meta_is_public_versioned_and_uncached(
     assert r.headers["x-argus-protocol"] == (
         f"argus.webapi/{API_PROTOCOL_MAJOR}.{API_PROTOCOL_MINOR}"
     )
-    assert r.headers["x-argus-release"].startswith("0.1.2+")
+    assert r.headers["x-argus-release"].startswith("0.1.1+")
     assert r.json()["protocol"]["major"] == API_PROTOCOL_MAJOR
     assert r.json()["authentication"] == {
         "required": True,
@@ -962,6 +998,105 @@ def test_system_doctor_requires_auth_and_returns_typed_read_only_report(
     assert {item["scope"] for item in payload["findings"]} >= {
         "host", "install", "cli", "web", "desktop", "daemon",
     }
+
+
+def test_system_resources_requires_auth_and_redacts_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from argus_skill.tools.resource_ledger import ledger as resource_ledger
+
+    now = time.time()
+    long_reason = "please   release\n" + "x" * 400
+    snapshot = {
+        "probe": {
+            "enforcement": "advisory",
+            "accelerators": [{
+                "kind": "cuda",
+                "status": "degraded",
+                "devices": [{"identity": "GPU-abcdef0123456789"}],
+                "detail": "partial telemetry",
+            }],
+        },
+        "grants": [{
+            "id": "deadbeef",
+            "owner": {
+                "unix_user": "alice",
+                "project_root": "/home/alice/private/alpha",
+                "task_id": "train",
+            },
+            "demand": {"intent": "train model"},
+            "expires_at": now + 120,
+            "grant": {"devices": [{"identity": "GPU-abcdef0123456789"}]},
+            "yield_requests": [{
+                "reason": long_reason,
+                "requester": {"unix_user": "bob"},
+                "response": {
+                    "decision": "decline",
+                    "reason": "unsafe   checkpoint\nnow",
+                },
+            }],
+        }],
+        "queue": [{
+            "id": "cafe1234",
+            "owner": {
+                "unix_user": "bob",
+                "project_root": "/srv/users/bob/beta",
+                "task_id": "evaluate",
+            },
+            "demand": {"intent": "run evaluation"},
+            "expires_at": now + 60,
+        }],
+    }
+
+    class StubLedger:
+        def status(self) -> dict:
+            return snapshot
+
+    ledger = StubLedger()
+    monkeypatch.setattr(resource_ledger, "ResourceLedger", lambda: ledger)
+    app = server.create_app(global_root=tmp_path, auth_token="secret")
+    route = next(
+        route for route in app.routes
+        if getattr(route, "path", "") == "/api/system/resources"
+    )
+    auth = route.dependant.dependencies[0].call
+
+    with pytest.raises(fastapi.HTTPException) as rejected:
+        auth(None)
+    assert rejected.value.status_code == 401
+    assert auth("Bearer secret") is None
+
+    payload = route.endpoint()
+    assert payload["schema_version"] == 1
+    assert payload["enforcement"] == "advisory"
+    assert payload["accelerators"] == [{
+        "kind": "cuda",
+        "status": "degraded",
+        "device_count": 1,
+        "detail": "partial telemetry",
+    }]
+    assert payload["holders"][0]["project"] == "alpha"
+    assert payload["holders"][0]["device_count"] == 1
+    assert payload["holders"][0]["ttl_seconds"] == pytest.approx(120, abs=2)
+    request = payload["holders"][0]["yield_requests"][0]
+    assert len(request["reason"]) == 300
+    assert request["reason"].endswith("…")
+    assert request["response"] == {
+        "decision": "decline",
+        "reason": "unsafe checkpoint now",
+    }
+    assert payload["queue"] == [{
+        "position": 1,
+        "project": "beta",
+        "task_id": "evaluate",
+        "intent": "run evaluation",
+        "ttl_seconds": pytest.approx(60, abs=2),
+    }]
+    encoded = json.dumps(payload)
+    assert all(secret not in encoded for secret in (
+        "alice", "bob", "/home/", "/srv/", "deadbeef", "cafe1234", "abcdef0123456789",
+    ))
 
 
 def test_metrics_endpoints_expose_json_slo_and_prometheus(client: TestClient) -> None:

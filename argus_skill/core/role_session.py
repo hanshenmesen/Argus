@@ -22,7 +22,7 @@ from .secret_guard import known_secret_values, redact_secrets_text
 
 ROLE_SESSION_POLICIES = frozenset({"auto", "fresh", "mission", "rolling"})
 _RESUMABLE_ROLE_SESSION_BACKENDS = frozenset({
-    "codex", "claude", "copilot", "grok", "opencode", "pi", "qoder",
+    "codex", "claude", "copilot", "cursor", "grok", "opencode", "pi", "qoder",
 })
 _NON_RESUMABLE_ROLE_SESSION_BACKENDS = frozenset({"dsh"})
 ROLE_SESSION_SIGNALS = frozenset({
@@ -84,7 +84,6 @@ def _worktree_branch(workdir: Path) -> str:
             ["git", "-C", str(workdir), "symbolic-ref", "--short", "HEAD"],
             capture_output=True,
             text=True,
-            timeout=5,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):

@@ -240,6 +240,60 @@ def test_stale_resume_error_with_observed_premium_usage_stays_partial() -> None:
     assert record.cost_usd is None
 
 
+@pytest.mark.parametrize("error", [
+    "Error: Access denied by policy settings. Your Copilot CLI policy is disabled.",
+    "Your Copilot subscription does not include this feature",
+    "Required policies have not been enabled for Copilot CLI",
+    "Error: Failed to load models (Request ID: request-1)",
+    "Copilot could not retrieve the list of available models.",
+])
+def test_copilot_startup_policy_refusal_is_unbilled_for_new_and_existing_records(
+    tmp_path: Path, error: str
+) -> None:
+    record = build_usage_record(
+        call_id="policy-startup", project_root=tmp_path / "p1", mission_id=None,
+        provider="copilot", model="gpt-5.6-sol", run_label="reviewer",
+        started_at=1, completed_at=2, status="error", error=error,
+        copilot_token_billing_expected=True,
+    )
+    assert record.pricing_status == "not_billed"
+    assert record.cost_usd == 0.0
+    # Re-reading a pre-fix persisted row must also release its unresolved cost.
+    old = record.to_jsonable()
+    old.update(cost_usd=None, pricing_status="partial", pricing_tier="copilot_token_pending")
+    repaired = UsageRecord.from_jsonable(old)
+    assert repaired.pricing_status == "not_billed"
+    assert repaired.cost_usd == 0.0
+
+
+@pytest.mark.parametrize("evidence", ["tokens", "aiu", "premium", "provider_cost"])
+@pytest.mark.parametrize("error", [
+    "Error: Access denied by policy settings",
+    "Error: Failed to load models (Request ID: request-1)",
+])
+def test_policy_error_after_metered_work_preserves_billing(
+    tmp_path: Path, evidence: str, error: str
+) -> None:
+    kwargs = {
+        "tokens": {"token_usage": _known_usage(input_tokens=100, output_tokens=20)},
+        "aiu": {"total_nano_aiu": 432_724_659_000},
+        "premium": {"premium_requests": 1.0},
+        "provider_cost": {"provider_cost_usd": 1.25},
+    }[evidence]
+    record = build_usage_record(
+        call_id="policy-after-work", project_root=tmp_path / "p1", mission_id=None,
+        provider="opencode" if evidence == "provider_cost" else "copilot",
+        model="gpt-5.6-sol", run_label="reviewer", started_at=1, completed_at=2,
+        status="error", error=error,
+        **kwargs,
+    )
+    assert record.pricing_status != "not_billed"
+    assert record.cost_usd is None or record.cost_usd > 0
+    reread = UsageRecord.from_jsonable(record.to_jsonable())
+    assert reread.pricing_status == record.pricing_status
+    assert reread.cost_usd == record.cost_usd
+
+
 def test_usage_recorded_event_v2_is_self_contained(tmp_path: Path) -> None:
     project = tmp_path / "projects" / "p1"
     record = build_usage_record(
@@ -329,6 +383,27 @@ def test_copilot_missing_premium_and_token_prices_remains_partial(
     assert record.pricing_status == "partial"
     assert record.cost_basis == "none"
     assert record.cost_usd is None
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "premium_requests", "expected_status"),
+    [
+        ("completed", "", 1.0, "partial"),
+        ("denied", "provider cooldown", None, "not_billed"),
+        ("error", "Error: No session, task, or name matched 'stale-thread'.", None, "not_billed"),
+    ],
+)
+def test_modern_token_billing_distinguishes_missing_usage_from_refusals(
+    tmp_path: Path, status, error, premium_requests, expected_status
+) -> None:
+    record = build_usage_record(
+        call_id="modern", project_root=tmp_path / "p1", mission_id=None,
+        provider="copilot", model="gpt-5.6-sol", run_label="engineer-r1",
+        started_at=1.0, completed_at=2.0, status=status, error=error,
+        premium_requests=premium_requests, copilot_token_billing_expected=True,
+    )
+    assert record.pricing_status == expected_status
+    assert record.cost_usd == (0.0 if expected_status == "not_billed" else None)
 
 
 def test_non_copilot_still_requires_token_pricing(tmp_path: Path) -> None:
@@ -672,7 +747,7 @@ def test_copilot_reconcile_does_not_reuse_usage_or_price_denials(
     assert denied.input_tokens is None
     assert denied.model_usage == ()
     marker = json.loads(ledger.copilot_reconcile_path.read_text(encoding="utf-8"))
-    assert marker["version"] == 3
+    assert marker["version"] == 4
 
     third = replace(first, call_id="second-completed")
     ledger.append(third)

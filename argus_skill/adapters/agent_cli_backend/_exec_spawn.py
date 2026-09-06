@@ -25,11 +25,19 @@ from typing import TYPE_CHECKING, Any
 
 from ...core.event_catalog import EventType
 from ...core.models import RunnerResult
-from ...core.runner_errors import result_has_pre_provider_refusal
+from ...core.runner_errors import (
+    is_model_catalog_startup_error,
+    result_has_pre_provider_refusal,
+)
 from ...core.secret_guard import redact_secrets_text
 from ...core.token_usage import extract_token_usage
+from ...provider_integrations.authorization_retry import (
+    AUTHORIZATION_RETRY_OWNER,
+    BackendLoginRequired,
+)
 from ...provider_integrations.copilot_usage import (
     capture_copilot_usage_cursor,
+    copilot_store_supports_token_billing,
     read_copilot_usage_since,
 )
 from ._exec_finalize import finalize_result, finish_quota
@@ -103,15 +111,26 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
     copilot_usage_cursor = (
         capture_copilot_usage_cursor() if backend._is_copilot else None
     )
+    ctx.copilot_usage_cursor = copilot_usage_cursor
+    copilot_db_path = getattr(copilot_usage_cursor, "db_path", None)
+    ctx.copilot_token_billing_expected = copilot_store_supports_token_billing(
+        copilot_db_path
+    )
     try:
-        cli_result = backend._runner.run_exec(
+        cli_result = AUTHORIZATION_RETRY_OWNER.run_agent_cli(
+            backend,
             prompt=ctx.prompt,
             resume_thread_id=ctx.resume_thread_id,
             options=cli_options,
             run_label=ctx.run_label,
         )
-    except FileNotFoundError as exc:
-        log.exception("codex CLI binary not found")
+    except BackendLoginRequired as exc:
+        backend._auth_failure_detected = True
+        log.warning(
+            "agent backend requires login after one coordinated auth replay "
+            "(run_label=%s)",
+            ctx.run_label,
+        )
         finish_quota(ctx, error_text=str(exc), success=False)
         backend._log_agent_io(ctx.log_path, {
             "type": EventType.AGENT_IO_ERROR,
@@ -119,14 +138,48 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
             "call_id": ctx.call_id,
             "run_label": ctx.run_label,
             "backend": getattr(backend._runner, "backend", ""),
-            "error": f"runner binary not found: {exc}",
+            "error": str(exc),
+            "ts": time.time(),
+        })
+        finalize_result(
+            ctx,
+            RunnerResult(
+                exit_code=1,
+                thread_id=ctx.resume_thread_id,
+                fatal_error=exc.cause,
+                stop_kind="permanent_error",
+            ),
+            status="error",
+            error=str(exc),
+        )
+        raise
+    except FileNotFoundError as exc:
+        runner_name = str(
+            getattr(backend._runner, "agent_bin", "")
+            or getattr(backend._runner, "backend", "")
+            or getattr(exc, "filename", "")
+            or "runner"
+        )
+        failure = f"runner binary not found: {runner_name}: {exc}"
+        log.error(
+            "%s",
+            failure,
+        )
+        finish_quota(ctx, error_text=str(exc), success=False)
+        backend._log_agent_io(ctx.log_path, {
+            "type": EventType.AGENT_IO_ERROR,
+            "io_kind": "error",
+            "call_id": ctx.call_id,
+            "run_label": ctx.run_label,
+            "backend": getattr(backend._runner, "backend", ""),
+            "error": failure,
             "ts": time.time(),
         })
         return finalize_result(
             ctx,
             RunnerResult(
                 exit_code=127,
-                fatal_error=f"runner binary not found: {exc}",
+                fatal_error=failure,
                 stop_kind="permanent_error",
             ),
             status="denied",
@@ -168,6 +221,10 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
             getattr(cli_result, "thread_id", None) or ctx.resume_thread_id
         ),
     )
+    # The first invocation can create the token-usage table after the cursor.
+    ctx.copilot_token_billing_expected |= copilot_store_supports_token_billing(
+        copilot_db_path
+    ) or copilot_usage is not None
     try:
         translated = backend._translate_result(
             cli_result,
@@ -234,6 +291,7 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
     pre_provider_refusal = bool(
         result_has_pre_provider_refusal(cli_result)
         and translated.total_nano_aiu is None
+        and translated.cost_usd is None
         and not translated.model_usage
         and not translated.premium_requests_present
         and not any((
@@ -279,7 +337,11 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
         "turn_completed": getattr(cli_result, "turn_completed", None),
         "turn_failed": getattr(cli_result, "turn_failed", None),
         "fatal_error": redact_secrets_text(
-            str(getattr(cli_result, "fatal_error", "") or ""),
+            str(
+                translated.fatal_error
+                if is_model_catalog_startup_error(translated.fatal_error)
+                else getattr(cli_result, "fatal_error", "") or ""
+            ),
             known_values=backend._known_secret_values,
         ) or None,
         "tool_activity_observed": bool(

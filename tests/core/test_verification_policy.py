@@ -8,6 +8,7 @@ things that must NOT move with it.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,7 @@ from argus_skill.core.verification_policy import (
     set_policy,
     stored_policy,
 )
+from argus_skill.roles.prompts.reviewer import render_reviewer_prompt
 from argus_skill.verticals._base import load_vertical_contract
 
 
@@ -50,12 +52,41 @@ def _profiles(vertical: str) -> dict[str, str]:
     return dict(load_vertical_contract(vertical).verification_stage_profiles or {})
 
 
+def test_vertical_profile_reaches_reviewer_without_research_target(
+    tmp_path: Path,
+) -> None:
+    """MetaHarness-like verticals must not need a research target merely to
+    defer final certification to their last stage.
+    """
+    write_state(
+        tmp_path,
+        vertical="kernel_engineering",
+        current_stage="optimize",
+    )
+    prompt, _ = render_reviewer_prompt(
+        SimpleNamespace(skill_store=None),
+        objective="improve the harness from feedback",
+        operator_messages=[],
+        planner_review_instruction="",
+        round_index=0,
+        session_id=None,
+        main_summary="proposal is ready for its first measured run",
+        main_error=None,
+        working_dir=tmp_path,
+        vertical_state_root=tmp_path,
+        vertical="kernel_engineering",
+    )
+
+    assert "active vertical owns when verification becomes final" in prompt
+    assert "`develop` —" in prompt
+
+
 # -- defaults ---------------------------------------------------------------
 
 def test_defaults_are_balanced_and_adaptive(project: Path) -> None:
     policy = resolve_policy(
         project,
-        stage="research",
+        stage="idea",
         stage_profiles=_profiles("research"),
     )
 
@@ -68,7 +99,7 @@ def test_a_missing_state_file_is_not_an_error(tmp_path: Path) -> None:
     assert (
         resolve_policy(
             tmp_path,
-            stage="research",
+            stage="idea",
             stage_profiles=_profiles("research"),
         ).profile
         == "explore"
@@ -83,7 +114,7 @@ def test_a_corrupt_state_file_falls_back_to_defaults(project: Path) -> None:
     assert (
         resolve_policy(
             project,
-            stage="research",
+            stage="idea",
             stage_profiles=_profiles("research"),
         ).posture
         == "balanced"
@@ -92,12 +123,12 @@ def test_a_corrupt_state_file_falls_back_to_defaults(project: Path) -> None:
 
 # -- the fix: early stages stop being judged as submissions ----------------
 
-def test_a_publishable_project_explores_during_the_research_stage(project: Path) -> None:
+def test_a_publishable_project_explores_during_the_idea_stage(project: Path) -> None:
     write_state(project, research_target_level="publishable")
 
     policy = resolve_policy(
         project,
-        stage="research",
+        stage="idea",
         target_level="publishable",
         stage_profiles=_profiles("research"),
     )
@@ -112,10 +143,10 @@ def test_a_publishable_project_explores_during_the_research_stage(project: Path)
 @pytest.mark.parametrize(
     "stage,expected",
     [
-        ("research", "explore"), ("plan", "explore"),
-        ("benchmark", "develop"), ("run", "develop"),
-        ("analysis", "develop"), ("draft", "develop"),
-        ("review", "certify"), ("submission", "certify"),
+        ("idea", "explore"),
+        ("experiment", "develop"),
+        ("paper", "develop"),
+        ("review", "certify"),
     ],
 )
 def test_research_stage_mapping(stage, expected) -> None:
@@ -135,7 +166,7 @@ def test_a_final_submission_is_always_certified(project: Path) -> None:
     # Even with the loosest possible configuration.
     write_state(project, verification_profile="explore", exploration_posture="frontier")
 
-    policy = resolve_policy(project, scope="final_submission", stage="research")
+    policy = resolve_policy(project, scope="final_submission", stage="idea")
 
     assert policy.profile == "certify"
     assert policy.source == "final_scope"
@@ -302,11 +333,11 @@ def test_reviewer_injects_the_resolved_profile_not_just_the_target() -> None:
     from argus_skill.roles.prompts import reviewer as mod
 
     source = Path(mod.__file__).read_text(encoding="utf-8")
-    block = source[source.index("research_target_instruction = (") :][:900]
+    block = source[source.index("verification_instruction = (") :][:1200]
 
     # Both bars are named, and they are named as different things.
-    assert "defines project completion" in block
-    assert "not this round" in block
+    assert "defines project " in block
+    assert "completion, not this round" in block
     assert "policy_line(_policy)" in block
     # The old wording made the project bar the round bar.
     assert "For project-level" not in block

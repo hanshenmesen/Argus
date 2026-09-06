@@ -24,10 +24,8 @@ from ._text import _find_codex  # exposed so tests can do _core._find_codex
 
 # Registry / persistence
 from ._registry import (
-    DISCUSSION_STALE_AFTER_S,
     EXPERIMENT_HISTORY_REL,
     REGISTRY_DIR,
-    SUPERVISOR_INTERVAL_CAP,
     SUPERVISOR_MODEL,
     SUPERVISOR_THREAD_MAX_CHECKS,
     _QUIET_LOGS_ENV,
@@ -60,7 +58,6 @@ from ._registry import (
 
 # Discussion transcript
 from ._discussion_log import (
-    _DISCUSSION_MSG_CAP,
     _append_discussion,
     _discussion_path,
     _engineer_turn_count,
@@ -120,10 +117,7 @@ from ._supervised_preflight import (
 
 # Discussion-mode driver
 from ._discuss_run import (
-    DISCUSSION_DEADLINE_S,
-    DISCUSSION_FIRST_REPLY_TIMEOUT,
     DISCUSSION_POLL_INTERVAL,
-    MAX_SUPERVISOR_TURNS,
     _run_discussion,
     _supervisor_discuss,
     _supervisor_discuss_with_usage,

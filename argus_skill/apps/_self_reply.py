@@ -24,10 +24,12 @@ from ..engineer.runner import should_clear_thread_id_after_outcome
 from ._env import env_flag, env_int
 from ._runtime_backends import _Outcome
 
-_SELF_RETRYABLE_ACP_ERRORS = (
+_SELF_RETRYABLE_TRANSPORT_ERRORS = (
     "acp restart requested",
     "acp process died",
     "stopreason=cancelled",
+    "upstream request failed: endpoint is unavailable",
+    "provider finish_reason: network_error",
 )
 _SELF_LEARNING_REVIEW_INTERVAL = 5
 _SELF_EXECUTION_CONTRACTS = {
@@ -128,7 +130,7 @@ def _redact_live_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def self_retryable_transport_failure(result: Any) -> bool:
-    """Retry only an empty ACP transport failure with no possible side effects."""
+    """Retry one empty transport failure with no possible side effects."""
     if (getattr(result, "last_agent_message", "") or "").strip():
         return False
     if bool(getattr(result, "tool_activity_observed", False)):
@@ -138,7 +140,7 @@ def self_retryable_transport_failure(result: Any) -> bool:
         return int(getattr(result, "exit_code", 0) or 0) == 0
     if fatal.startswith(("external interrupt:", "refused before start:")):
         return False
-    return any(marker in fatal for marker in _SELF_RETRYABLE_ACP_ERRORS)
+    return any(marker in fatal for marker in _SELF_RETRYABLE_TRANSPORT_ERRORS)
 
 
 def build_status_snapshot_reply(root: Path | str, objective: str) -> str:
@@ -341,6 +343,9 @@ class SelfReplyMixin:
                     skip_git_repo_check=True,
                     dangerous_yolo=not safe_mode,
                     working_dir=str(workdir),
+                    watchdog_hard_idle_seconds=env_int(
+                        "ARGUS_SKILL_SELF_HARD_IDLE_SECONDS", 120
+                    ),
                 ),
                 run_label="router-classify",
                 resume_thread_id=None,
@@ -419,8 +424,9 @@ class SelfReplyMixin:
                 seed_thread_id=seed_thread_id,
                 lean=mode == "reply",
                 execute_mode=mode if mode in _SELF_EXECUTION_CONTRACTS else "",
+                root_task_id=root_task_id,
             )
-        _phase("Handing off to Planner / Engineer / Reviewer…")
+        _phase("Handing off to the Argus execution pipeline…")
         return None
 
 
@@ -581,59 +587,9 @@ class SelfReplyMixin:
                     "Never say you are read-only or unable to direct the team.",
                 ])
                 mission = "\n".join(lines)
-            maintenance = self._self_maintenance_status_block(root)
-            return "\n\n".join(
-                block for block in (daemon_block, mission, maintenance) if block
-            )
+            return "\n\n".join(block for block in (daemon_block, mission) if block)
         except Exception:  # noqa: BLE001 - status context is optional
             return ""
-
-    @staticmethod
-    def _self_maintenance_status_block(root: Path) -> str:
-        from ..daemon.self_maintenance import read_self_maintenance_snapshot
-
-        snapshot = read_self_maintenance_snapshot(root)
-        if snapshot is None:
-            return ""
-        if snapshot.maintenance_available is True:
-            isolation = "available"
-        elif snapshot.maintenance_available is False:
-            isolation = "unavailable"
-        else:
-            isolation = "unknown"
-        phase = snapshot.phase or (
-            "ready" if snapshot.maintenance_available is True else "idle"
-        )
-        lines = [
-            "## Manager self-maintenance state",
-            f"- phase: {phase}",
-            f"- isolated repair capability: {isolation}",
-        ]
-        if snapshot.maintenance_mode:
-            lines.append(f"- maintenance mode: {snapshot.maintenance_mode}")
-        if snapshot.maintenance_error:
-            lines.append(f"- maintenance note: {snapshot.maintenance_error}")
-        if snapshot.last_audit_at > 0:
-            lines.append(
-                "- last audit: "
-                f"{max(0, int(time.time() - snapshot.last_audit_at))}s ago"
-            )
-        if snapshot.pr_url:
-            lines.append(f"- open maintenance PR: {snapshot.pr_url}")
-        if snapshot.awaiting_commit:
-            # A reviewed, canaried fix is already live locally and is waiting on
-            # the operator only to leave the machine. Say what to type, or the
-            # gate turns into a pile nobody notices.
-            lines.append(
-                "- **awaiting your approval to publish**: "
-                f"{snapshot.awaiting_commit[:12]} "
-                f"(`argus-skill --approve-publication {snapshot.awaiting_commit[:12]}`)"
-            )
-        if snapshot.publication_status:
-            lines.append(f"- upstream publication: {snapshot.publication_status}")
-        if snapshot.publication_error:
-            lines.append(f"- publication note: {snapshot.publication_error}")
-        return "\n".join(lines)
 
     def _recent_mission_history_block(
         self,
@@ -696,6 +652,7 @@ class SelfReplyMixin:
         seed_thread_id: str | None = None,
         lean: bool = False,
         execute_mode: str = "",
+        root_task_id: str | None = None,
     ) -> _Outcome:
         from ..core.role_config import runner_backend_label
         from ..roles.prompts.manager import (
@@ -753,12 +710,11 @@ class SelfReplyMixin:
             prompt = build_simple_prompt(
                 objective=objective,
                 identity_card=memory_prelude,
+                skill_library=libraries.block,
                 mission_status=self._live_mission_status_block(),
                 runtime_context=self._manager_reply_runtime_context("simple-1"),
                 operator_workspace=str(workdir),
             )
-            if libraries.block:
-                prompt = libraries.block + "\n\n" + prompt
             native_skill_paths = [str(path) for path in libraries.native_paths]
             session_root = getattr(self, "_manager_session_root", None)
             read_dirs = (
@@ -766,6 +722,18 @@ class SelfReplyMixin:
                 if session_root and Path(session_root).expanduser() != workdir
                 else None
             )
+
+        from ..core.operator_context import (
+            append_operator_context,
+            build_operator_context_block,
+        )
+
+        operator_context, operator_context_revision = build_operator_context_block(
+            "manager",
+            getattr(self, "_manager_session_root", None),
+            consume_once=False,
+        )
+        prompt = append_operator_context(prompt, operator_context)
 
         def _self_inactivity(snapshot: Any) -> str | None:
             try:
@@ -871,7 +839,8 @@ class SelfReplyMixin:
                     "kind": "provider_retry",
                     "agent_layer": "manager",
                     "text": (
-                        "Copilot reply transport stalled; retrying once in a fresh session"
+                        "Provider transport failed before output; retrying once "
+                        "in a fresh session"
                     ),
                 })
                 result = gateway_run_exec(
@@ -938,6 +907,7 @@ class SelfReplyMixin:
                 success
             ),
             "attempt_count": len(attempt_results),
+            "operator_context_revision": operator_context_revision,
         })
 
         status = "done" if success else "error"
@@ -954,6 +924,48 @@ class SelfReplyMixin:
             )
         )
         auth_failure = self._consume_auth_failure()
+        delivery = None
+        if success and executing:
+            from ..core.secret_guard import known_secret_values, redact_secrets_text
+            from ..life.delivery import (
+                build_delivery_receipt,
+                referenced_delivery_paths,
+            )
+
+            safe_last_msg = redact_secrets_text(
+                last_msg,
+                known_values=known_secret_values(),
+            )
+            started_at = float(getattr(result, "started_at", 0.0) or 0.0)
+            paths = [
+                path
+                for path in referenced_delivery_paths(workdir, [safe_last_msg])
+                if started_at > 0
+                and (workdir / path).stat().st_mtime >= started_at
+            ]
+            if paths:
+                delivery = build_delivery_receipt(
+                    item_id=str(
+                        getattr(result, "call_id", "")
+                        or root_task_id
+                        or reply_message_id
+                    ),
+                    title=Path(paths[0]).name,
+                    summary=safe_last_msg,
+                    success=True,
+                    overall_complete=True,
+                    status="done",
+                    review_status="not_assessed",
+                    final_submission_certified=False,
+                    workspace=workdir,
+                    state_root=(
+                        Path(self._manager_session_root)
+                        if getattr(self, "_manager_session_root", None)
+                        else workdir
+                    ),
+                    reviewer_artifacts=paths,
+                    artifact_source="solo_output",
+                )
         sink.handle_event({
             "type": "loop.done",
             "text": f"status={status} rounds=1 (simple)",
@@ -966,6 +978,7 @@ class SelfReplyMixin:
             last_thread_id=new_thread_id,
             chat_mode=False,
             auth_failure=auth_failure,
+            delivery=delivery,
         )
 
     def _schedule_self_learning_review(

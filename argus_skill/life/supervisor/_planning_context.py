@@ -13,12 +13,15 @@ from typing import Any
 
 from ...core.event_catalog import EventType
 from ...core.planner_verdict import PlannerVerdictStatus
+from ...core.wake_sources import normalize_wake_sources
 from ..memory import BacklogItem
 from ._constants import (
+    OPERATOR_WAIT_TURN_REGRANT_SECONDS,
     PLAN_AWAITING,
     PLAN_RETRY,
     PLANNER_SCOPE_BOUNDED,
     PLANNER_SCOPE_FINAL_SUBMISSION,
+    PLANNER_TASKS_FILTERED_DIAGNOSTIC,
     STALL_ESCALATION_AFTER_NO_PROGRESS_MISSIONS,
     VERIFICATION_PROBE_AFTER_IDLE_CYCLES,
     VERIFICATION_PROBE_COOLDOWN_SECONDS,
@@ -26,6 +29,8 @@ from ._constants import (
 from ._helpers import _operator_only_external_blocker_wait_reason_for_project
 
 log = logging.getLogger(__name__)
+
+_DEGRADED_WAIT_POLL_SECONDS = 300
 
 
 class PlanningContextMixin:
@@ -58,9 +63,11 @@ class PlanningContextMixin:
         if bool(getattr(task, "stage_closing", False)):
             tags.append("stage_closing")
         if bool(getattr(task, "stage_closing", False)) or bool(
-            getattr(task, "require_independent_review", False)
+            getattr(task, "require_independent_review", True)
         ):
             tags.append("review:required")
+        else:
+            tags.append("review:waived")
         if bool(getattr(task, "skip_stage_transition", False)):
             tags.append("stage_transition:skip")
         if bool(getattr(task, "stage_repair", False)):
@@ -86,11 +93,13 @@ class PlanningContextMixin:
 
     @staticmethod
     def _item_requires_independent_review(item: BacklogItem) -> bool:
-        return any(
+        normalized_tags = {
             str(tag).strip().lower().replace("-", "_")
-            in {"review:required", "independent_review:required"}
             for tag in item.tags
-        )
+        }
+        if normalized_tags & {"review:waived", "independent_review:waived"}:
+            return False
+        return True
 
     @staticmethod
     def _item_is_stage_closing(item: BacklogItem) -> bool:
@@ -182,7 +191,6 @@ class PlanningContextMixin:
     def _render_backlog_item_metadata(self, item: BacklogItem) -> str:
         scope = self._planner_scope_from_item(item)
         context_refs = [ref for ref in getattr(item, "context_refs", []) if isinstance(ref, dict)]
-        work_kind = str(getattr(item, "work_kind", "") or "").strip()
         acceptance_check = str(getattr(item, "acceptance_check", "") or "").strip()
         plan_hypothesis = str(getattr(item, "plan_hypothesis", "") or "").strip()
         goal_contribution = str(getattr(item, "goal_contribution", "") or "").strip()
@@ -206,7 +214,6 @@ class PlanningContextMixin:
             and not item.tags
             and not getattr(item, "plan_id", "")
             and not context_refs
-            and not work_kind
             and not acceptance_check
             and not plan_hypothesis
             and not goal_contribution
@@ -225,8 +232,6 @@ class PlanningContextMixin:
             lines.append(f"- node_key: {item.node_key}")
         if scope:
             lines.append(f"- planner_scope: {scope}")
-        if work_kind:
-            lines.append(f"- work_kind: {work_kind}")
         if execution_workdir:
             lines.append(
                 "- execution_repository_request: " + execution_workdir
@@ -280,7 +285,7 @@ class PlanningContextMixin:
         elif scope == PLANNER_SCOPE_BOUNDED:
             if is_paper_long_horizon:
                 lines.append(
-                    "- paper_optimization_task: this is a bounded mission, but it is "
+                    "- paper_optimization_task: this is a single task, but it is "
                     "part of a long-horizon paper objective. Complete the requested "
                     "scientific or writing increment without expanding it into "
                     "paperwork for unrelated stages."
@@ -288,8 +293,8 @@ class PlanningContextMixin:
             else:
                 lines.append(
                     "- bounded_task: judge this item against its own acceptance criteria; "
-                    "do not require the project-final EMNLP gate unless the objective "
-                    "explicitly asks for it."
+                    "do not hold it to the project-final publication standard unless "
+                    "the objective explicitly asks for that."
                 )
         if context_refs:
             lines.append("")
@@ -338,6 +343,24 @@ class PlanningContextMixin:
                 continue
             extra = getattr(entry, "extra", {}) or {}
             if isinstance(extra, dict) and bool(extra.get("final_submission_certified")):
+                manuscript_binding = extra.get("manuscript_snapshot")
+                if (
+                    (Path(self._project_workdir()) / "paper/main.tex").is_file()
+                    and not isinstance(manuscript_binding, dict)
+                ):
+                    continue
+                if isinstance(manuscript_binding, dict):
+                    try:
+                        from ...core.manuscript_snapshot import (
+                            manuscript_review_status,
+                        )
+
+                        if manuscript_review_status(
+                            extra, self._project_workdir()
+                        ).get("status") != "current":
+                            continue
+                    except Exception:  # noqa: BLE001 - unreadable binding fails closed
+                        continue
                 certified_signature = str(extra.get("final_submission_signature") or "")
                 if certified_signature:
                     if bool(current_signature) and certified_signature == current_signature:
@@ -600,6 +623,7 @@ class PlanningContextMixin:
                 "stage",
                 "current_stage",
                 "workflow_mode",
+                "require_independent_review",
                 "research_target_level",
                 "learned_vertical_status",
                 "continuous_generation",
@@ -791,7 +815,7 @@ class PlanningContextMixin:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        except (OSError, TypeError, ValueError):
             log.warning("Manager feedback is unreadable: %s", path, exc_info=True)
             return None
         if not isinstance(payload, dict) or payload.get("version") != 1:
@@ -827,6 +851,27 @@ class PlanningContextMixin:
             except FileNotFoundError:
                 pass
 
+    def _backlog_planning_signature(self) -> str:
+        """Digest of live backlog item ids and statuses.
+
+        Feedback recorded because every proposed task duplicated existing
+        backlog work stays true exactly as long as those items keep their
+        status. Project files rewritten by live background jobs are not new
+        planning evidence for that kind of feedback — judging it by the
+        whole-tree signature made the feedback evaporate every cycle and the
+        planner replan blind at the base backoff indefinitely.
+        """
+        rows = sorted(
+            f"{item.id}:{item.status}" for item in self.memory.backlog.active()
+        )
+        digest = hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+        return f"backlog:{digest}"
+
+    def _manager_feedback_signature_for(self, diagnostic: str) -> str:
+        if diagnostic == PLANNER_TASKS_FILTERED_DIAGNOSTIC:
+            return self._backlog_planning_signature()
+        return self._manager_feedback_evidence_signature()
+
     def _persist_manager_planner_feedback(
         self,
         *,
@@ -837,14 +882,21 @@ class PlanningContextMixin:
         stage = str(stage or "").strip()
         reason = str(reason or "").strip()
         diagnostic = str(diagnostic or "").strip()
-        evidence_signature = self._manager_feedback_evidence_signature()
+        evidence_signature = self._manager_feedback_signature_for(diagnostic)
         previous = self._load_manager_planner_feedback()
+        # For filtered-task feedback the reason text embeds the planner's own
+        # phrasing of the rejected titles, which shifts between otherwise
+        # identical verdicts — an exact-reason match would restart the attempt
+        # count every cycle, so the repeat limit could never engage.
         same_feedback = bool(
             previous is not None
             and str(previous.get("stage") or "") == stage
-            and str(previous.get("reason") or "") == reason
             and str(previous.get("diagnostic") or "") == diagnostic
             and str(previous.get("evidence_signature") or "") == evidence_signature
+            and (
+                diagnostic == PLANNER_TASKS_FILTERED_DIAGNOSTIC
+                or str(previous.get("reason") or "") == reason
+            )
         )
         attempts = int(previous.get("attempts") or 0) + 1 if same_feedback else 1
         created_at = (
@@ -875,39 +927,55 @@ class PlanningContextMixin:
         state["resolved_at"] = time.time()
         self._write_manager_planner_feedback(state)
 
+    def _planner_dropped_dependency_runtime_note(self) -> str:
+        """Tell the planner once which dependency keys its last DAG got wrong."""
+        dropped = list(getattr(self, "_planner_dropped_dependency_keys", []) or [])
+        if not dropped:
+            return ""
+        self._planner_dropped_dependency_keys = []
+        lines = "\n".join(
+            f"- {title!r} named {', '.join(repr(key) for key in keys)}"
+            for title, keys in dropped
+        )
+        return (
+            "DEPENDENCY KEYS DROPPED FROM YOUR LAST PLAN:\n"
+            f"{lines}\n"
+            "Those keys matched no backlog node and no durable background job, so "
+            "the tasks were enqueued without them. Team ids, task labels quoted "
+            "in evidence, and nodes you have not created are not dependencies. "
+            "Depend only on node keys from this plan or on existing backlog items."
+        )
+
     def _manager_planner_feedback_runtime_note(self) -> str:
         state = self._load_manager_planner_feedback()
         if state is None:
             return ""
         diagnostic = str(state.get("diagnostic") or "")
-        # Both diagnostics are satisfied by exactly one thing, and it is the
-        # same thing: ``_mission_execution_settlement`` writes the certified
-        # journal entry these gates read only for a mission that succeeded,
-        # carried ``item_scope == final_submission``, and was certified by the
-        # Reviewer. ``research_target_incomplete`` used to fall through to the
-        # "harness does not prescribe a task" branch — telling the Planner to
-        # use its judgement about a gate that accepts one prescribed action and
-        # nothing else. Testbed run 8 (s-fed750c2) burned four missions
-        # guessing, each independently reviewed ``done`` and each rejected;
-        # run 9 (s-1828745c) answered instead by escalating into
-        # self-maintenance and patching the Planner's own source.
+        # These diagnostics already identify the missing process-owned record.
+        # The enqueue boundary applies the required scope/review metadata to the
+        # next task; the Planner only describes the verification work naturally.
         prescribes_final_submission = diagnostic in {
             "final_certification_missing",
             "research_target_incomplete",
         }
-        task_instruction = (
-            "The missing invariant is final independent certification. Author the "
-            "next executable certification task with "
-            "`TASK_SCOPE=final_submission`, so its successful Reviewer verdict can "
-            "be recorded as project-final evidence. A task left at the default "
-            "bounded scope cannot satisfy this gate, however complete the work "
-            "behind it already is."
-            if prescribes_final_submission
-            else (
+        prescribes_stage_closing = diagnostic == "staged_goal_gate_incomplete"
+        if prescribes_final_submission:
+            task_instruction = (
+                "The missing invariant is final independent certification. Describe "
+                "the next executable verification task naturally; the Host will "
+                "record its final-submission scope and independent-review requirement."
+            )
+        elif prescribes_stage_closing:
+            task_instruction = (
+                "The missing invariant is the current stage's certified completion. Describe the "
+                "next executable verification task naturally; the Host will record "
+                "it as stage-closing work requiring independent review."
+            )
+        else:
+            task_instruction = (
                 "You decide which tasks, if any, are appropriate; the harness does "
                 "not prescribe a repair or delivery task."
             )
-        )
         return (
             "PLANNER VERDICT REJECTION (durable and unresolved):\n"
             f"- current_stage: {state.get('stage') or ''}\n"
@@ -933,7 +1001,7 @@ class PlanningContextMixin:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        except (OSError, TypeError, ValueError):
             log.warning("planner waiting contract is unreadable: %s", path, exc_info=True)
             return None
         if not isinstance(payload, dict):
@@ -1022,6 +1090,14 @@ class PlanningContextMixin:
                 )
                 if same_blocker and previous.get("idle_capacity_turn_used"):
                     payload["idle_capacity_turn_used"] = True
+                    if "idle_capacity_turn_ts" in previous:
+                        payload["idle_capacity_turn_ts"] = previous[
+                            "idle_capacity_turn_ts"
+                        ]
+                    if "idle_capacity_backlog_revision" in previous:
+                        payload["idle_capacity_backlog_revision"] = previous[
+                            "idle_capacity_backlog_revision"
+                        ]
         except (OSError, ValueError):
             pass
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1075,12 +1151,38 @@ class PlanningContextMixin:
         Planner every cycle.
         """
         try:
-            return not any(
-                str(getattr(item, "status", "")) == "pending"
-                for item in self.memory.backlog.all()
-            )
+            # A pending item the parallel worker cannot claim is not work
+            # waiting its turn -- it is the fact Planner must be allowed to
+            # see and replace. Counting it here left run-01 idling and
+            # respawning every 34 minutes behind a path conflict.
+            return self.memory.backlog.next_pending(parallel_only=True) is None
         except Exception:  # noqa: BLE001 - visibility must not break planning
             return False
+
+    @staticmethod
+    def _external_work_state_rows(project_root: Path) -> list[dict[str, str]]:
+        """Registered background jobs as (work_id, run_id, state) rows.
+
+        This is the wait-relevant view of the external-work registry: it moves
+        when a job starts, completes, or fails, and stays put while a healthy
+        job merely appends to its own logs. An unreadable registry contributes
+        a stable empty view rather than churn.
+        """
+        try:
+            from ...engineer.external_work import scan_external_work
+
+            return [
+                {
+                    "work_id": status.work_id,
+                    "run_id": status.run_id,
+                    "state": status.state.value,
+                }
+                for status in scan_external_work(project_root)
+                if status.source == "subagent"
+            ]
+        except Exception:  # noqa: BLE001 - wait evaluation must stay stable
+            log.debug("external-work registry scan failed", exc_info=True)
+            return []
 
     def _planner_waiting_observed_revision(
         self,
@@ -1095,9 +1197,19 @@ class PlanningContextMixin:
             "wake_on": sorted(wake_sources),
         }
         if "authorization" in wake_sources:
-            revision["authorization"] = self._waiting_revision_file(
-                Path(self.memory.root) / "operator-authorizations.jsonl"
-            )
+            # An authorization wait watched only the Manager control-state log,
+            # which nothing writes unless the operator drives that API -- in
+            # three live campaigns the file did not exist at all. Answering the
+            # documented way, `argus --notify` into inbox.jsonl, changed
+            # nothing, so run-04 sat on wake_on ["authorization"] for fifteen
+            # hours after being answered. Four campaigns then spent eleven
+            # missions trying to canonicalize wake sources by hand.
+            # The operator acted either way; both records count.
+            root = Path(self.memory.root)
+            revision["authorization"] = [
+                self._waiting_revision_file(root / "operator-authorizations.jsonl"),
+                self._waiting_revision_file(root / "inbox.jsonl"),
+            ]
         if "manager_stage" in wake_sources:
             from ...core.pipeline_state import pipeline_state_path
 
@@ -1105,16 +1217,33 @@ class PlanningContextMixin:
                 pipeline_state_path(project_root)
             )
         if "artifact_revision" in wake_sources:
-            revision["artifacts"] = [
-                self._waiting_revision_file(project_root / relative) for relative in watched_paths
-            ]
+            artifacts: list[dict[str, Any]] = []
+            registry_paths = False
+            for relative in watched_paths:
+                rel = str(relative).strip().lstrip("/")
+                parts = Path(rel).parts
+                if parts and parts[0] == ".argus_subagents":
+                    # A watched path inside the external-work registry points
+                    # at a job's own bookkeeping (logs, heartbeats), which is
+                    # rewritten for as long as the job runs. Stat-digesting it
+                    # woke the planner every cycle of a live job; what the
+                    # contract actually waits for is the job's registered
+                    # state, which moves exactly at real transitions.
+                    registry_paths = True
+                    continue
+                artifacts.append(self._waiting_revision_file(project_root / rel))
+            revision["artifacts"] = artifacts
+            if registry_paths and "subagent_state" not in wake_sources:
+                revision["registry_jobs"] = self._external_work_state_rows(
+                    project_root
+                )
         if "subagent_terminal" in wake_sources:
             terminal_rows: list[dict[str, str]] = []
             registry = project_root / ".argus_subagents"
             for path in sorted(registry.glob("*.json")) if registry.is_dir() else []:
                 try:
                     payload = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                except (OSError, TypeError, ValueError):
                     continue
                 if not isinstance(payload, dict):
                     continue
@@ -1140,17 +1269,9 @@ class PlanningContextMixin:
                 )
             revision["subagent_terminal"] = terminal_rows
         if "subagent_state" in wake_sources:
-            from ...engineer.external_work import scan_external_work
-
-            revision["subagent_state"] = [
-                {
-                    "work_id": status.work_id,
-                    "run_id": status.run_id,
-                    "state": status.state.value,
-                }
-                for status in scan_external_work(project_root)
-                if status.source == "subagent"
-            ]
+            revision["subagent_state"] = self._external_work_state_rows(
+                project_root
+            )
         blob = json.dumps(revision, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -1206,10 +1327,25 @@ class PlanningContextMixin:
         # contract, and only while nothing is queued behind the wait. One turn,
         # not one per cycle: waking it repeatedly is the token-burning poll this
         # short circuit exists to prevent.
-        if not state.get("idle_capacity_turn_used") and (
-            self._nothing_queued_behind_the_wait()
-        ):
+        # One turn is the right budget for a wait that ends by itself. A wait
+        # that ends only when the operator acts does not end at all overnight:
+        # run-04 spent fifteen hours on wake_on ["authorization"] with
+        # expires_at 0, having used its single turn in the first minute, while
+        # its paper sat finished-looking at 8,107 words with four of its
+        # thirty-one figures used. run-05 parked the same way on an
+        # authentication decision. So for those, and only those, the turn is
+        # re-granted on OPERATOR_WAIT_TURN_REGRANT_SECONDS. That timer is only
+        # the backstop behind the three wake paths that already exist -- the
+        # first per-contract grant, a backlog revision change, and the
+        # authorization event itself -- and each re-grant is a full Planner LLM
+        # call, so its cadence is an LLM-call-rate policy, deliberately not
+        # tied to the idle sleep cap.
+        if self._planner_turn_available_during_wait(state):
             state["idle_capacity_turn_used"] = True
+            state["idle_capacity_turn_ts"] = time.time()
+            state["idle_capacity_backlog_revision"] = (
+                self._waiting_backlog_revision()
+            )
             state["updated_at"] = time.time()
             self._write_planner_waiting_contract_state(state)
             return ""
@@ -1259,6 +1395,72 @@ class PlanningContextMixin:
         self._emit_status("awaiting declared event; Planner call skipped")
         return PLAN_AWAITING
 
+    def _waiting_backlog_revision(self) -> str:
+        """A cheap stable revision for facts that can change scheduling."""
+        try:
+            path = Path(self.memory.root) / "backlog.jsonl"
+            stat = path.stat()
+            return f"{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            return ""
+
+    def _planner_turn_available_during_wait(self, state: dict) -> bool:
+        """Is the Planner owed a turn while this wait contract holds?
+
+        Never while other work is queued behind the wait -- the campaign is
+        already busy and waking the Planner would only burn tokens. Otherwise
+        once per contract, except for a wait that only the operator can end,
+        where "once" means never again and the campaign is simply over.
+        """
+        if not self._nothing_queued_behind_the_wait():
+            return False
+        if not state.get("idle_capacity_turn_used"):
+            return True
+        # New backlog state is new evidence, not another poll of the same
+        # blocker. Re-grant one turn so the Planner can route around a task that
+        # arrived after the original opportunity or became unclaimable.
+        if (
+            "idle_capacity_backlog_revision" in state
+            and state.get("idle_capacity_backlog_revision")
+            != self._waiting_backlog_revision()
+        ):
+            return True
+        if not state.get("operator_action_required"):
+            return False
+        granted = float(state.get("idle_capacity_turn_ts") or 0.0)
+        return time.time() - granted >= OPERATOR_WAIT_TURN_REGRANT_SECONDS
+
+    def _confined_planner_wait_paths(self, values: list[str]) -> list[str]:
+        """Validate watched paths before they can influence revision reads."""
+        if not values:
+            return []
+        root = self._project_workdir().expanduser().resolve(strict=False)
+        confined: list[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            value = str(raw or "").strip().replace("\\", "/")
+            path = Path(value)
+            if (
+                not value
+                or "\x00" in value
+                or path.is_absolute()
+                or ".." in path.parts
+                or value in {".", "./"}
+            ):
+                raise ValueError(f"watched path must be a project child: {value!r}")
+            normalized = Path(*path.parts).as_posix()
+            candidate = (root / normalized).resolve(strict=False)
+            try:
+                candidate.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"watched path escapes the project root: {value!r}"
+                ) from exc
+            if normalized not in seen:
+                seen.add(normalized)
+                confined.append(normalized)
+        return confined
+
     def _persist_planner_waiting_contract(
         self,
         contract: Any,
@@ -1273,75 +1475,146 @@ class PlanningContextMixin:
             and previous.get("recheck_token") == recheck_token
         )
         now = time.time()
-        wait_mode = str(getattr(contract, "wait_mode", "poll") or "poll")
-        wake_on = [str(value) for value in getattr(contract, "wake_on", ())]
-        watched_paths = [str(value) for value in getattr(contract, "watched_paths", ())]
+        raw_wait_mode = str(
+            getattr(contract, "wait_mode", "poll") or "poll"
+        ).strip().casefold()
+        normalized_wake_on, unknown_wake_on, wake_changed = normalize_wake_sources(
+            getattr(contract, "wake_on", ())
+        )
+        wake_on = list(normalized_wake_on)
+        normalization_reasons: list[str] = []
+        if raw_wait_mode not in {"event", "poll"}:
+            normalization_reasons.append(
+                f"unknown wait_mode {raw_wait_mode!r} normalized from context"
+            )
+        if wake_changed:
+            normalization_reasons.append("wake sources normalized")
+        if unknown_wake_on:
+            normalization_reasons.append(
+                "unsupported wake hints ignored: " + ", ".join(unknown_wake_on)
+            )
+        try:
+            watched_paths = self._confined_planner_wait_paths(
+                [str(value) for value in getattr(contract, "watched_paths", ())]
+            )
+        except ValueError as exc:
+            self._emit({
+                "type": EventType.LIFE_PLANNER_ERROR,
+                "error": "planner wait has unsafe watched path",
+                "detail": str(exc),
+                "blocker_fingerprint": blocker_fingerprint,
+                "recheck_token": recheck_token,
+            })
+            return None
+        # operator_action_required means only fresh operator input can change
+        # this blocker, so the source it wakes on is not the Planner's to pick.
+        # run-05 declared operator waits against subagent_state and had
+        # nineteen contracts rejected for lacking a revision only the host can
+        # compute, then invented operator_answer and operator_message and lost
+        # sixteen more. Reading the authority it already declared costs nothing
+        # and cannot be got wrong.
+        operator_action_required = bool(
+            getattr(contract, "operator_action_required", False)
+        )
+        context_requires_event = False
+        if operator_action_required:
+            wake_on = ["authorization"]
+            context_requires_event = True
+            if normalized_wake_on != ("authorization",) or raw_wait_mode != "event":
+                normalization_reasons.append(
+                    "operator wait bound to authorization events"
+                )
+        elif watched_paths:
+            if "artifact_revision" not in wake_on:
+                wake_on.append("artifact_revision")
+                normalization_reasons.append(
+                    "artifact_revision derived from watched paths"
+                )
+            context_requires_event = True
+
+        source_wait_id = str(getattr(contract, "wait_id", "") or "").strip()
+        resolved_wait = None
+        wait_id_source_unknown = False
+        if source_wait_id:
+            try:
+                from ...engineer.external_work import inspect_external_work
+
+                resolved_wait = inspect_external_work(
+                    self._project_workdir(), source_wait_id
+                )
+            except Exception:  # noqa: BLE001 - registry discovery is fail-soft
+                log.warning("failed to resolve planner wait registry id", exc_info=True)
+            if resolved_wait is not None and resolved_wait.source == "subagent":
+                if "subagent_state" not in wake_on:
+                    wake_on.append("subagent_state")
+                context_requires_event = True
+                normalization_reasons.append(
+                    "subagent_state derived from resolved wait_id"
+                )
+            else:
+                wait_id_source_unknown = True
+                normalization_reasons.append(
+                    "wait_id did not resolve to a Host-observed subagent"
+                )
+
         contract_observed_revision = str(
             getattr(contract, "observed_revision", "") or ""
         )
-        supported_wake_sources = {
-            "authorization",
-            "manager_stage",
-            "artifact_revision",
-            "subagent_terminal",
-            "subagent_state",
-        }
-        unsupported_wake_sources = sorted(
-            set(wake_on).difference(supported_wake_sources)
-        )
-        if wait_mode == "event" and unsupported_wake_sources:
-            self._emit(
-                {
-                    "type": EventType.LIFE_PLANNER_ERROR,
-                    "error": "event wait has unsupported wake source",
-                    "unsupported_wake_sources": unsupported_wake_sources,
-                    "blocker_fingerprint": blocker_fingerprint,
-                    "recheck_token": recheck_token,
-                }
+
+        if "artifact_revision" in wake_on and not watched_paths:
+            wake_on = [source for source in wake_on if source != "artifact_revision"]
+            normalization_reasons.append(
+                "artifact_revision hint ignored without confined watched paths"
             )
-            return None
-        if wait_mode == "event" and not wake_on:
-            self._emit(
-                {
-                    "type": EventType.LIFE_PLANNER_ERROR,
-                    "error": "event wait has no deterministic wake source",
-                    "blocker_fingerprint": blocker_fingerprint,
-                    "recheck_token": recheck_token,
-                }
-            )
-            return None
         if (
-            wait_mode == "event"
-            and "artifact_revision" in wake_on
-            and not watched_paths
-        ):
-            self._emit(
-                {
-                    "type": EventType.LIFE_PLANNER_ERROR,
-                    "error": "artifact event wait has no watched paths",
-                    "blocker_fingerprint": blocker_fingerprint,
-                    "recheck_token": recheck_token,
-                }
-            )
-            return None
-        if (
-            wait_mode == "event"
-            and {"subagent_state", "subagent_terminal"}.intersection(wake_on)
+            {"subagent_state", "subagent_terminal"}.intersection(wake_on)
             and not contract_observed_revision
+            and not (resolved_wait is not None and resolved_wait.source == "subagent")
         ):
-            self._emit(
-                {
-                    "type": EventType.LIFE_PLANNER_ERROR,
-                    "error": "subagent event wait lacks host-observed revision",
-                    "blocker_fingerprint": blocker_fingerprint,
-                    "recheck_token": recheck_token,
-                }
+            wake_on = [
+                source
+                for source in wake_on
+                if source not in {"subagent_state", "subagent_terminal"}
+            ]
+            normalization_reasons.append(
+                "subagent wake hint ignored without a Host-observed revision"
             )
-            return None
+
+        if context_requires_event:
+            wait_mode = "event"
+        elif raw_wait_mode in {"event", "poll"}:
+            wait_mode = raw_wait_mode
+        else:
+            wait_mode = "event" if wake_on else "poll"
+            normalization_reasons.append(f"wait_mode selected as {wait_mode}")
+
+        degraded = False
+        if wait_mode == "event" and not wake_on:
+            wait_mode = "poll"
+            degraded = True
+            normalization_reasons.append(
+                "event wait degraded to bounded poll without an observable source"
+            )
+        elif (
+            wait_mode == "poll"
+            and (unknown_wake_on or wait_id_source_unknown)
+            and not wake_on
+        ):
+            degraded = True
+            normalization_reasons.append(
+                "unobservable source degraded to bounded poll"
+            )
         current_observed_revision = self._planner_waiting_observed_revision(
             wake_on=wake_on,
             watched_paths=watched_paths,
         )
+        if (
+            wait_mode == "event"
+            and {"subagent_state", "subagent_terminal"}.intersection(wake_on)
+            and resolved_wait is not None
+            and resolved_wait.source == "subagent"
+        ):
+            contract_observed_revision = current_observed_revision
         if (
             contract_observed_revision
             and current_observed_revision != contract_observed_revision
@@ -1357,7 +1630,18 @@ class PlanningContextMixin:
                 }
             )
             return None
-        wait_id = hashlib.sha256(
+        if normalization_reasons:
+            self._emit({
+                "type": "life.planner.waiting_contract.normalized",
+                "blocker_fingerprint": blocker_fingerprint,
+                "recheck_token": recheck_token,
+                "reasons": normalization_reasons,
+                "degraded": degraded,
+                "wait_mode": wait_mode,
+                "wake_on": wake_on,
+            })
+
+        durable_wait_id = hashlib.sha256(
             (
                 self._planner_waiting_objective_fingerprint()
                 + "\0"
@@ -1379,7 +1663,7 @@ class PlanningContextMixin:
             )
             control_head = control.activate_wait(
                 identity=identity,
-                wait_id=wait_id,
+                wait_id=durable_wait_id,
                 blocker_fingerprint=blocker_fingerprint,
                 recheck_token=recheck_token,
                 watched_paths=watched_paths,
@@ -1404,13 +1688,16 @@ class PlanningContextMixin:
             "stage_reconciliation_required": bool(
                 getattr(contract, "stage_reconciliation_required", False)
             ),
-            "operator_action_required": bool(getattr(contract, "operator_action_required", False)),
+            "operator_action_required": operator_action_required,
             "allow_verification_probe": bool(getattr(contract, "allow_verification_probe", False)),
             "recheck_after_seconds": max(
                 0,
                 min(
                     604800,
-                    int(getattr(contract, "recheck_after_seconds", 0) or 0),
+                    max(
+                        _DEGRADED_WAIT_POLL_SECONDS if degraded else 0,
+                        int(getattr(contract, "recheck_after_seconds", 0) or 0),
+                    ),
                 ),
             ),
             "wait_mode": wait_mode,
@@ -1421,7 +1708,8 @@ class PlanningContextMixin:
                 float(getattr(contract, "expires_at", 0.0) or 0.0),
             ),
             **control_binding,
-            "wait_id": wait_id,
+            "wait_id": durable_wait_id,
+            "source_wait_id": source_wait_id,
             "observed_revision": (
                 contract_observed_revision or current_observed_revision
             ),
@@ -1548,7 +1836,7 @@ class PlanningContextMixin:
         recheck_token = str(pending.get("recheck_token") or "")
         try:
             item_exists = any(
-                getattr(item, "id", "") == item_id for item in self.memory.backlog.all()
+                getattr(item, "id", "") == item_id for item in self.memory.backlog.history()
             )
         except Exception:  # noqa: BLE001
             log.exception("failed to reconcile pending planner verification probe")
@@ -1618,7 +1906,6 @@ class PlanningContextMixin:
         return (
             "AUTHORITATIVE MANAGER WAIT RESOLUTION (current objective):\n"
             f"- stage remains: {resolution.get('target_stage') or '(unchanged)'}\n"
-            f"- prior blocker: {resolution.get('blocker_fingerprint') or ''}\n"
             "- prior recheck condition: "
             f"{resolution.get('recheck_condition') or ''}\n"
             f"- Manager directive: {reason}\n"
@@ -1707,7 +1994,6 @@ class PlanningContextMixin:
             return ""
         return (
             "PERSISTED PLANNER WAITING CONTRACT (authored by your prior verdict):\n"
-            f"- blocker_fingerprint: {state['blocker_fingerprint']}\n"
             f"- recheck_token: {state['recheck_token']}\n"
             f"- recheck_condition: {state.get('recheck_condition') or ''}\n"
             f"- wait_mode: {state.get('wait_mode') or 'poll'}\n"
@@ -1718,9 +2004,13 @@ class PlanningContextMixin:
             f"{bool(state.get('operator_action_required'))}\n"
             f"- last_probe_at: {state.get('last_probe_at') or 0}\n"
             "If current evidence does not satisfy the declared recheck condition, "
-            "reuse the exact fingerprint and token with waiting=true and do not "
+            "reuse the same blocker semantics and token with waiting=true and do not "
             "queue an equivalent polling task. Change the token only when concrete "
-            "current evidence changes; the harness does not infer that change."
+            "current evidence changes; the harness does not infer that change. "
+            "While the named wait is in progress, is there a concrete uncertainty "
+            "whose answer could change the route and can be resolved without the "
+            "awaited result? If yes, schedule that information-gaining work; otherwise "
+            "wait."
         )
 
     def _maybe_dispatch_verification_probe(self, verdict: Any) -> bool:
@@ -1770,7 +2060,7 @@ class PlanningContextMixin:
             return False
         # Never stack a second probe while one is still pending/running.
         try:
-            for it in self.memory.backlog.all():
+            for it in self.memory.backlog.active():
                 if "verification_probe" in (getattr(it, "tags", []) or []) and getattr(
                     it, "status", ""
                 ) in ("pending", "running"):

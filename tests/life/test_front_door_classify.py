@@ -12,6 +12,7 @@ from argus_skill.life.router import (
     build_front_door_prompt,
     classify_front_door,
 )
+from argus_skill.roles.prompts.planner import build_continuous_prompt
 
 
 class _FakeResult:
@@ -20,23 +21,25 @@ class _FakeResult:
         msg: str,
         exit_code: int = 0,
         role_decisions: list[dict] | None = None,
+        fatal_error: str | None = None,
     ) -> None:
         self.exit_code = exit_code
         self.last_agent_message = msg
         self.role_decisions = list(role_decisions or [])
+        self.fatal_error = fatal_error
 
 
-def _exec(answer: str, exit_code: int = 0):
+def _exec(answer: str, exit_code: int = 0, fatal_error: str | None = None):
     def run_exec(prompt: str):
         assert all(
             field in prompt
             for field in (
-                '"config"', '"control"', '"authorization"', '"steer_directive"',
-                '"operator_question_policy"',
-                '"route"', '"self_mode"', '"reply"', '"lifetime"', '"greeting"', '"name"',
+                "CONFIG:", "CONTROL:", "AUTHORIZATION:", "STEER_DIRECTIVE:",
+                "OPERATOR_QUESTION_POLICY:", "ROUTE:", "SELF_MODE:", "REPLY:",
+                "LIFETIME:", "GREETING:", "NAME:",
             )
         )
-        return _FakeResult(answer, exit_code)
+        return _FakeResult(answer, exit_code, fatal_error=fatal_error)
 
     return run_exec
 
@@ -50,20 +53,31 @@ def _exec_sequence(*answers: str):
     return run_exec
 
 
-def test_front_door_prompt_has_a_strict_token_efficiency_budget() -> None:
+def test_front_door_prompt_has_a_strict_token_efficiency_budget(tmp_path) -> None:
     prompt = build_front_door_prompt("你好", active_mission=True)
+    standing = " ".join(
+        build_continuous_prompt(
+            continuous_objective="Keep improving the project.",
+            journal_tail="The prior round is materially complete.",
+            planning_cycle=1,
+            open_ended=True,
+            project_root=tmp_path,
+            state_root=tmp_path,
+        ).split()
+    )
 
     assert len(prompt) <= 3_000
     assert "live research" in prompt
     assert all(
         field in prompt
         for field in (
-            '"config"', '"control"', '"authorization"', '"steer_directive"',
-            '"operator_question_policy"',
-            '"route"', '"self_mode"', '"reply"', '"lifetime"', '"greeting"', '"name"',
+            "CONFIG:", "CONTROL:", "AUTHORIZATION:", "STEER_DIRECTIVE:",
+            "OPERATOR_QUESTION_POLICY:", "ROUTE:", "SELF_MODE:", "REPLY:",
+            "LIFETIME:", "GREETING:", "NAME:",
         )
     )
-    assert "ARGUS_ROLE_DECISION=" in prompt
+    assert "ARGUS_ROLE_DECISION=" not in prompt
+    assert "Reason naturally" in prompt
     assert "VERTICAL:" not in prompt
     assert "TARGET:" not in prompt
     assert "explicit continue/resume after a pause is not a control token" in prompt
@@ -75,7 +89,7 @@ def test_front_door_prompt_has_a_strict_token_efficiency_budget() -> None:
     assert "Ambiguity defaults to no control" in prompt
     assert "FORBID only for an explicit command" in prompt
     assert "ALLOW only when explicitly re-enabled" in prompt
-    assert "conversation, status, bounded inspection" in prompt
+    assert "conversation, status, a quick inspection" in prompt
     assert "finite local task" in prompt
     assert "IMPLEMENT" in prompt
     assert "DEBUG" in prompt
@@ -85,6 +99,15 @@ def test_front_door_prompt_has_a_strict_token_efficiency_budget() -> None:
     assert "BOUNDED" in prompt
     assert "STANDING" in prompt
     assert "default BOUNDED" in prompt
+    assert all(
+        phrase in policy
+        for phrase, policy in (
+            ("casual unscoped work absent ongoing intent", prompt),
+            ("materially complete round", standing),
+            ("sentence stating its expected value and reason", standing),
+            ("behavior reachable through a real entry point", standing),
+        )
+    )
 
 
 def test_front_door_uses_process_decision_without_final_message() -> None:
@@ -601,14 +624,143 @@ def test_exec_error_is_safe_default() -> None:
 
 
 def test_nonzero_exit_is_safe_default() -> None:
+    failures: list[str] = []
     intent, control, route = classify_front_door(
         "y",
         run_exec=_exec(
             "CONFIG: SET backend ALL codex\nCONTROL: NONE\nROUTE: SELF",
             exit_code=1,
+            fatal_error="Forced restart after hard idle timeout (120s)",
         ),
+        failure_sink=failures.append,
     )
     assert (intent, control, route) == (None, None, "complex")
+    assert failures == ["Forced restart after hard idle timeout (120s)"]
+
+
+def test_oversized_fast_reply_is_delivered() -> None:
+    replies: list[str] = []
+    diagnostics: list[str] = []
+    oversized = "x" * 1601
+
+    intent, control, route = classify_front_door(
+        "answer briefly",
+        run_exec=_exec(
+            "CONFIG: NONE\nCONTROL: NONE\nROUTE: SELF\n"
+            f"SELF_MODE: REPLY\nREPLY: {oversized}"
+        ),
+        reply_sink=replies.append,
+        failure_sink=diagnostics.append,
+    )
+
+    assert (intent, control, route) == (None, None, "simple")
+    assert replies == [oversized]
+    assert diagnostics == []
+
+
+def test_oversized_steer_directive_is_delivered() -> None:
+    directives: list[str] = []
+    diagnostics: list[str] = []
+    oversized = "x" * 1601
+
+    intent, control, route = classify_front_door(
+        "change the active mission",
+        run_exec=_exec_sequence(
+            "CONFIG: NONE\nCONTROL: STEER\nROUTE: SELF\n"
+            f"STEER_DIRECTIVE: {oversized}",
+            "STEER",
+        ),
+        steering_sink=directives.append,
+        failure_sink=diagnostics.append,
+        active_mission=True,
+    )
+
+    assert (intent, control, route) == (None, "steer", "simple")
+    assert directives == [oversized]
+    assert diagnostics == []
+
+
+def test_sink_exception_records_routing_diagnostic() -> None:
+    diagnostics: list[str] = []
+
+    def _boom_reply(_reply: str) -> None:
+        raise RuntimeError("reply pipe closed")
+
+    def _boom_steer(_directive: str) -> None:
+        raise RuntimeError("steer pipe closed")
+
+    intent, control, route = classify_front_door(
+        "say hello",
+        run_exec=_exec(
+            "CONFIG: NONE\nCONTROL: NONE\nROUTE: SELF\n"
+            "SELF_MODE: REPLY\nREPLY: hello"
+        ),
+        reply_sink=_boom_reply,
+        failure_sink=diagnostics.append,
+    )
+    assert (intent, control, route) == (None, None, "simple")
+    assert any(
+        "reply sink failed" in entry and "reply pipe closed" in entry
+        for entry in diagnostics
+    )
+
+    diagnostics.clear()
+    intent, control, route = classify_front_door(
+        "change the active mission",
+        run_exec=_exec_sequence(
+            "CONFIG: NONE\nCONTROL: STEER\nROUTE: SELF\n"
+            "STEER_DIRECTIVE: focus on the docs",
+            "STEER",
+        ),
+        steering_sink=_boom_steer,
+        failure_sink=diagnostics.append,
+        active_mission=True,
+    )
+    assert (intent, control, route) == (None, "steer", "simple")
+    assert any(
+        "steering sink failed" in entry and "steer pipe closed" in entry
+        for entry in diagnostics
+    )
+
+
+def test_invalid_route_token_preserves_parsed_control() -> None:
+    diagnostics: list[str] = []
+
+    intent, control, route = classify_front_door(
+        "stop the active task",
+        run_exec=_exec("CONFIG: NONE\nCONTROL: ABORT\nROUTE: BANANA"),
+        failure_sink=diagnostics.append,
+        active_mission=True,
+    )
+
+    assert (intent, control, route) == (None, "abort", "simple")
+    assert diagnostics and diagnostics[0].startswith(
+        "route token invalid; control preserved"
+    )
+
+
+def test_nonzero_exit_preserves_redacted_runner_diagnostic(monkeypatch) -> None:
+    result = _FakeResult("", exit_code=1)
+    result.fatal_error = ""
+    result.stderr_lines = [
+        '"node" is not recognized as an internal or external command.',
+        "OPENAI_API_KEY=super-secret-value",
+    ]
+    failures: list[str] = []
+    monkeypatch.setenv("OPENAI_API_KEY", "super-secret-value")
+
+    decision = classify_front_door(
+        "hello",
+        run_exec=lambda _prompt: result,
+        failure_sink=failures.append,
+    )
+
+    assert decision == (None, None, "complex")
+    assert len(failures) == 1
+    assert "exit 1" in failures[0]
+    assert "node" in failures[0]
+    assert "super-secret-value" not in failures[0]
+    assert "<REDACTED" in failures[0]
 
 
 def test_prefixes_are_case_insensitive() -> None:

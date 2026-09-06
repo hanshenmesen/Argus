@@ -74,7 +74,13 @@ class RolePromptCatalog:
         from ...verticals._base import load_vertical_contract
 
         contract = load_vertical_contract(vertical, project_root=root)
-        vertical_banner = contract.banner(banner_role)
+        # Specialist assessments do not own the integrated Reviewer's writeback.
+        vertical_banner = (
+            ""
+            if request.role is RoleName.REVIEWER
+            and request.operation in {reviewer.COLD_READ, reviewer.SCIENCE_LOSS_CHECK}
+            else contract.banner(banner_role)
+        )
         domain = ""
         domain_banner = ""
         if root is not None and not str(request.vertical or "").strip():
@@ -87,12 +93,21 @@ class RolePromptCatalog:
             from ...skills.stage_machine import current_stage
 
             stage = current_stage(root or ".")
+        # Where the work is, as opposed to where its state is kept. Both the
+        # vertical fragment and the altitude facts describe the work, so both
+        # need the worktree; `root` is the session directory and contains no
+        # paper/, which is how a manuscript-aware gate silently never fired.
+        altitude_root = (
+            Path(request.altitude_root).expanduser()
+            if request.altitude_root is not None
+            else root
+        )
         vertical_fragment = contract.prompt_fragment(
             role=banner_role,
             operation=request.operation,
             stage=stage,
             scope=scope,
-            project_root=root,
+            project_root=altitude_root,
         )
         if vertical_fragment.strip():
             vertical_banner = "\n\n".join(
@@ -120,7 +135,8 @@ class RolePromptCatalog:
             checklist_mode = (
                 ChecklistMode.FULL_PIPELINE
                 if request.role is RoleName.REVIEWER
-                and (scope == "final_submission" or stage == "submission")
+                and scope == "final_submission"
+                and vertical != "research"
                 else ChecklistMode.STAGE
             )
 
@@ -144,8 +160,8 @@ class RolePromptCatalog:
             )
 
         search_altitude = (
-            contract.altitude(root)
-            if request.include_search_altitude and root is not None
+            contract.altitude(altitude_root)
+            if request.include_search_altitude and altitude_root is not None
             else ""
         )
         fragment_ids: list[str] = []

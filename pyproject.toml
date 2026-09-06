@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "argus-skill"
-version = "0.1.2"
+version = "0.1.1"
 description = "Argus — a persistent, reviewed runtime for autonomous research and engineering."
 readme = "README.md"
 license = { text = "MIT" }
@@ -99,6 +99,7 @@ dev = [
   "build>=1",
   "mypy>=1.8,<2",
   "pytest>=7",
+  "qrcode>=7.4,<9",
   "ruff>=0.4",
   "cryptography>=41",
   "httpx2>=2.9,<3",
@@ -107,6 +108,8 @@ dev = [
   "scipy>=1.11",
   "scikit-learn>=1.4",
   "matplotlib>=3.8",
+  "seaborn>=0.13",
+  "SciencePlots>=2.1",
   "mplfinance>=0.12.10b0",
   "lightgbm>=4",
   "torch>=2.2",

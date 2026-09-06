@@ -39,7 +39,7 @@ def manager_runner(monkeypatch):
     )
 
 
-def test_bounded_dispatch_persists_parsed_work_kind_and_nested_workdir(
+def test_bounded_dispatch_persists_nested_workdir(
     memory,
     monkeypatch,
 ):
@@ -61,7 +61,6 @@ def test_bounded_dispatch_persists_parsed_work_kind_and_nested_workdir(
                 "title": "`managed task`",
                 "objective": "managed: operator request",
                 "execution_workdir": "nested/target",
-                "work_kind": "validation",
             }],
         },
     }
@@ -98,10 +97,92 @@ def test_bounded_dispatch_persists_parsed_work_kind_and_nested_workdir(
     assert item.id == "root-task-1"
     assert item.title == "managed task"
     assert item.objective == "managed: operator request"
-    assert item.work_kind == "validation"
     assert item.execution_workdir == str(nested.resolve())
     assert item.priority < older.priority
     assert (alive, pid) == (False, None)
+
+
+def test_direct_workflow_persists_manager_package_without_planner(
+    memory,
+    monkeypatch,
+) -> None:
+    class Manager:
+        def decide_vertical(self, body, **kwargs):
+            return SimpleNamespace(
+                execution_task=f"managed: {body}",
+                vertical="software",
+                workflow_mode="direct",
+                require_independent_review=True,
+            )
+
+        def commit_vertical_decision(self, body, decision, **kwargs):
+            return decision
+
+    monkeypatch.setattr(
+        front_door,
+        "_ensure_manager_runner",
+        lambda *_args, **_kwargs: SimpleNamespace(manager=Manager()),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "_plan_bounded_execution",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("direct Manager package must not call Planner")
+        ),
+    )
+
+    item, alive, pid = dispatch.enqueue_mission(
+        memory,
+        "one coherent package",
+        {"backend": "codex"},
+        root_task_id="root-direct-1",
+        context_refs=[{
+            "kind": "attachment",
+            "ref": "brief.md",
+            "why": "operator input",
+        }],
+    )
+
+    assert item.id == "root-direct-1"
+    assert item.objective == "managed: one coherent package"
+    assert item.original_objective == item.objective
+    assert item.iterate is False
+    assert item.iteration_max_cycles == 1
+    assert item.deps == []
+    assert item.context_refs == [{
+        "kind": "attachment",
+        "ref": "brief.md",
+        "why": "operator input",
+    }]
+    assert "manager_direct" in item.tags
+    assert "planner" not in item.tags
+    assert "review:required" in item.tags
+    assert item.manager_decision == {
+        "vertical": "software",
+        "workflow_mode": "direct",
+        "require_independent_review": True,
+        "routed": True,
+        "route_source": "manager",
+    }
+    assert (alive, pid) == (False, None)
+
+    events = [
+        json.loads(line)
+        for line in (memory.project.root / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    queued = next(
+        event
+        for event in events
+        if event.get("type") == "life.planner.task_added"
+    )
+    assert queued["source"] == "manager_direct"
+    assert not any(
+        event.get("type") == "life.planner.verdict"
+        and event.get("status") == "planned"
+        for event in events
+    )
 
 
 def test_bounded_dispatch_fails_closed_without_planner_backend(memory) -> None:
@@ -248,6 +329,10 @@ def test_bounded_dispatch_persists_real_dependency_dag(memory, monkeypatch):
                 deps=("a", "b"),
                 title="Integrate",
                 objective="read a.txt and b.txt; write result.txt; test -s result.txt",
+                hypothesis="The integrated route improves the measured outcome.",
+                goal_contribution="Turn measured feedback into the requested result.",
+                expected_regressions="One component may trade off against the other.",
+                decision_rule="Revise the route when measured feedback misses the target.",
                 acceptance_check="validator exits zero",
                 non_goals=("do not edit pipeline state",),
                 context_refs=({
@@ -282,7 +367,11 @@ def test_bounded_dispatch_persists_real_dependency_dag(memory, monkeypatch):
     assert {item.plan_id for item in items.values()} == {items["a"].plan_id}
     assert items["a"].plan_id.startswith("bounded-")
     assert all("bounded_dag_node" in item.tags for item in items.values())
-    assert all(item.iterate is False for item in items.values())
+    assert all("planner" in item.tags for item in items.values())
+    assert all(item.iterate for item in items.values())
+    assert all(item.iteration_max_cycles == 3 for item in items.values())
+    assert items["c"].plan_hypothesis.startswith("The integrated route")
+    assert items["c"].decision_rule.startswith("Revise the route")
     assert all(item.original_objective == "managed: operator request" for item in items.values())
     assert items["c"].acceptance_check == "validator exits zero"
     assert items["c"].non_goals == ["do not edit pipeline state"]
@@ -480,7 +569,10 @@ def test_continuous_dispatch_persists_operator_priority_item(memory):
     assert item.priority == -1
     assert "operator_priority" in item.tags
     assert "stage_transition:skip" in item.tags
-    assert item.manager_decision == {"routed": True}
+    assert item.manager_decision == {
+        "require_independent_review": True,
+        "routed": True,
+    }
     assert payload["enabled"] is True
     assert payload["objective"] == "managed: operator request"
     assert payload["open_ended"] is True

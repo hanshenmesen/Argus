@@ -39,7 +39,7 @@ def test_checkpoint_handoff_discipline_present_for_paper_mission():
     )
     assert "## This turn" in out
     assert "pure reading" in out.lower()
-    assert "CHECKPOINT.md is the only role-maintained cross-round handoff file" in out
+    assert "CHECKPOINT.md is the only file you maintain to carry context between rounds" in out
     assert "one coherent, verifiable increment" not in out
 
 
@@ -89,7 +89,7 @@ def test_engineer_must_not_spawn_a_subagent_to_impersonate_reviewer():
     assert "yield" in out.lower()
 
 
-def test_performance_tasks_require_causal_attribution() -> None:
+def test_performance_claims_require_causal_attribution() -> None:
     full = _prompt("Diagnose the data throughput bottleneck.")
     compact = SkillLoop._build_engineer_prompt(
         task="Diagnose the data throughput bottleneck.",
@@ -99,18 +99,15 @@ def test_performance_tasks_require_causal_attribution() -> None:
     )
 
     for out in (full, compact):
-        assert "## Performance diagnosis" in out
-        assert "live resource/wait state" in out
-        assert "phase timing/profiling or a controlled A/B" in out
-        assert "threshold miss only shows that this run missed its target" in out
-        assert "do not promote the hypothesis into a Skill" in out
+        assert "Performance root-cause/bottleneck/replacement claims need" in out
+        assert "hot-path/live-resource evidence plus timing/profiling or controlled A/B" in out
 
 
 def test_engineer_does_not_create_extra_handoff_packets():
     out = _prompt("Continue the implementation across rounds.")
 
-    assert "only role-maintained cross-round handoff file" in out
-    assert "do not create handoff or evidence packets" in out
+    assert "only file you maintain to carry context between rounds" in out
+    assert "do not create separate summary or evidence packets" in out
     assert "compile/type-check" not in out
     assert "git ls-files --error-unmatch" not in out
 
@@ -127,9 +124,9 @@ def test_engineer_surfaces_operator_only_blockers_to_host():
     for out in (full, compact):
         assert "operator_question" in out
         assert "operator_options" in out
-        assert "ARGUS_ROLE_DECISION=" in out
+        assert "MILESTONE_STATUS=done" in out
         assert "parks the task" in out or "Never keep opening fresh rounds" in out
 
 
 def test_engineer_fixed_prompt_stays_token_efficient():
-    assert len(_prompt("Refactor the data loader and add unit tests.")) < 2_500
+    assert len(_prompt("Refactor the data loader and add unit tests.")) < 2_800

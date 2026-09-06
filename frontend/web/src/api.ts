@@ -22,6 +22,7 @@ import {
   requireSnapshotContract,
   type ApiMeta,
 } from '../../core/src/protocol';
+import type { ResourceStatus } from '../../core/src/resourceStatus.generated';
 
 export type {
   ArtifactInfo,
@@ -37,6 +38,7 @@ export type {
   Snapshot,
   UsageSummary,
 } from '../../core/src/types';
+export type { ResourceStatus } from '../../core/src/resourceStatus.generated';
 
 export interface JournalEntry {
   id: string;
@@ -141,6 +143,17 @@ export interface UploadedAttachment {
 export interface MessageAttachmentRef {
   attachment_id: string;
 }
+export interface ContinuousUpdateResult {
+  ok: boolean;
+  daemon?: {
+    rc?: number;
+    command_status?: string;
+    error?: string;
+    admission_required?: boolean;
+  };
+}
+/** Operator-owned message category; Task skips only the category classifier. */
+export type MessageRouteOverride = 'auto' | 'chat' | 'task';
 export interface AttachmentUploadResponse {
   attachments: UploadedAttachment[];
   limits: {
@@ -424,8 +437,15 @@ function isAbortSignal(value: unknown): value is AbortSignal {
   );
 }
 
-function messageBody(text: string, attachments?: MessageAttachmentRef[]): Record<string, unknown> {
-  return attachments?.length ? { text, attachments } : { text };
+function messageBody(
+  text: string,
+  attachments?: MessageAttachmentRef[],
+  routeOverride?: MessageRouteOverride,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { text };
+  if (attachments?.length) body.attachments = attachments;
+  if (routeOverride && routeOverride !== 'auto') body.route_override = routeOverride;
+  return body;
 }
 
 export function compatibleApiMeta(): Promise<ApiMeta> {
@@ -637,6 +657,8 @@ export const api = {
     getJson<GitDiffView>(P(sid, '/git-diff'), signal),
   metrics: (signal?: AbortSignal) =>
     getJson<MetricsSnapshot>('/api/metrics', signal),
+  resources: (signal?: AbortSignal) =>
+    getJson<ResourceStatus>('/api/system/resources', signal),
   trash: (query = '', limit = 100, offset = 0, signal?: AbortSignal) => {
     const params = new URLSearchParams({
       query,
@@ -701,13 +723,15 @@ export const api = {
     signalOrOptions?: AbortSignal | {
       signal?: AbortSignal;
       attachments?: MessageAttachmentRef[];
+      routeOverride?: MessageRouteOverride;
     },
   ) => {
     const signal = isAbortSignal(signalOrOptions) ? signalOrOptions : signalOrOptions?.signal;
     const attachments = isAbortSignal(signalOrOptions) ? undefined : signalOrOptions?.attachments;
+    const routeOverride = isAbortSignal(signalOrOptions) ? undefined : signalOrOptions?.routeOverride;
     return postJson<{ kind: 'chat' | 'task' | 'pending_question' | 'pending_question_choice' | 'error'; reply: string | null; resolved?: boolean; item?: BacklogItem | null; daemon_alive?: boolean }>(
       P(sid, '/message'),
-      messageBody(text, attachments),
+      messageBody(text, attachments, routeOverride),
       signal,
     );
   },
@@ -733,14 +757,16 @@ export const api = {
     signalOrOptions?: AbortSignal | {
       signal?: AbortSignal;
       attachments?: MessageAttachmentRef[];
+      routeOverride?: MessageRouteOverride;
     },
   ): Promise<void> => {
     const signal = isAbortSignal(signalOrOptions) ? signalOrOptions : signalOrOptions?.signal;
     const attachments = isAbortSignal(signalOrOptions) ? undefined : signalOrOptions?.attachments;
+    const routeOverride = isAbortSignal(signalOrOptions) ? undefined : signalOrOptions?.routeOverride;
     const res = await fetch(P(sid, '/message/stream'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(messageBody(text, attachments)),
+      body: JSON.stringify(messageBody(text, attachments, routeOverride)),
       signal,
     });
     await ensureResponseOk(res, 'POST', P(sid, '/message/stream'));
@@ -827,13 +853,24 @@ export const api = {
     postJson(P(sid, `/backlog/${encodeURIComponent(id)}/dispose`), { op }),
   stopBacklog: (sid: string, id: string) => postJson(P(sid, `/backlog/${encodeURIComponent(id)}/stop`)),
   setContinuous: (sid: string, enabled: boolean, objective = '') =>
-    postJson(P(sid, '/continuous'), { enabled, objective }),
+    postJson<ContinuousUpdateResult>(P(sid, '/continuous'), { enabled, objective }).then((result) => {
+      if (!enabled) return result;
+      if (!result.daemon) throw new Error('daemon start returned no result');
+      requireDaemonCommand(result.daemon);
+      return result;
+    }),
   startDaemon: (sid: string, expectedRevision?: number) => postJson(P(sid, '/daemon/start'), {
     command_id: commandId(),
     expected_revision: expectedRevision,
   }).then(requireDaemonCommand),
-  stopDaemon: (sid: string, drain = false, expectedRevision?: number) => postJson(P(sid, '/daemon/stop'), {
+  stopDaemon: (
+    sid: string,
+    drain = false,
+    expectedRevision?: number,
+    force = false,
+  ) => postJson(P(sid, '/daemon/stop'), {
     drain,
+    force,
     command_id: commandId(),
     expected_revision: expectedRevision,
   }).then(requireDaemonCommand),

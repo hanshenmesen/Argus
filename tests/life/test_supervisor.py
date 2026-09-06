@@ -111,11 +111,20 @@ class _ResearchBreakthroughRunner:
 class _MaintenanceRunner:
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] = {}
+        self.success = True
+        self.status = "done"
+        self.review_status = "done"
 
     def execute(self, **kwargs) -> _Outcome:
         self.kwargs = kwargs
-        outcome = _Outcome()
-        outcome.final_review_status = "done"
+        if kwargs.get("maintenance_mission"):
+            Path(kwargs["working_dir_override"], "reviewed-change.txt").write_text(
+                "reviewed\n",
+                encoding="utf-8",
+            )
+        outcome = _Outcome(success=self.success, status=self.status)
+        outcome.final_review_status = self.review_status
+        outcome.final_review_source = "reviewer"
         return outcome
 
 
@@ -230,16 +239,154 @@ def test_crash_after_mission_claim_requeues_audit_and_reemits_started(
     assert started[0]["item_id"] == item.id
 
 
+def test_serial_claim_lost_does_not_rollback_another_ready_item(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = LifeMemory.open(tmp_path / "life")
+    first = memory.backlog.add(BacklogItem.new(
+        title="stale",
+        objective="already handled elsewhere",
+        priority=1,
+    ))
+    second = memory.backlog.add(BacklogItem.new(
+        title="still ready",
+        objective="must remain untouched",
+        priority=2,
+    ))
+    supervisor = LifeSupervisor(
+        memory=memory,
+        runner=_MaintenanceRunner(),
+        sink=_RecordingSink(memory.root),
+        config=LifeSupervisorConfig(project_worktree=tmp_path),
+    )
+    original_next_pending = memory.backlog.next_pending
+    original_update = memory.backlog.update
+    raced = False
+    updates: list[tuple[str, dict[str, Any]]] = []
+
+    def stale_next_pending(*args: Any, **kwargs: Any) -> BacklogItem | None:
+        nonlocal raced
+        item = original_next_pending(*args, **kwargs)
+        if not raced and item is not None and item.id == first.id:
+            raced = True
+            assert original_update(first.id, status="done") is not None
+        return item
+
+    def recording_update(item_id: str, **fields: Any) -> BacklogItem | None:
+        updates.append((item_id, dict(fields)))
+        return original_update(item_id, **fields)
+
+    monkeypatch.setattr(memory.backlog, "next_pending", stale_next_pending)
+    monkeypatch.setattr(memory.backlog, "update", recording_update)
+
+    result = supervisor.tick()
+
+    rows = {item.id: item for item in memory.backlog.all()}
+    assert result == {"status": "claim_lost", "item_id": first.id}
+    assert rows[first.id].status == "done"
+    assert rows[second.id].status == "pending"
+    assert not any(
+        item_id == second.id and fields.get("status") == "pending"
+        for item_id, fields in updates
+    )
+
+
+def test_claim_lost_is_not_counted_as_mission(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = LifeMemory.open(tmp_path / "life")
+    first = memory.backlog.add(BacklogItem.new(
+        title="stale",
+        objective="already completed by another supervisor",
+        priority=1,
+    ))
+    second = memory.backlog.add(BacklogItem.new(
+        title="still ready",
+        objective="run after the coordination miss",
+        priority=2,
+    ))
+    supervisor = LifeSupervisor(
+        memory=memory,
+        runner=_MaintenanceRunner(),
+        sink=_RecordingSink(memory.root),
+        config=LifeSupervisorConfig(project_worktree=tmp_path),
+    )
+    original_next_pending = memory.backlog.next_pending
+    raced = False
+
+    def stale_next_pending(*args: Any, **kwargs: Any) -> BacklogItem | None:
+        nonlocal raced
+        item = original_next_pending(*args, **kwargs)
+        if not raced and item is not None and item.id == first.id:
+            raced = True
+            assert memory.backlog.update(first.id, status="done") is not None
+        return item
+
+    monkeypatch.setattr(memory.backlog, "next_pending", stale_next_pending)
+
+    result = supervisor.run()
+
+    assert result["missions_started"] == 0
+    assert result["missions_run"] == 0
+    assert result["results"] == []
+    rows = {item.id: item for item in memory.backlog.all()}
+    assert rows[first.id].status == "done"
+    assert rows[second.id].status == "pending"
+
+
 def test_framework_maintenance_uses_private_worktree_and_review(
     tmp_path,
+    monkeypatch,
 ) -> None:
+    import subprocess
+
+    source = tmp_path / "framework"
+    origin = tmp_path / "origin.git"
+    private_remote = tmp_path / "private.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+    subprocess.run(
+        ["git", "init", "--bare", "-q", str(private_remote)],
+        check=True,
+    )
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "checkout", "-qb", "main"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "test"], cwd=source, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=source,
+        check=True,
+    )
+    (source / "baseline.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "baseline.txt"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(origin)], cwd=source, check=True
+    )
+    subprocess.run(
+        ["git", "remote", "add", "private", str(private_remote)],
+        cwd=source,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-qu", "origin", "main"], cwd=source, check=True
+    )
+    subprocess.run(
+        ["git", "push", "-q", "private", "main"], cwd=source, check=True
+    )
+    monkeypatch.setattr(
+        "argus_skill.core.runtime_identity.source_root",
+        lambda: source,
+    )
+
     memory = LifeMemory.open(tmp_path / "life")
     sink = _RecordingSink(memory.root)
     runner = _MaintenanceRunner()
     project = tmp_path / "project"
     project.mkdir()
-    private = tmp_path / "private-framework"
-    private.mkdir()
     supervisor = LifeSupervisor(
         memory=memory,
         runner=runner,
@@ -249,11 +396,19 @@ def test_framework_maintenance_uses_private_worktree_and_review(
             artifact_root=project,
         ),
     )
-    memory.backlog.add(BacklogItem.new(
+    item = memory.backlog.add(BacklogItem.new(
         title="repair framework",
         objective="fix observed defect",
         tags=["framework_maintenance", "review:required", "scope:bounded"],
-        execution_workdir=str(private),
+        execution_workdir="",
+        context_refs=[{
+            "ref": str(memory.root / "events.jsonl"),
+            "why": "life.planner.error showed the observed harness failure",
+        }],
+        acceptance_check=(
+            "python -c \"from pathlib import Path; "
+            "raise SystemExit(not Path('reviewed-change.txt').is_file())\""
+        ),
         manager_decision={
             "routed": True,
             "vertical": "argus_maintenance",
@@ -263,13 +418,135 @@ def test_framework_maintenance_uses_private_worktree_and_review(
 
     result = supervisor.tick()
 
-    assert result is not None and result["status"] == "done"
+    assert result is not None and result["status"] == "paused_operator"
     assert result["review_status"] == "done"
-    assert runner.kwargs["working_dir_override"] == str(private)
+    worktree = Path(runner.kwargs["working_dir_override"])
+    assert worktree.is_dir()
+    assert worktree.is_relative_to(memory.root / "maintenance" / "worktrees")
+    assert worktree != source
     assert runner.kwargs["maintenance_mission"] is True
     assert runner.kwargs["vertical_override"] == "argus_maintenance"
     assert runner.kwargs["require_independent_review"] is True
     assert runner.kwargs["allow_skill_changes"] is False
+    settled = next(row for row in memory.backlog.history() if row.id == item.id)
+    assert settled.status == "paused_operator"
+    assert settled.execution_workdir == str(worktree)
+    assert [
+        option["id"] for option in settled.operator_decision["options"]
+    ] == ["adopt", "decline"]
+    assert settled.operator_decision["decision_kind"] == "framework_deployment"
+    assert settled.pending_question == (
+        "The change for “repair framework” passed review. Should I run repository CI "
+        "and the acceptance check (python -c \"from pathlib import Path; "
+        "raise SystemExit(not Path('reviewed-change.txt').is_file())\"), then apply it?"
+    )
+    sidecar = json.loads(
+        (memory.root / "maintenance" / "pending" / f"{item.id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert sidecar["worktree"] == str(worktree)
+    assert sidecar["reviewed_candidate"] != sidecar["public_base"]
+    assert sidecar["input_digest"]
+    assert sidecar["approval_binding"] == {
+        "input_digest": sidecar["input_digest"],
+    }
+    assert "input_digest" not in settled.operator_decision
+    assert sidecar["input_digest"] not in json.dumps(settled.operator_decision)
+
+    runner.success = False
+    runner.status = "error"
+    runner.review_status = "continue"
+    rejected = memory.backlog.add(BacklogItem.new(
+        title="rejected framework repair",
+        objective="leave a rejected change undeployed",
+        tags=["framework_maintenance", "review:required", "scope:bounded"],
+        execution_workdir="",
+        context_refs=[{
+            "ref": str(memory.root / "events.jsonl"),
+            "why": "observed failure",
+        }],
+        acceptance_check="python -c \"raise SystemExit(1)\"",
+        manager_decision={"routed": True, "vertical": "argus_maintenance"},
+    ))
+
+    rejected_result = supervisor.tick()
+
+    assert rejected_result is not None
+    assert rejected_result["status"] == "error"
+    rejected_row = next(
+        row for row in memory.backlog.history() if row.id == rejected.id
+    )
+    assert rejected_row.operator_decision == {}
+    rejected_worktree = Path(runner.kwargs["working_dir_override"])
+    assert rejected_row.execution_workdir == str(rejected_worktree)
+    assert (memory.root / "maintenance" / "pending" / f"{rejected.id}.json").is_file()
+    assert (rejected_worktree / "reviewed-change.txt").is_file()
+
+
+@pytest.mark.parametrize("evidence_path", ["", "tracked.txt", "untracked.txt", "evidence.log"])
+def test_maintenance_creation_failure_preserves_checkout_hook_evidence(
+    tmp_path, monkeypatch, evidence_path,
+) -> None:
+    import subprocess
+
+    source = tmp_path / "framework"
+    source.mkdir()
+    origin = tmp_path / "origin.git"
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=source, check=True, capture_output=True, text=True,
+        )
+
+    git("init", "--bare", "-q", str(origin))
+    git("init", "-q")
+    git("checkout", "-qb", "main")
+    git("config", "user.name", "test")
+    git("config", "user.email", "test@example.invalid")
+    (source / "tracked.txt").write_text("reviewed content\n")
+    (source / ".gitignore").write_text("evidence.log\n")
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    git("remote", "add", "origin", str(origin))
+    git("push", "-qu", "origin", "main")
+    if evidence_path:
+        hook = source / ".git" / "hooks" / "post-checkout"
+        hook.write_text(
+            "#!/bin/sh\n" + f"printf 'checkout hook evidence\\n' > {evidence_path}\n",
+        )
+        hook.chmod(0o755)
+    monkeypatch.setattr("argus_skill.core.runtime_identity.source_root", lambda: source)
+    memory = LifeMemory.open(tmp_path / "life")
+    project = tmp_path / "project"
+    project.mkdir()
+    supervisor = LifeSupervisor(
+        memory=memory, runner=_MaintenanceRunner(), sink=_RecordingSink(memory.root),
+        config=LifeSupervisorConfig(project_worktree=project, artifact_root=project),
+    )
+    item = memory.backlog.add(BacklogItem.new(
+        title="framework maintenance", objective="repair", tags=["framework_maintenance"],
+    ))
+    worktree = memory.root / "maintenance" / "worktrees" / item.id
+    sidecar = memory.root / "maintenance" / "pending" / f"{item.id}.json"
+    write_text = Path.write_text
+
+    def fail_sidecar(path, *args, **kwargs):
+        if path == sidecar:
+            raise OSError("simulated sidecar write failure")
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_sidecar)
+
+    with pytest.raises(OSError, match="simulated sidecar write failure"):
+        supervisor._resolve_mission_workdir(item)
+
+    assert not sidecar.exists()
+    if evidence_path:
+        assert (worktree / evidence_path).read_text() == "checkout hook evidence\n"
+        assert str(worktree) in git("worktree", "list", "--porcelain").stdout
+    else:
+        assert not worktree.exists()
 
 
 def test_skill_changes_require_explicit_mission_permission(tmp_path) -> None:
@@ -483,18 +760,12 @@ def test_manager_reselects_vertical_for_each_planned_mission(tmp_path) -> None:
     supervisor._vertical_resolved = False
     second = supervisor._resolve_vertical_once()
 
-    assert calls == [
-        (
-            "optimize the current project\n\n"
-            "[ACTIVE MANAGER STEERING DIRECTIVE - persists until replaced or "
-            "cleared] Build the Apple-specific inference kernel."
-        ),
-        (
-            "optimize the current project\n\n"
-            "[ACTIVE MANAGER STEERING DIRECTIVE - persists until replaced or "
-            "cleared] Build the Apple-specific inference kernel."
-        ),
-    ]
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0].startswith(
+        "optimize the current project\n\n## OperatorContext"
+    )
+    assert "Build the Apple-specific inference kernel." in calls[0]
     assert first["vertical"] == second["vertical"] == "device_tuning"
 
 
@@ -644,14 +915,38 @@ def test_budget_pause_is_published_once_in_operator_chat(tmp_path) -> None:
     assert sup._emit(event)
 
     (turn,) = read_turns(mem.root)
-    assert "预算不足" in turn["text"]
+    assert "Paused because this project reached its budget limit" in turn["text"]
     assert "Long experiment" in turn["text"]
+    assert "Existing work is saved" in turn["text"]
+    assert "CHECKPOINT.md" not in turn["text"]
     ui_events = [
         event
         for line in (mem.root / "events.jsonl").read_text(encoding="utf-8").splitlines()
         if (event := json.loads(line)).get("type") == "ui.argus"
     ]
     assert len(ui_events) == 1
+
+
+def test_budget_pause_uses_chinese_for_a_chinese_task(tmp_path) -> None:
+    mem = LifeMemory.open(tmp_path / "life")
+    sup = LifeSupervisor(
+        memory=mem,
+        runner=_ResearchBreakthroughRunner(),
+        sink=_RecordingSink(mem.root),
+    )
+
+    assert sup._emit({
+        "type": EventType.LIFE_BUDGET_PAUSE,
+        "item_id": "task-zh",
+        "title": "运行完整实验",
+        "reason": "项目预算已用完",
+    })
+
+    (turn,) = read_turns(mem.root)
+    assert turn["text"] == (
+        "项目已达到预算上限，任务已暂停：运行完整实验。\n"
+        "现有进度已保存；提高项目预算或缩小任务后即可继续。"
+    )
 
 
 def test_research_incomplete_mission_is_paused_and_resumable(tmp_path) -> None:
@@ -1045,13 +1340,54 @@ class _TechnicalQuestionRunner:
         return outcome
 
 
-def test_pragmatic_autonomy_replans_technical_question_without_pausing(
+def test_pragmatic_autonomy_parks_explicit_operator_question_by_default(
     tmp_path,
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("ARGUS_SKILL_AUTONOMY_MODE", "pragmatic")
+    mem = LifeMemory.open(tmp_path / "life")
+    sink = _RecordingSink(mem.root)
+    sup = LifeSupervisor(
+        memory=mem,
+        runner=_TechnicalQuestionRunner(),
+        sink=sink,
+        config=LifeSupervisorConfig(
+            budget=LifeBudget(global_daily_cap_usd=0.0, max_missions=2),
+            poll_interval_seconds=0.01,
+        ),
+    )
+    project_root = tmp_path / "project-life"
+    seen_policy_roots: list[Path] = []
+    monkeypatch.setattr(sup, "_artifact_root", lambda: project_root)
+    monkeypatch.setattr(
+        "argus_skill.manager.directive.active_operator_question_policy",
+        lambda root: seen_policy_roots.append(Path(root)) or "unchanged",
+    )
+    item = mem.backlog.add(BacklogItem.new(
+        title="Choose the scope",
+        objective="deliver the operator-selected scope",
+    ))
+
+    result = sup.tick()
+
+    assert result is not None and result["status"] == "blocked"
+    stored = next(row for row in mem.backlog.all() if row.id == item.id)
+    assert stored.status == "paused_operator"
+    assert stored.pending_question == (
+        "Should the benchmark use a smaller diagnostic shape?"
+    )
+    assert seen_policy_roots == [project_root]
+
+
+@pytest.mark.parametrize("mode", ["pragmatic", "cautious"])
+def test_forbid_policy_replans_technical_question_without_pausing(
+    tmp_path,
+    monkeypatch,
+    mode,
+) -> None:
     from argus_skill.manager.directive import set_active_manager_directive
 
-    monkeypatch.setenv("ARGUS_SKILL_AUTONOMY_MODE", "pragmatic")
+    monkeypatch.setenv("ARGUS_SKILL_AUTONOMY_MODE", mode)
     mem = LifeMemory.open(tmp_path / "life")
     set_active_manager_directive(
         mem.root,
@@ -1550,3 +1886,235 @@ def test_stage_reconciled_replan_is_untouched_by_convergence_guard(
         and e.extra.get("terminal_status") == "no_progress"
     ]
     assert not no_progress
+
+
+def test_untracked_replan_streak_survives_journal_dilution(
+    tmp_path, monkeypatch,
+) -> None:
+    """A legacy (untracked) row's replan streak must be reconstructed from the
+    item's OWN settlement history. A shared fixed-size journal window can be
+    washed out by unrelated journal-level traffic (planner cycles, parallel
+    missions), silently under-counting the streak and never escalating."""
+    monkeypatch.setenv(
+        "ARGUS_SKILL_CONSECUTIVE_REPLAN_ESCALATION_THRESHOLD", "3"
+    )
+    mem = LifeMemory.open(tmp_path / "life")
+    runner = _CountingReplanRunner()
+    sup = LifeSupervisor(
+        memory=mem,
+        runner=runner,
+        sink=_RecordingSink(mem.root),
+        config=LifeSupervisorConfig(
+            budget=LifeBudget(global_daily_cap_usd=0.0, max_missions=10),
+            poll_interval_seconds=0.01,
+        ),
+    )
+    item = mem.backlog.add(BacklogItem.new(
+        title="unsatisfiable node", objective="drain an impossible obligation",
+    ))
+
+    # Two replans are journaled for this item...
+    assert sup.tick()["status"] == "replan_requested"
+    assert sup.tick()["status"] == "replan_requested"
+    # ...on a row that predates the persisted streak counter and therefore
+    # still needs migration from the journal.
+    mem.backlog.update(
+        item.id, consecutive_replans=0, replan_streak_tracked=False,
+    )
+    # Unrelated journal-level events push both replans far past any
+    # fixed-size shared journal window.
+    events_path = Path(mem.root) / "events.jsonl"
+    with events_path.open("a", encoding="utf-8") as fh:
+        for index in range(120):
+            fh.write(json.dumps({
+                "type": "life.planner.waiting",
+                "ts": time.time(),
+                "reason": f"waiting on external dependency {index}",
+            }) + "\n")
+
+    third = sup.tick()
+
+    assert third is not None and third["status"] == "no_progress"
+    stored = next(row for row in mem.backlog.all() if row.id == item.id)
+    assert stored.status == "failed"
+    assert runner.calls == 3
+
+
+def test_fresh_backlog_items_never_scan_the_journal_for_replan_streaks(
+    tmp_path, monkeypatch,
+) -> None:
+    """``Backlog.add`` marks new items streak-tracked (they have zero journal
+    history), so the journal-scan migration fallback must never run on the
+    first replan settlement of a freshly added item."""
+    calls: list[str] = []
+
+    def _record_scan(self: Any, item_id: str) -> int:
+        calls.append(item_id)
+        raise AssertionError("journal migration scan ran for a fresh item")
+
+    monkeypatch.setattr(
+        LifeSupervisor, "_count_consecutive_item_replans", _record_scan,
+    )
+    mem = LifeMemory.open(tmp_path / "life")
+    sup = LifeSupervisor(
+        memory=mem,
+        runner=_CountingReplanRunner(),
+        sink=_RecordingSink(mem.root),
+        config=LifeSupervisorConfig(
+            budget=LifeBudget(global_daily_cap_usd=0.0, max_missions=2),
+            poll_interval_seconds=0.01,
+        ),
+    )
+    item = mem.backlog.add(BacklogItem.new(
+        title="fresh node", objective="settle the first replan from the counter",
+    ))
+
+    result = sup.tick()
+
+    assert result is not None and result["status"] == "replan_requested"
+    assert calls == []
+    stored = next(row for row in mem.backlog.all() if row.id == item.id)
+    assert stored.status == "pending"
+    assert stored.consecutive_replans == 1
+
+
+def test_iteration_requeue_resets_replan_streak(tmp_path, monkeypatch) -> None:
+    """replan -> accepted iteration cycle -> replan is a streak of ONE.
+    ``requeue_for_iteration`` is forward progress and must reset the persisted
+    counter, so the second replan does not escalate at threshold 2."""
+    monkeypatch.setenv(
+        "ARGUS_SKILL_CONSECUTIVE_REPLAN_ESCALATION_THRESHOLD", "2"
+    )
+    mem = LifeMemory.open(tmp_path / "life")
+    runner = _CountingReplanRunner()
+    sup = LifeSupervisor(
+        memory=mem,
+        runner=runner,
+        sink=_RecordingSink(mem.root),
+        config=LifeSupervisorConfig(
+            budget=LifeBudget(global_daily_cap_usd=0.0, max_missions=10),
+            poll_interval_seconds=0.01,
+        ),
+    )
+    item = mem.backlog.add(BacklogItem.new(
+        title="converging node", objective="alternate replans with progress",
+    ))
+
+    assert sup.tick()["status"] == "replan_requested"
+    streaked = next(row for row in mem.backlog.all() if row.id == item.id)
+    assert streaked.consecutive_replans == 1
+
+    # An accepted cycle re-arms the same item (the supervisor journals this
+    # as mission_iterated) — forward progress that restarts the streak.
+    requeued = mem.backlog.requeue_for_iteration(
+        item.id, new_objective="polish pass", cost_delta_usd=0.0,
+    )
+    assert requeued is not None
+    assert requeued.consecutive_replans == 0
+    assert requeued.replan_streak_tracked is True
+
+    second = sup.tick()
+
+    assert second is not None and second["status"] == "replan_requested"
+    stored = next(row for row in mem.backlog.all() if row.id == item.id)
+    assert stored.status == "pending"
+    assert stored.consecutive_replans == 1
+    assert runner.calls == 2
+
+
+def test_untracked_streak_migration_breaks_at_iteration_progress(
+    tmp_path,
+) -> None:
+    """The journal-scan migration for legacy rows must treat an intervening
+    ``mission_iterated`` settlement as forward progress, exactly like
+    ``mission_complete`` — 'replan, iterate, replan' is a prior streak of 1."""
+    mem = LifeMemory.open(tmp_path / "life")
+    sup = LifeSupervisor(
+        memory=mem,
+        runner=_CountingReplanRunner(),
+        sink=_RecordingSink(mem.root),
+        config=LifeSupervisorConfig(
+            budget=LifeBudget(global_daily_cap_usd=0.0, max_missions=2),
+            poll_interval_seconds=0.01,
+        ),
+    )
+    item_id = BacklogItem.new_id()
+    events_path = Path(mem.root) / "events.jsonl"
+    settlements = [
+        {"success": False, "status": "replan_requested"},
+        {"success": True, "status": "done", "iteration": {"requeued": True}},
+        {"success": False, "status": "replan_requested"},
+    ]
+    with events_path.open("a", encoding="utf-8") as fh:
+        for row in settlements:
+            fh.write(json.dumps({
+                "type": "life.mission.completed",
+                "item_id": item_id,
+                "ts": time.time(),
+                "title": "legacy node",
+                "summary": row["status"],
+                **row,
+            }) + "\n")
+
+    assert sup._count_consecutive_item_replans(item_id) == 1
+
+
+def test_neutral_pause_settlements_do_not_evict_replans_from_window(
+    tmp_path, monkeypatch,
+) -> None:
+    """Settlement history [replan, replan, pause, pause] at threshold 3: pause
+    settlements neither count toward the streak nor break it, so they must not
+    occupy slots in the threshold-sized per-item journal window and push the
+    older replans out. The THIRD replan settlement escalates the untracked
+    legacy row to a terminal no_progress failure."""
+    monkeypatch.setenv(
+        "ARGUS_SKILL_CONSECUTIVE_REPLAN_ESCALATION_THRESHOLD", "3"
+    )
+    mem = LifeMemory.open(tmp_path / "life")
+    runner = _CountingReplanRunner()
+    sup = LifeSupervisor(
+        memory=mem,
+        runner=runner,
+        sink=_RecordingSink(mem.root),
+        config=LifeSupervisorConfig(
+            budget=LifeBudget(global_daily_cap_usd=0.0, max_missions=10),
+            poll_interval_seconds=0.01,
+        ),
+    )
+    item = mem.backlog.add(BacklogItem.new(
+        title="unsatisfiable node", objective="drain an impossible obligation",
+    ))
+
+    # Two replans are journaled for this item...
+    assert sup.tick()["status"] == "replan_requested"
+    assert sup.tick()["status"] == "replan_requested"
+    # ...on a row that predates the persisted streak counter and therefore
+    # still needs migration from the journal.
+    mem.backlog.update(
+        item.id, consecutive_replans=0, replan_streak_tracked=False,
+    )
+    # Two NEUTRAL settlements for the SAME item land after the replans
+    # (mid-mission budget breaker, then a provider cooldown). They neither
+    # count nor break the streak, so they must not consume window slots.
+    events_path = Path(mem.root) / "events.jsonl"
+    with events_path.open("a", encoding="utf-8") as fh:
+        for status in ("paused_budget", "paused_provider_cooldown"):
+            fh.write(json.dumps({
+                "type": "life.mission.completed",
+                "item_id": item.id,
+                "ts": time.time(),
+                "success": False,
+                "status": status,
+                "title": "unsatisfiable node",
+                "summary": status,
+            }) + "\n")
+
+    # Both prior replans are still visible through the pause noise.
+    assert sup._count_consecutive_item_replans(item.id) == 2
+
+    third = sup.tick()
+
+    assert third is not None and third["status"] == "no_progress"
+    stored = next(row for row in mem.backlog.all() if row.id == item.id)
+    assert stored.status == "failed"
+    assert runner.calls == 3

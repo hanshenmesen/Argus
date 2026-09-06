@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, cast
 
@@ -18,6 +19,16 @@ from ..roles.prompts.manager import (
 )
 
 _IDENTITY_GUARD = _PROMPT_IDENTITY_GUARD
+log = logging.getLogger(__name__)
+
+
+def _routing_diagnostic(
+    message: str,
+    failure_sink: Callable[[str], None] | None,
+) -> None:
+    log.warning("Manager front-door diagnostic: %s", message)
+    if callable(failure_sink):
+        failure_sink(message)
 
 
 def _route_from_token(token: str) -> str:
@@ -47,6 +58,12 @@ def classify_route(
 
 #: The front-door decision fields, in the order the Manager contract lists them.
 _FRONT_DOOR_FIELDS = (
+    "intake_type",
+    "intake_scope",
+    "intake_roles",
+    "preference_kind",
+    "preference_value",
+    "revoke_revision",
     "config",
     "control",
     "authorization",
@@ -70,6 +87,61 @@ def _answer_text(result: Any) -> str:
     return str(message or "")
 
 
+def _classifier_failure_detail(result: Any) -> str:
+    """Return bounded, redacted runner evidence for a failed front-door call.
+
+    A bare ``classifier backend failed`` hid actionable process failures such
+    as an npm ``codex.cmd`` wrapper whose GUI-host PATH did not contain Node.
+    Keep the fail-closed routing behavior, but retain enough local stderr for
+    an operator to repair the configured runner without exposing credentials.
+    """
+    exit_code = getattr(result, "exit_code", "unknown")
+    fragments: list[str] = []
+    fatal = str(getattr(result, "fatal_error", "") or "").strip()
+    if fatal:
+        fragments.append(fatal)
+    raw_stderr = getattr(result, "stderr_lines", None) or []
+    if isinstance(raw_stderr, (str, bytes)):
+        raw_stderr = [raw_stderr]
+    try:
+        stderr = "\n".join(
+            str(line, errors="replace") if isinstance(line, bytes) else str(line)
+            for line in raw_stderr
+            if str(line).strip()
+        ).strip()
+    except TypeError:
+        stderr = str(raw_stderr or "").strip()
+    if stderr and not fatal:
+        # ``fatal_error`` is the runner's authoritative summary and retains the
+        # remote contract verbatim. Raw stderr is a bounded fallback for launch
+        # failures (for example an npm wrapper that cannot find Node).
+        fragments.append(stderr)
+    detail = " | ".join(fragments)
+    if detail:
+        try:
+            from ..core.secret_guard import known_secret_values, redact_secrets_text
+            from ..tools.capability_vault import read_auth_json_key
+
+            # Provider stderr can echo a raw Codex API key without an
+            # `api_key=` label.  Read it only to redact the exact value before
+            # this text reaches the cockpit; never render or persist it here.
+            auth_key = read_auth_json_key()
+            detail = redact_secrets_text(
+                detail,
+                known_values=(*known_secret_values(), auth_key),
+            )
+        except Exception:  # noqa: BLE001 — diagnostics must never alter routing
+            pass
+        detail = " ".join(detail.split())[:480]
+    if fatal and detail:
+        return detail
+    return (
+        f"classifier backend failed (exit {exit_code}): {detail}"
+        if detail
+        else f"classifier backend failed (exit {exit_code})"
+    )
+
+
 def _front_door_fields(result: Any) -> dict[str, str]:
     """Read the front-door fields, preferring the structured decision.
 
@@ -86,9 +158,14 @@ def _front_door_fields(result: Any) -> dict[str, str]:
             name: str(decision.get(name, "") or "").strip()
             for name in _FRONT_DOOR_FIELDS
         }
-    text = _answer_text(result)
+    from ..core.role_reply import read_key_values
+
+    values = read_key_values(
+        _answer_text(result),
+        (name.upper() for name in _FRONT_DOOR_FIELDS),
+    )
     return {
-        name: (_line_after_prefix(text, f"{name.upper()}:") or "").strip()
+        name: str(values.get(name.upper()) or "").strip()
         for name in _FRONT_DOOR_FIELDS
     }
 
@@ -260,18 +337,6 @@ def _parse_config_decision(line: str | None) -> ConfigDecision:
     return intents[0] if len(intents) == 1 else tuple(intents)
 
 
-def _line_after_prefix(answer: str, prefix: str) -> "str | None":
-    """First line whose stripped form starts (case-insensitively) with
-    ``prefix``, returned with the prefix removed and stripped. ``None`` when no
-    such line exists — the caller then applies that axis's safe default."""
-    up = prefix.upper()
-    for ln in str(answer or "").splitlines():
-        s = ln.strip()
-        if s.upper().startswith(up):
-            return s[len(prefix) :].strip()
-    return None
-
-
 def _plain_reply(value: str) -> str:
     """Unwrap a reply that arrived as the JSON string the old renderer wrote."""
     if len(value) > 1 and value.startswith('"') and value.endswith('"'):
@@ -311,6 +376,7 @@ def classify_front_door(
     steering_sink: Callable[[str], None] | None = None,
     operator_question_policy_sink: Callable[[OperatorQuestionPolicy], None] | None = None,
     authorization_sink: Callable[[tuple[str, ...]], None] | None = None,
+    intake_sink: Callable[[dict[str, Any]], None] | None = None,
     failure_sink: Callable[[str], None] | None = None,
     active_mission: bool = False,
 ) -> "tuple[ConfigDecision, ControlIntent | None, str]":
@@ -332,7 +398,7 @@ def classify_front_door(
         return None, None, "complex"
     if int(getattr(result, "exit_code", 0) or 0) != 0:
         if callable(failure_sink):
-            failure_sink("classifier backend failed")
+            failure_sink(_classifier_failure_detail(result))
         return None, None, "complex"
     fields = _front_door_fields(result)
     intent = _parse_config_decision(fields["config"])
@@ -372,10 +438,18 @@ def classify_front_door(
         "TEAM",
         "COMPLEX",
     }:
-        if callable(failure_sink):
-            failure_sink("classifier returned no valid route")
-        return intent, None, "complex"
-    route = _route_from_token(route_token)
+        if control in {"abort", "pause", "no_dispatch", "steer"}:
+            _routing_diagnostic(
+                "route token invalid; control preserved "
+                f"(token={route_token or '<missing>'!r}, control={control!r})",
+                failure_sink,
+            )
+            route = "simple"
+        else:
+            _routing_diagnostic("classifier returned no valid route", failure_sink)
+            return intent, None, "complex"
+    else:
+        route = _route_from_token(route_token)
     if control in {"abort", "pause", "no_dispatch", "steer"}:
         route = "simple"
     authorization = _parse_authorization_line(fields["authorization"])
@@ -403,7 +477,7 @@ def classify_front_door(
         except Exception:  # noqa: BLE001 - advisory metadata never owns routing
             pass
     reply = _plain_reply(fields["reply"])
-    if (
+    reply_eligible = (
         callable(reply_sink)
         and route == "simple"
         and self_mode == "reply"
@@ -411,12 +485,16 @@ def classify_front_door(
         and control in {None, "no_dispatch"}
         and not authorization
         and reply.upper() != "NONE"
-        and 0 < len(reply) <= 1600
-    ):
+        and len(reply) > 0
+    )
+    if reply_eligible:
         try:
             reply_sink(reply)
-        except Exception:  # noqa: BLE001 - optional fast reply only
-            pass
+        except Exception as exc:  # noqa: BLE001 - optional fast reply only
+            _routing_diagnostic(
+                f"reply sink failed ({type(exc).__name__}: {exc})",
+                failure_sink,
+            )
     lifetime: LifetimeIntent | None = None
     lifetime_parts = fields["lifetime"].split(maxsplit=1)
     lifetime_token = (
@@ -462,17 +540,20 @@ def classify_front_door(
             pass
     steering = fields["steer_directive"]
     steering_token = steering.rstrip(".。!！").upper()
-    if (
+    steering_eligible = (
         callable(steering_sink)
         and control == "steer"
         and steering
         and steering_token not in {"NONE", "N/A", "NA", "NULL"}
-        and len(steering) <= 1600
-    ):
+    )
+    if steering_eligible:
         try:
             steering_sink(steering)
-        except Exception:  # noqa: BLE001 - advisory metadata never owns routing
-            pass
+        except Exception as exc:  # noqa: BLE001 - advisory metadata never owns routing
+            _routing_diagnostic(
+                f"steering sink failed ({type(exc).__name__}: {exc})",
+                failure_sink,
+            )
     question_policy = fields["operator_question_policy"].strip().lower()
     if (
         callable(operator_question_policy_sink)
@@ -489,6 +570,57 @@ def classify_front_door(
         try:
             name_sink(name)
         except Exception:  # noqa: BLE001 - cosmetic metadata never owns routing
+            pass
+    intake_type = fields["intake_type"].strip().lower()
+    if intake_type not in {
+        "ephemeral",
+        "objective_amendment",
+        "standing_directive",
+        "preference",
+        "credential_grant",
+        "revocation",
+    }:
+        if intent is not None:
+            intake_type = "preference"
+        elif control == "steer" or route == "complex":
+            intake_type = "objective_amendment"
+        else:
+            intake_type = "ephemeral"
+    intake_scope = fields["intake_scope"].strip().lower()
+    if intake_scope not in {"mission", "project", "global"}:
+        intake_scope = "mission" if intake_type == "objective_amendment" else "project"
+    raw_roles = fields["intake_roles"].strip().lower()
+    if raw_roles == "all" or not raw_roles:
+        intake_roles: str | tuple[str, ...] = "all"
+    else:
+        intake_roles = tuple(
+            dict.fromkeys(
+                role.strip()
+                for role in raw_roles.split(",")
+                if role.strip() in {"manager", "planner", "engineer", "reviewer", "teammate"}
+            )
+        ) or "all"
+    preference_kind = fields["preference_kind"].strip().lower()
+    if preference_kind not in {"autonomy", "interaction", "workflow"}:
+        preference_kind = "workflow"
+    try:
+        revocation_target = int(fields["revoke_revision"])
+    except (TypeError, ValueError):
+        revocation_target = 0
+    if callable(intake_sink):
+        try:
+            intake_sink({
+                "kind": intake_type,
+                "scope": intake_scope,
+                "applies_to_roles": intake_roles,
+                "preference_kind": preference_kind,
+                "preference_value": (
+                    "" if fields["preference_value"].upper() == "NONE"
+                    else fields["preference_value"]
+                ),
+                "target_revision": revocation_target,
+            })
+        except Exception:  # noqa: BLE001 - intake metadata never owns routing
             pass
     return intent, control, route
 

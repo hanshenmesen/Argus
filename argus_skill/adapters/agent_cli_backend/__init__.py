@@ -3,7 +3,7 @@
 argus-skill's loop is deliberately backend-agnostic — it talks to a
 ``RunnerBackend`` (Protocol) defined in ``argus_skill.core.ports``. The
 deterministic ``MemoryBackend`` is fine for tests, but for *real* runs we
-need to drive the actual codex / claude / copilot / opencode / pi / grok / dsh CLI.
+need to drive the actual codex / claude / copilot / cursor / opencode / pi / grok / dsh CLI.
 
 ``argus_skill.agent_cli.agent_cli_runner.AgentCliRunner`` is a
 battle-tested subprocess wrapper that handles JSON event streams, idle
@@ -43,8 +43,6 @@ from ._options import (
 )
 from ._result import (
     _raw_backend_stop_kind,
-    _sum_copilot_premium_requests,
-    _sum_token_counts,
     looks_like_auth_failure,
 )
 
@@ -57,6 +55,4 @@ __all__ = [
     "looks_like_auth_failure",
     "_raw_backend_stop_kind",
     "_needed_for_live_progress",
-    "_sum_token_counts",
-    "_sum_copilot_premium_requests",
 ]

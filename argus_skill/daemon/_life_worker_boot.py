@@ -26,6 +26,7 @@ from ._life_worker_identity import (
     _legacy_manager_handoff_identity,
     _read_manager_handoff_identity,
     _rearm_operator_drain_for_resume,
+    _refresh_file_backed_objective_for_resume,
     _resume_matches_manager_handoff,
     _write_manager_handoff_identity,
 )
@@ -91,12 +92,15 @@ class LifeWorkerBootMixin:
         self._rf_resolve_continuous_boot_state(rf_state)
         self._rf_manager_divide_on_boot(rf_state)
         self._rf_build_supervisor(rf_state)
-        maintenance_result = self._rf_init_self_maintenance(rf_state)
-        if maintenance_result is not None:
-            return maintenance_result
         self._rf_start_services(rf_state)
+        bounded_handoff_failure = bool(
+            rf_state.handoff_failure and not rf_state.cfg.continuous_open_ended
+        )
+        if bounded_handoff_failure:
+            self._stop.set()
         self._rf_main_loop(rf_state)
-        return self._rf_shutdown(rf_state)
+        shutdown_result = self._rf_shutdown(rf_state)
+        return 2 if bounded_handoff_failure else shutdown_result
 
     def _rf_bootstrap_environment(self) -> None:
         """Set up process env vars (PATH/PYTHONPATH/CUDA/git-config) before
@@ -111,6 +115,8 @@ class LifeWorkerBootMixin:
         configure_framework_python_env(prepend_python_path=True)
         if self.config.global_root is not None:
             os.environ["ARGUS_SKILL_HOME"] = str(self.config.global_root.resolve())
+
+        self._rf_export_configured_backend()
 
         # Make the project's ``code/`` importable in every child shell so inline
         # scripts and ``code/*.py`` helpers can ``import benchmark_loaders`` /
@@ -140,6 +146,63 @@ class LifeWorkerBootMixin:
 
         for k, v in gpu_env_vars().items():
             os.environ[k] = v
+
+    def _rf_export_configured_backend(self) -> None:
+        """Make ``--backend`` authoritative for the whole role-resolution chain.
+
+        ``--backend`` is a CLI ARGUMENT. It lands in
+        ``LifeWorkerConfig.backend`` and was never exported, so
+        ``core.knobs.resolve_role_backend`` — which the reviewer gate, the
+        subagent supervisor and the vault preflight all read — walked role env
+        -> ``ARGUS_SKILL_RUNNER_BACKEND`` -> ``ARGUS_SKILL_LIFE_BACKEND`` ->
+        persisted knob, found NOTHING (``/proc/<pid>/environ`` of a daemon
+        launched with ``--backend copilot`` carries ``ARGUS_SKILL_HOME`` and no
+        ``ARGUS_SKILL_*_BACKEND`` at all), and fell through to codex. A copilot
+        campaign therefore ran its REVIEWER on ``codex`` against a relay with no
+        token in the daemon environment: 401 ``Missing bearer`` on every review,
+        and the paper hard-gated at ``model_review_unavailable``. The only
+        workaround was hand-writing ``ARGUS_SKILL_REVIEWER_BACKEND`` into each
+        project's ``state/config.json``.
+
+        This runs FIRST in ``_rf_bootstrap_environment``, before the vault
+        preflight and before any role resolves, so every later reader sees it.
+
+        ``setdefault`` semantics, not assignment: an operator who explicitly
+        exported ``ARGUS_SKILL_RUNNER_BACKEND`` before launching still outranks
+        the flag, which is the precedence every other knob in this codebase
+        uses. Spelled out rather than using ``os.environ.setdefault`` so the
+        case where the flag LOSES can be logged instead of vanishing.
+
+        ``memory`` is deliberately never exported: it is the in-process test
+        backend, not an agent-CLI backend, and it is not in
+        ``SUPPORTED_BACKENDS`` — exporting it would make
+        ``normalize_runner_backend`` reject the whole chain.
+        """
+        configured = str(getattr(self.config, "backend", "") or "").strip()
+        if not configured or configured.lower() == "memory":
+            return
+        existing = str(os.environ.get("ARGUS_SKILL_RUNNER_BACKEND", "") or "").strip()
+        if existing:
+            # The operator's export outranks the flag — but silently ignoring a
+            # `--backend` they typed is precisely the class of thing this whole
+            # change exists to stop. Say which one won.
+            if existing.lower() != configured.lower():
+                log.warning(
+                    "daemon: ARGUS_SKILL_RUNNER_BACKEND=%s is already exported; "
+                    "it outranks the configured backend %s for role resolution",
+                    existing,
+                    configured,
+                )
+            return
+        os.environ["ARGUS_SKILL_RUNNER_BACKEND"] = configured
+        # Without this line the provenance recorded by _rf_record_role_backends
+        # reads "env:ARGUS_SKILL_RUNNER_BACKEND" for a value that actually came
+        # from the launch flag, and nothing would connect the two.
+        log.info(
+            "daemon: exported ARGUS_SKILL_RUNNER_BACKEND=%s from the configured "
+            "backend so every role resolves to it",
+            configured,
+        )
 
     def _rf_build_memory_runner_sink(self, rf_state: _RunForeverState) -> None:
         """Open memory, build the runner, and wire the persistent event sink."""
@@ -192,6 +255,59 @@ class LifeWorkerBootMixin:
             life_dir=rf_state.runtime_root,
             verbosity=getattr(rf_state.cfg, "event_log_verbosity", "signal"),
         )
+        self._rf_record_role_backends(rf_state)
+
+    #: Roles whose backend the daemon resolves independently. Kept next to the
+    #: emit below rather than imported from core.role_config: that tuple is the
+    #: /roles DISPLAY set and omits the Curator, which the daemon does run.
+    _BACKEND_PROVENANCE_ROLES: tuple[str, ...] = (
+        "manager",
+        "planner",
+        "engineer",
+        "reviewer",
+        "curator",
+    )
+
+    def _rf_record_role_backends(self, rf_state: _RunForeverState) -> None:
+        """Record which backend each role resolved to, and WHY, once per boot.
+
+        Every consumer of a role's backend resolves it lazily and independently,
+        so until now nothing anywhere stated the answer. When the reviewer ran
+        on codex under a ``--backend copilot`` campaign, no log line, artifact
+        or task record said so — the failure only surfaced downstream as a 401
+        and a ``model_review_unavailable`` gate. These five events put the
+        resolved value and its provenance (``env:<VAR>`` / ``persisted:<VAR>`` /
+        ``default``) in ``events.jsonl`` at boot, where ``/roles`` and the
+        cockpit can read it.
+        """
+        from ..core.event_catalog import EventType, new_event
+        from ..core.knobs import (
+            BackendResolutionError,
+            resolve_role_backend_with_source,
+        )
+
+        for role in self._BACKEND_PROVENANCE_ROLES:
+            try:
+                backend, source = resolve_role_backend_with_source(
+                    role,
+                    default=str(rf_state.cfg.backend or "") or None,
+                )
+            except BackendResolutionError:
+                # Unreachable while cfg.backend is set (it is the default we
+                # pass), so this only fires for a config with an empty backend.
+                # Provenance is a diagnostic: it must not be the thing that
+                # stops a daemon from booting.
+                log.exception("daemon: could not resolve %s backend for provenance", role)
+                continue
+            rf_state.sink.append(
+                new_event(
+                    EventType[f"LIFE_{role.upper()}_BACKEND_RESOLVED"],
+                    role=role,
+                    backend=backend,
+                    source=source,
+                    text=f"{role} backend resolved to {backend} ({source})",
+                )
+            )
 
     def _rf_resolve_continuous_boot_state(self, rf_state: _RunForeverState) -> None:
         """Resolve the boot-time continuous config, suppression, and the live
@@ -209,6 +325,11 @@ class LifeWorkerBootMixin:
         )
         rf_state.boot = read_continuous_state(rf_state.runtime_root)
         rf_state.boot = _rearm_operator_drain_for_resume(
+            cfg=rf_state.cfg,
+            runtime_root=rf_state.runtime_root,
+            state=rf_state.boot,
+        )
+        _refresh_file_backed_objective_for_resume(
             cfg=rf_state.cfg,
             runtime_root=rf_state.runtime_root,
             state=rf_state.boot,
@@ -251,14 +372,18 @@ class LifeWorkerBootMixin:
                         enabled=False,
                         objective=objective,
                     )
-                return False, "", current.open_ended
+                return False, "", requested_open_ended
             if not self._operator_stop_requested:
                 self._adopted_continuous_generation = current.generation if enabled else None
             # A disabled record keeps its objective on disk so the operator can
             # inspect or explicitly re-arm it later. It must not seed the live
-            # supervisor, or a paused/completed handoff can be treated as the
-            # next continuous objective during daemon resume.
-            return enabled, (objective if enabled else ""), current.open_ended
+            # supervisor or override this process's launch lifetime. Otherwise
+            # a completed campaign can keep a later bounded worker resident.
+            return (
+                enabled,
+                objective if enabled else "",
+                current.open_ended if enabled else requested_open_ended,
+            )
 
         rf_state.continuous_provider = _continuous_provider
 
@@ -275,6 +400,14 @@ class LifeWorkerBootMixin:
             # role-clean execution handoff.
             rf_state.init_continuous = True
             rf_state.init_objective = rf_state.cfg.continuous_objective or rf_state.init_objective
+
+        # The runner was built before this reconciliation, with the launch
+        # default (open-ended unless --bounded). The Manager stage hook reads
+        # that namespace on every mission, so a bounded campaign whose runner
+        # still says open-ended can never complete early: it is advanced stage
+        # by stage into a manuscript it was never asked to write. idea-01
+        # (s-0b1c7fa1) re-ran one ideation mission 144 times in Paper that way.
+        self._rf_sync_runner_campaign_lifetime(rf_state)
 
         # ``resume_continuous`` adopts a campaign only when its objective and
         # vertical match a durable Manager handoff identity. This avoids a fresh
@@ -295,6 +428,17 @@ class LifeWorkerBootMixin:
                 "daemon boot: adopting persisted Manager handoff for continuous generation %d",
                 rf_state.init_source_state.generation,
             )
+
+    @staticmethod
+    def _rf_sync_runner_campaign_lifetime(rf_state: _RunForeverState) -> None:
+        """Give the mission runner the reconciled campaign lifetime."""
+        args = getattr(rf_state.runner, "_args", None)
+        if args is None:
+            return
+        args.open_ended = bool(rf_state.cfg.continuous_open_ended)
+        objective = str(rf_state.init_objective or "").strip()
+        if objective:
+            args.continuous_objective = objective
 
     def _rf_manager_divide_on_boot(self, rf_state: _RunForeverState) -> None:
         """Reset the Manager's codex session, then classify + persist the
@@ -486,6 +630,15 @@ class LifeWorkerBootMixin:
                         domain=str(getattr(division, "domain", "") or ""),
                         continuous_generation=expected_state.generation + 1,
                         intent_id=intent_id,
+                        source_objective=source_objective,
+                        source_objective_path=str(
+                            getattr(
+                                rf_state.cfg,
+                                "continuous_objective_file",
+                                "",
+                            )
+                            or ""
+                        ),
                     )
                 else:
                     if (
@@ -506,8 +659,14 @@ class LifeWorkerBootMixin:
                                 "type": "life.manager.intent.failed",
                                 "agent_layer": "manager",
                                 "intent_id": intent_id,
+                                "item_id": intent_id,
                                 "source": "daemon_boot",
+                                "objective": source_objective,
                                 "error": "failed to persist Manager execution handoff",
+                                "phase": "contract",
+                                "cause": "failed to persist Manager execution handoff",
+                                "contract_field": "continuous_config",
+                                "attempts": 1,
                                 "text": "manager daemon objective handoff was not persisted",
                             }
                         )
@@ -552,14 +711,31 @@ class LifeWorkerBootMixin:
                 rf_state.cfg.continuous_objective = rf_state.init_objective
                 log.error("daemon Manager handoff failed; objective not dispatched: %s", exc)
                 rf_state.handoff_failure = f"{type(exc).__name__}: {exc}"
+                phase = str(getattr(exc, "phase", "") or "unknown")
                 rf_state.sink.append(
                     {
                         "type": "life.manager.intent.failed",
                         "agent_layer": "manager",
                         "intent_id": intent_id,
+                        "item_id": intent_id,
                         "source": "daemon_boot",
                         "objective": source_objective,
                         "error": f"{type(exc).__name__}: {exc}",
+                        "phase": phase,
+                        "cause": str(getattr(exc, "cause", "") or str(exc)),
+                        "contract_field": str(
+                            getattr(exc, "contract_field", "") or ""
+                        ),
+                        "attempts": max(
+                            1,
+                            int(getattr(exc, "attempts", 1) or 1),
+                        ),
+                        "model_reply_snippet": str(
+                            getattr(exc, "model_reply_snippet", "") or ""
+                        )[:300],
+                        "backend_error": str(
+                            getattr(exc, "backend_error", "") or ""
+                        ),
                         "text": "manager daemon objective handoff failed",
                     }
                 )
@@ -578,8 +754,9 @@ class LifeWorkerBootMixin:
             init_continuous=rf_state.init_continuous,
             init_objective=rf_state.init_objective,
             continuous_provider=rf_state.continuous_provider,
-            post_mission_hook=self._post_mission_hook,
+            post_mission_hook=self._deployment_handoff_after_mission,
         )
+        sup_cfg.planner_cycle_gate = self._deployment_handoff_gate
 
         # Lazy proxy: resolve ``LifeSupervisor`` through the facade module's
         # OWN namespace at call time (not this module's), so

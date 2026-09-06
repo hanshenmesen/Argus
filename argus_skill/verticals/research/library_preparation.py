@@ -1,117 +1,74 @@
-"""Research-only venue and idea preparation hooks."""
+"""Research-only Skill preparation for the four-stage workflow."""
 from __future__ import annotations
-
-import os
 
 from ...core.vertical_contract import VerticalLibraryContext
 
-_FALSE = frozenset({"0", "false", "no", "off"})
-_VENUE_STAGES = frozenset({"research", "plan", "benchmark", "run", "analysis"})
-
-
-def _enabled(name: str) -> bool:
-    return os.environ.get(name, "1").strip().lower() not in _FALSE
+STAGE_PLAYBOOK_PATHS: dict[str, str] = {
+    stage: f"research-{stage}-playbook.md"
+    for stage in ("idea", "experiment", "paper", "review")
+}
 
 
 def prepare_skill_libraries(context: VerticalLibraryContext) -> None:
-    """Prepare live research evidence before Agents inspect their libraries."""
-    if context.workflow_mode == "direct" or not context.paper_mission:
-        return
-    from ...core.research_contract import resolve_research_target_level
+    """Prepare only the active stage's research Skills and internal idea team."""
+    playbook = STAGE_PLAYBOOK_PATHS.get(context.stage)
+    if playbook:
+        context.required_skill_paths.append(playbook)
 
-    if resolve_research_target_level(context.workdir) == "exploratory":
+    if not context.paper_mission:
         return
-    if context.stage in {"plan", "benchmark", "run"}:
-        context.required_skill_paths.append(
-            "engineer/training-infrastructure-guide.md"
-        )
+    from ...skills.stage_machine import migrate_legacy_research_stage
+
+    migrate_legacy_research_stage(context.state_root)
     from .idea_portfolio import (
-        QUORUM_COUNT,
+        DEFAULT_PORTFOLIO_SIZE,
         SELECTION_POLICY,
         ensure_idea_portfolio,
         idea_portfolio_selection,
+        migrate_legacy_idea_selection,
         portfolio_required,
     )
 
-    if context.stage == "research" and portfolio_required(context.workdir):
-        context.required_skill_paths.extend((
-            "engineer/idea-discovery.md",
-            "engineer/idea-creator.md",
-        ))
-        if context.team_task_id:
-            context.emit({
-                "type": "idea.portfolio.nested_skipped",
-                "team_task_id": context.team_task_id,
-                "text": "team worker reused the parent portfolio without recursive fanout",
-            })
-        else:
-            context.required_skill_paths.append("engineer/agent-team-lead.md")
-            team_root = ensure_idea_portfolio(
-                context.workdir,
-                direction=context.direction,
-            )
-            selection = idea_portfolio_selection(context.workdir)
-            context.emit({
-                "type": "idea.portfolio.formed",
-                "team_root": str(team_root),
-                "width": 12,
-                "route_count": 12,
-                "review_quorum": QUORUM_COUNT,
-                "task_count": 24,
-                "selection": selection or {},
-                "policy": SELECTION_POLICY,
-                "text": (
-                    f"streaming 12-route idea pipeline selected {selection['route_id']}"
-                    if selection
-                    else "formed streaming 12-route idea review/probe pipeline"
-                ),
-            })
-    if context.team_task_id:
+    migrate_legacy_idea_selection(
+        context.workdir,
+        state_root=context.state_root,
+    )
+    if context.stage != "idea":
         return
-    if (
-        _enabled("ARGUS_SKILL_VENUE_RESEARCH")
-        and context.stage in _VENUE_STAGES
-    ):
-        from .venue_research import (
-            needs_venue_research,
-            research_venue_profile,
-        )
 
-        if needs_venue_research(context.workdir):
-            context.emit({
-                "type": "venue.research.started",
-                "text": "live web search: selecting/researching target venue",
-            })
-            ok = research_venue_profile(
-                context.runner,
-                context.workdir,
-                model=context.model,
-            )
-            context.emit({
-                "type": "venue.research.completed",
-                "ok": ok,
-                "text": (
-                    "built research/VENUE_PROFILE.json"
-                    if ok
-                    else "venue research produced no profile"
-                ),
-            })
-    if _enabled("ARGUS_SKILL_IDEA_SEARCH") and context.stage == "research":
-        from .idea_search import _already_seeded, augment_idea_candidates
+    if context.workflow_mode == "direct" or not portfolio_required(context.state_root):
+        return
+    if context.team_task_id:
+        context.emit({
+            "type": "idea.portfolio.nested_skipped",
+            "team_task_id": context.team_task_id,
+            "text": "team worker reused the parent portfolio without recursive fanout",
+        })
+        return
 
-        if not _already_seeded(context.workdir):
-            context.emit({
-                "type": "idea.search.started",
-                "text": "live web search: seeding candidate ideas",
-            })
-            count = augment_idea_candidates(
-                context.runner,
-                context.workdir,
-                direction=context.direction,
-                model=context.model,
+    team_root = ensure_idea_portfolio(
+        context.workdir,
+        direction=context.direction,
+        state_root=context.state_root,
+    )
+    selection = idea_portfolio_selection(
+        context.workdir,
+        state_root=context.state_root,
+    )
+    context.emit({
+        "type": "idea.portfolio.formed",
+        "team_root": str(team_root),
+        "width": DEFAULT_PORTFOLIO_SIZE,
+        "route_count": DEFAULT_PORTFOLIO_SIZE,
+        "task_count": DEFAULT_PORTFOLIO_SIZE * 2,
+        "selection": selection or {},
+        "policy": SELECTION_POLICY,
+        "text": (
+            f"idea portfolio selected {selection['route_id']}"
+            if selection
+            else (
+                "formed fixed twelve-route portfolio; selector starts after "
+                "all twelve independent reviews finish"
             )
-            context.emit({
-                "type": "idea.search.completed",
-                "count": count,
-                "text": f"appended {count} candidate idea(s)",
-            })
+        ),
+    })

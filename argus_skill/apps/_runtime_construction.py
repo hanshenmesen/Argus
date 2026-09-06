@@ -41,10 +41,14 @@ def _manager_roots(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     )
     raw_state_root = str(getattr(args, "project_state_dir", "") or "").strip()
     state_root = Path(raw_state_root).expanduser() if raw_state_root else workdir
-    if raw_state_root:
-        from ..skills.vertical_select import migrate_legacy_manager_state
+    from ..manager._session_ops import manager_pipeline_lock
+    from ..skills.stage_machine import migrate_legacy_research_stage
+    from ..skills.vertical_select import migrate_legacy_manager_state
 
-        migrate_legacy_manager_state(state_root, workdir)
+    with manager_pipeline_lock(session_root):
+        if raw_state_root:
+            migrate_legacy_manager_state(state_root, workdir)
+        migrate_legacy_research_stage(state_root)
     return workdir, state_root, session_root
 
 
@@ -130,7 +134,7 @@ class _RunnerConstructionMixin:
         # ``/backend`` knob). Env-only reads here silently fell back to codex for
         # the in-process Manager front-door — see ``_resolve_runner_backend_name``.
         backend_name = _resolve_runner_backend_name(args)
-        runner_bin = resolve_runner_bin_setting() or None
+        runner_bin = resolve_runner_bin_setting(backend=backend_name) or None
         from ..agent_cli.runner_backend import (
             normalize_runner_backend,
             resolve_available_runner,
@@ -205,7 +209,7 @@ class _RunnerConstructionMixin:
             ),
             default_watchdog_hard_idle_seconds=_env_int(
                 "ARGUS_SKILL_RUNNER_HARD_IDLE_SECONDS",
-                45 * 60,
+                0,
             ),
             event_callback=_trampoline,
         )
@@ -216,8 +220,8 @@ class _RunnerConstructionMixin:
 
         # Per-role backends. Each agent role (engineer / reviewer / planner /
         # manager) can be pinned to its OWN backend via
-        # ``ARGUS_SKILL_{ROLE}_BACKEND`` (codex / claude / copilot / opencode /
-        # pi / grok) plus an
+        # ``ARGUS_SKILL_{ROLE}_BACKEND`` (codex / claude / copilot / cursor /
+        # opencode / pi / grok) plus an
         # optional ``ARGUS_SKILL_{ROLE}_RUNNER_BIN``. When neither is set the
         # role SHARES the single default backend above — so the common case
         # still builds exactly one CLI process and behaviour is unchanged. Set
@@ -228,7 +232,10 @@ class _RunnerConstructionMixin:
                 role,
                 backend_name,
             )
-            bin_env = resolve_runner_bin_setting(role)
+            bin_env = resolve_runner_bin_setting(
+                role,
+                backend=role_backend_name,
+            )
             from ..agent_cli.runner_backend import (
                 normalize_runner_backend,
                 resolve_available_runner,
@@ -281,7 +288,7 @@ class _RunnerConstructionMixin:
                 ),
                 default_watchdog_hard_idle_seconds=_env_int(
                     "ARGUS_SKILL_RUNNER_HARD_IDLE_SECONDS",
-                    45 * 60,
+                    0,
                 ),
                 event_callback=_trampoline,
             )
@@ -584,7 +591,7 @@ def _resolve_runner_backend_name(
     if explicit:
         return explicit
     resolved = getattr(args, "backend", None)
-    if resolved in ("codex", "claude", "copilot", "opencode", "pi", "grok", "qoder", "dsh"):
+    if resolved in ("codex", "claude", "copilot", "cursor", "opencode", "pi", "grok", "qoder", "dsh"):
         return resolved
     return None
 
@@ -595,24 +602,15 @@ def _resolve_role_runner_backend_name(
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Resolve one role override while preserving the caller's shared default."""
-    from ..core.knobs import resolve_knob
+    """Resolve one role override while preserving the caller's shared default.
 
-    env_map = env if env is not None else os.environ
-    role_var = f"ARGUS_SKILL_{role.upper()}_BACKEND"
-    for name in (
-        role_var,
-        "ARGUS_SKILL_RUNNER_BACKEND",
-        "ARGUS_SKILL_LIFE_BACKEND",
-    ):
-        explicit = str(env_map.get(name, "") or "").strip()
-        if explicit:
-            return explicit
-    return resolve_knob(
-        role_var,
-        str(default_backend or "codex"),
-        env={},
-    ).value
+    The chain lives in ``core.knobs``; this used to walk its own copy, which
+    consulted the persisted store for the ROLE name only. A ``/backend`` switch
+    persists the shared name, so that copy could not see one.
+    """
+    from ..core.knobs import resolve_role_backend
+
+    return resolve_role_backend(role, env=env, default=default_backend or "codex")
 
 
 def build_life_runner(args: argparse.Namespace, *, seed_thread_id: str | None = None):
@@ -628,7 +626,7 @@ def build_life_runner(args: argparse.Namespace, *, seed_thread_id: str | None = 
         if scripted_backend is not None:
             runner.backend = scripted_backend
         return runner
-    if args.backend in ("codex", "claude", "copilot", "opencode", "pi", "grok", "qoder", "dsh"):
+    if args.backend in ("codex", "claude", "copilot", "cursor", "opencode", "pi", "grok", "qoder", "dsh"):
         # These are agent-CLI backends: _SkillLoopRunner drives the selected
         # CLI via AgentCliBackend (per-role resolution), so the
         # SAME runner serves every backend. Gating this on "codex" alone used to

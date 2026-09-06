@@ -29,6 +29,63 @@ class ManagerHandoffSupersededError(ManagerHandoffError):
     """A newer continuous command superseded an in-flight Manager handoff."""
 
 
+class ManagerModelCapabilityMismatchError(ManagerHandoffError):
+    """The resolved model repeatedly failed a Manager role contract."""
+
+
+def _manager_model_capability_mismatch_message(
+    *,
+    model_id: str,
+    clause: str,
+    consecutive_count: int,
+) -> str:
+    return (
+        "[not dispatched] Manager model role-capability mismatch: "
+        f"model `{model_id}` failed the Manager classification contract "
+        f"{consecutive_count} consecutive times; the latest failed clause was "
+        f"\"{clause}\". "
+        "This is a role-capability mismatch, not a provider outage. No task was "
+        "queued and no daemon was started. Change the Manager model by setting "
+        "`ARGUS_SKILL_MANAGER_MODEL=<capable-model-id>` before starting Argus, "
+        "or open Settings → Advanced settings, set `manager_model` to a capable "
+        "model, and restart the affected Argus process. There is no `/model` "
+        "command."
+    )
+
+
+def _publish_manager_model_capability_mismatch(
+    mem: Any,
+    *,
+    text: str,
+    model_id: str,
+    clause: str,
+    consecutive_count: int,
+) -> None:
+    """Publish through the established transcript + operator-alert event path."""
+    try:
+        import hashlib
+
+        from ..core.operator_messages import publish_operator_message
+
+        signature = hashlib.sha256(
+            f"{model_id}\0{clause}\0{consecutive_count}".encode("utf-8")
+        ).hexdigest()[:16]
+        publish_operator_message(
+            _life_dir_for(mem),
+            text=text,
+            message_id=f"manager-model-capability-mismatch-{signature}",
+            event_fields={
+                "operator_alert": True,
+                "manager_model_capability_mismatch": True,
+                "model_id": model_id,
+                "failed_clause": clause,
+                "consecutive_count": consecutive_count,
+            },
+        )
+    except Exception:  # noqa: BLE001 - alerting must not mask fail-closed routing
+        log.exception("could not publish Manager model capability mismatch alert")
+
+
 def objective_update_requires_stage_reset(
     previous_objective: str,
     *updated_objectives: str,
@@ -90,7 +147,7 @@ def mission_is_running(mem: Any) -> bool:
     try:
         return any(
             str(getattr(item, "status", "") or "") == "running"
-            for item in mem.backlog.all()
+            for item in mem.backlog.active()
         )
     except Exception:  # noqa: BLE001 - routing must remain available
         return False
@@ -106,11 +163,62 @@ def mission_is_running(mem: Any) -> bool:
 _MANAGER_RUNNER_UNAVAILABLE = object()
 
 
+class WorkspaceResolutionError(RuntimeError):
+    """No trustworthy operator workspace could be resolved.
+
+    Raised instead of guessing. The caller should treat front-door triage as
+    unavailable for this turn — ``_ensure_manager_runner`` already reports a
+    build failure to the operator with its reason — rather than proceed against
+    a root the Manager runner must not be given write access to.
+    """
+
+
+def _cwd_as_workspace() -> Path:
+    """The process cwd, but only when it can serve as a project workspace.
+
+    The cwd is not a safe default here. ``spawn_detached_daemon`` runs
+    ``os.chdir("/")`` (``daemon/process.py``), so a daemonized front door would
+    hand the Manager runner a workspace rooted at the filesystem root — the very
+    hazard ``core.sandbox.fail_closed_workdir`` exists to prevent for spawned
+    roles, reintroduced one layer up. The gate brain (``~/.argus-skill``), the
+    package source and the active venv are equally off-limits, for the reasons
+    ``core.sandbox.forbidden_write_roots`` sets out.
+    """
+    from ..core.sandbox import forbidden_write_roots
+
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError as exc:  # cwd unlinked out from under the process
+        raise WorkspaceResolutionError(
+            f"cannot resolve an operator workspace: the current directory is "
+            f"unavailable ({type(exc).__name__}: {exc}) and no session root was "
+            f"supplied by the caller"
+        ) from exc
+    if cwd == Path(cwd.anchor):
+        raise WorkspaceResolutionError(
+            f"refusing to use {cwd} as the operator workspace: a detached daemon "
+            f"chdirs to the filesystem root, so this is what an unresolved "
+            f"workspace looks like, not a project. Pass an explicit session root "
+            f"(mem.project_root / life_dir) from the caller."
+        )
+    # Same containment test as ``core.sandbox._is_forbidden``, applied to the
+    # workspace we are about to hand the Manager runner.
+    for root in forbidden_write_roots():
+        real = os.path.realpath(root)
+        if str(cwd) == real or str(cwd).startswith(real.rstrip("/") + os.sep):
+            raise WorkspaceResolutionError(
+                f"refusing to use {cwd} as the operator workspace: it lies under "
+                f"{real}, which a Manager runner must never be able to write. "
+                f"Pass an explicit session root from the caller."
+            )
+    return cwd
+
+
 def _operator_workspace(chat_state: dict[str, Any], session_root: Any) -> Path:
     fallback = (
         Path(session_root).expanduser()
         if session_root
-        else Path.cwd()
+        else _cwd_as_workspace()
     )
     sid = str(chat_state.get("session_id") or "").strip()
     global_root = chat_state.get("global_root")
@@ -204,7 +312,7 @@ def _ensure_manager_runner(chat_state: dict[str, Any], mem: Any) -> Any:
             ),
             plan_mode="auto",
             plan_model=None,
-            max_rounds=500,
+            max_rounds=0,
             # The Manager uses the same persisted workdir as Planner, Engineer,
             # and Reviewer. Session state remains rooted at session_root.
             workdir=workspace_key,
@@ -591,6 +699,9 @@ class PreparedManagerHandoff:
             "domain": getattr(division, "domain", ""),
             "route": "team",
             "workflow_mode": workflow_mode,
+            "require_independent_review": bool(
+                getattr(division, "require_independent_review", True)
+            ),
             "lifetime": lifetime,
             "continuous": continuous,
             "open_ended": open_ended,
@@ -618,7 +729,20 @@ class PreparedManagerHandoff:
         _emit_manager_event(self.mem, event)
 
     def failed(self, exc: Exception) -> None:
-        _emit_manager_event(self.mem, {
+        raw_cause = str(getattr(exc, "cause", "") or str(exc)).strip()
+        phase = str(getattr(exc, "phase", "") or "").strip()
+        contract_field = str(
+            getattr(exc, "contract_field", "") or ""
+        ).strip()
+        if not phase:
+            if isinstance(exc, TimeoutError):
+                phase = "timeout"
+            elif "execution_task" in raw_cause:
+                phase = "contract"
+                contract_field = contract_field or "execution_task"
+            else:
+                phase = "backend"
+        event = {
             "type": "life.manager.intent.failed",
             "agent_layer": "manager",
             "intent_id": self.intent_id,
@@ -626,8 +750,19 @@ class PreparedManagerHandoff:
             "source": "user",
             "objective": self.body,
             "error": f"{type(exc).__name__}: {exc}",
+            "phase": phase,
+            "cause": raw_cause,
+            "contract_field": contract_field,
+            "attempts": max(1, int(getattr(exc, "attempts", 1) or 1)),
+            "model_reply_snippet": str(
+                getattr(exc, "model_reply_snippet", "") or ""
+            )[:300],
+            "backend_error": str(
+                getattr(exc, "backend_error", "") or ""
+            ).strip(),
             "text": "manager intent interpretation failed",
-        })
+        }
+        _emit_manager_event(self.mem, event)
 
     def superseded(self) -> None:
         _emit_manager_event(self.mem, {
@@ -714,6 +849,26 @@ def prepare_manager_execution_task(
             open_ended=configured_open_ended,
         )
         prepared.failed(exc)
+        from .classification_contract import MANAGER_CONTRACT_MISMATCH_THRESHOLD
+        from .domain_author import ManagerClassificationContractError
+
+        if (
+            isinstance(exc, ManagerClassificationContractError)
+            and exc.consecutive_count >= MANAGER_CONTRACT_MISMATCH_THRESHOLD
+        ):
+            message = _manager_model_capability_mismatch_message(
+                model_id=exc.model_id,
+                clause=exc.clause,
+                consecutive_count=exc.consecutive_count,
+            )
+            _publish_manager_model_capability_mismatch(
+                mem,
+                text=message,
+                model_id=exc.model_id,
+                clause=exc.clause,
+                consecutive_count=exc.consecutive_count,
+            )
+            raise ManagerModelCapabilityMismatchError(message) from exc
         if isinstance(exc, ManagerHandoffError):
             raise
         raise ManagerHandoffError(f"Manager handoff failed: {exc}") from exc
@@ -860,6 +1015,9 @@ def _bounded_handoff_division(
         stages=list(prepared.manager.plan_stages(vertical)),
         workflow_mode=resolve_workflow_mode(project_root),
         execution_task=prepared.execution_task,
+        require_independent_review=bool(
+            getattr(prepared.decision, "require_independent_review", True)
+        ),
     )
 
 
@@ -1039,9 +1197,12 @@ def manager_triage(mem: Any, body: str, chat_state: dict[str, Any],
     """
     if route is None and mission_is_running(mem):
         route = "simple"
+    from ..provider_integrations.authorization_retry import BackendLoginRequired
+
     runner = (ensure_runner or _ensure_manager_runner)(chat_state, mem)
     if runner is None or not hasattr(runner, "chat_reply_if_conversational"):
         return None
+    chat_state.pop("_self_delivery", None)
     captured: list[str] = []
     empty_reply = (
         "[Manager reply unavailable] The SELF turn completed without an assistant "
@@ -1208,6 +1369,10 @@ def manager_triage(mem: Any, body: str, chat_state: dict[str, Any],
         ):
             triage_kwargs["root_task_id"] = root_task_id
         if runner.chat_reply_if_conversational(**triage_kwargs):
+            outcome = getattr(runner, "last_chat_outcome", None)
+            delivery = getattr(outcome, "delivery", None)
+            if isinstance(delivery, dict):
+                chat_state["_self_delivery"] = delivery
             if mode == "inspect":
                 chat_state["last_thread_id"] = getattr(runner, "last_thread_id", None)
             return captured[0] if captured else _empty_reply_for_outcome()
@@ -1221,10 +1386,14 @@ def manager_triage(mem: Any, body: str, chat_state: dict[str, Any],
             ):
                 chat_state["last_thread_id"] = getattr(runner, "last_thread_id", None)
                 return captured[0] if captured else _empty_reply_for_outcome()
+        except BackendLoginRequired:
+            raise
         except Exception as exc:  # noqa: BLE001 — triage failure
             if is_pre_provider_refusal_error(exc):
                 return _pre_provider_refusal_reply(exc, body)
             return None
+    except BackendLoginRequired:
+        raise
     except Exception as exc:  # noqa: BLE001 — triage failure: bias to task
         if is_pre_provider_refusal_error(exc):
             return _pre_provider_refusal_reply(exc, body)
@@ -1259,6 +1428,7 @@ __all__ = [
     "_accepts_parameter",
     "_MANAGER_RUNNER_UNAVAILABLE",
     "ManagerHandoffError",
+    "ManagerModelCapabilityMismatchError",
     "ManagerHandoffSupersededError",
     "PreparedManagerHandoff",
     "_derive_session_name",

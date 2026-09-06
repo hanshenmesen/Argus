@@ -99,9 +99,6 @@ through another expensive semantic review.
 - [ ] Make the task's resolved workdir the sole source for vertical, stage, policy, and
       artifact resolution. Add a real replay covering a parent campaign repository plus
       a nested target worktree.
-- [ ] Add a configurable Planner grounding budget (tool calls and wall time). Once the
-      Brief plus inspected facts are sufficient for a legal task, Planner must delegate;
-      extending the budget requires a named missing fact.
 - [ ] Cache unchanged read-only tool results within one planning cycle and surface
       `unchanged since last read` instead of re-reading identical files.
 - [ ] Give each stage one primary deliverable and a direct host-authored task shape.
@@ -138,9 +135,6 @@ safest common behavior: collecting evidence and making local implementation twea
 
 **Work packages**
 
-- [ ] Add explicit work kinds: `scope`, `algorithm_discovery`, `environment_setup`,
-      `engineering_optimization`, `validation`, and `delivery`. Stage admission uses the
-      typed work kind, not keywords in task prose.
 - [ ] Route scope to a Scope Engineer that pins the API, editable surface, hardware,
       oracle, benchmark, and read-only reference boundaries in one mission.
 - [ ] Route `discover` to an Algorithm Scientist. It must derive the current equations
@@ -748,8 +742,8 @@ human inspection, debugging, Git-style recovery, and Agent tool access.
    trace; land canonical-workdir stage resolution, MissionBrief, repeated-read reuse,
    bounded grounding, direct scope delegation, and deterministic uncontested stage
    advancement as separate focused changes.
-2. **After P0-05 canary success:** implement P1-07 specialist work kinds and role
-   routing, then replay the FLA Scope → Discover → Prototype path.
+2. **After P0-05 canary success:** implement P1-07 specialist role routing, then replay
+   the FLA Scope → Discover → Prototype path.
 3. **Next:** implement P1-08 candidate portfolio and tiered evidence so exploration
    remains cheap and delivery selects the strongest comparable candidate.
 4. **Continuously:** use P2-03 metrics and the existing P2-02 evaluation matrix to

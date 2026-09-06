@@ -112,20 +112,63 @@ def normalize_stage_for_project(
     stage: str | None,
     *,
     require_known: bool = False,
+    vertical: str = "",
 ) -> str:
-    """Canonicalize a stage name using the active vertical's aliases."""
+    """Canonicalize a stage using the chosen or active vertical's aliases."""
     normalized = _normalize_stage(stage)
-    aliases = _active_vertical_stage_aliases(project_root)
+    if vertical:
+        from ..verticals._base import load_vertical_contract
+
+        contract = load_vertical_contract(vertical, project_root=project_root)
+        aliases = contract.stage_aliases or {}
+    else:
+        aliases = _active_vertical_stage_aliases(project_root)
     seen: set[str] = set()
     while normalized in aliases and normalized not in seen:
         seen.add(normalized)
         normalized = _normalize_stage(aliases[normalized])
     if require_known:
-        order, _items = _active_vertical_checklist_defs(project_root)
+        if vertical:
+            order = contract.stage_order
+        else:
+            order, _items = _active_vertical_checklist_defs(project_root)
         known = {_normalize_stage(item) for item in order}
         if normalized not in known:
             return ""
     return normalized
+
+
+def migrate_legacy_research_stage(project_root: Path | str) -> bool:
+    """Persist the canonical-stage mapping for one legacy research state."""
+    root = Path(project_root)
+    payload = read_pipeline_state(root)
+    if str(payload.get("vertical") or "").strip().lower() != "research":
+        return False
+    order, _items = _active_vertical_checklist_defs(root)
+    canonical = tuple(_normalize_stage(stage) for stage in order)
+    raw = _normalize_stage(payload.get("current_stage"))
+    mapped = normalize_stage_for_project(root, raw)
+    stages = payload.get("stages")
+    stage_keys = {
+        _normalize_stage(key)
+        for key in stages
+    } if isinstance(stages, dict) else set()
+    legacy_shape = bool(stage_keys - set(canonical))
+    if mapped not in canonical or (raw == mapped and not legacy_shape):
+        return False
+    payload["current_stage"] = mapped
+    payload["stages"] = {
+        stage: {"status": "in_progress" if stage == mapped else "pending"}
+        for stage in canonical
+    }
+    payload.setdefault("selected_idea", None)
+    payload["current_verdict"] = "mapped_stage_requires_current_review"
+    payload["next_action"] = (
+        f"Resume in {mapped} and satisfy its current checklist; legacy completion "
+        "does not certify this stage."
+    )
+    write_pipeline_state(root, payload)
+    return True
 
 
 def current_stage(project_root: Path | str = ".") -> str:
@@ -324,6 +367,16 @@ def _set_stage(
             # code I am running?" — record the answer instead of making the next
             # operator reconstruct it from process archaeology.
             prev_record["completion_contract_source"] = str(framework_source_root())
+        snapshot_root = Path(evidence_root) if evidence_root is not None else root
+        try:
+            from ..core.manuscript_snapshot import manuscript_snapshot
+
+            snapshot = manuscript_snapshot(snapshot_root)
+            if snapshot["sha256"]:
+                prev_record["manuscript_snapshot"] = snapshot
+                prev_record["manuscript_project_root"] = str(snapshot_root.resolve())
+        except Exception:  # noqa: BLE001 - non-paper stages have no manuscript
+            pass
 
     skipped_stages: list[str] = []
     if direction in {"advance", "complete"}:
@@ -419,6 +472,15 @@ def _set_stage(
             "rolled_back_by": by,
         })
 
+    if str(payload.get("vertical") or "").strip().lower() == "research":
+        payload.setdefault("selected_idea", None)
+        if direction == "complete":
+            payload["current_verdict"] = "certified"
+            payload["next_action"] = "none"
+        else:
+            payload["current_verdict"] = "in_progress"
+            payload["next_action"] = f"Continue the current {target} stage."
+
     state_path = write_pipeline_state(root, payload)
     _sync_status_stage(Path(evidence_root or root), target)
     return str(state_path)
@@ -510,6 +572,14 @@ def rollback_stage(
     ``stage_history`` log is written too.
     """
 
+    from .vertical_select import resolve_vertical
+
+    if resolve_vertical(project_root) == "research":
+        raise ValueError(
+            "research stages are forward-only; schedule repair work in the "
+            "current stage"
+        )
+
     return _set_stage(
         project_root,
         target_stage=target_stage,
@@ -536,6 +606,8 @@ def reset_stage_for_replacement_intent(
     superseded objective's downstream statuses are downgraded and the target is
     made actionable immediately.
     """
+    from .vertical_select import resolve_vertical
+
     return _set_stage(
         project_root,
         target_stage=target_stage,
@@ -543,7 +615,7 @@ def reset_stage_for_replacement_intent(
         by=reset_by,
         direction="reset",
         downgrade_downstream=True,
-        legacy_rollback_history=True,
+        legacy_rollback_history=resolve_vertical(project_root) != "research",
         evidence_root=evidence_root,
     )
 
@@ -579,11 +651,11 @@ def complete_final_stage(
     appears nowhere in this codebase.
 
     So: completion is refused off the final stage unless the caller says, in
-    this argument, that it has the standing to complete early. The Manager
-    passes it when ``direct`` workflow mode is resolved, which is the one
-    legitimate early-completion path and matches the flag
-    ``final_stage_completion_decision`` already takes. Everyone else — every
-    agent that can ``import argus_skill`` — now gets a ``ValueError``.
+    this argument, that it has the standing to complete early *and* the Manager
+    persisted ``direct`` workflow mode. Direct work has no staged artifact
+    contract to validate; its independent Reviewer verdict is the evidence
+    checked by the Manager before this primitive. Final-stage and staged writes
+    continue through the vertical completion validator.
 
     This is a lock, not a signature. ``completed_by`` remains free text and the
     contract fingerprint remains recomputable by anyone who can read the
@@ -596,27 +668,33 @@ def complete_final_stage(
     cur = _normalize_stage(current_stage(project_root))
     if cur not in order:
         raise ValueError(f"current stage {cur!r} is not in the active vertical")
-    if cur != order[-1] and not allow_early_completion:
+    from .vertical_select import resolve_vertical, resolve_workflow_mode
+
+    vertical = resolve_vertical(project_root)
+    early_completion = cur != order[-1] and allow_early_completion
+    if early_completion:
+        early_completion = resolve_workflow_mode(project_root) == "direct"
+    if cur != order[-1] and not early_completion:
         raise ValueError(
             f"cannot complete at {cur!r}: it is not the final stage of the "
             f"active vertical ({order[-1]!r}), and early completion was not "
-            f"authorized. Remaining: {', '.join(order[order.index(cur) + 1:])}. "
+            f"authorized by direct workflow. Remaining: "
+            f"{', '.join(order[order.index(cur) + 1:])}. "
             "Advance through them, or pass allow_early_completion=True if the "
             "workflow mode genuinely permits stopping here."
         )
-    _ensure_stage_completion(
-        project_root,
-        cur,
-        evidence_root=evidence_root,
-    )
+    if not early_completion:
+        _ensure_stage_completion(
+            project_root,
+            cur,
+            evidence_root=evidence_root,
+        )
     from ..verticals._base import (
         load_vertical,
         vertical_completion_contract_version,
     )
-    from .vertical_select import resolve_vertical
 
     try:
-        vertical = resolve_vertical(project_root)
         completion_contract_version = vertical_completion_contract_version(
             load_vertical(vertical, project_root=project_root)
         )
@@ -955,13 +1033,15 @@ def format_stage_checklist(
     scope_norm = (scope or "").strip().lower().replace("-", "_")
     if role_norm == "reviewer" and scope_norm == "bounded":
         framing = (
-            "You are the L2 reviewer for a bounded mission. Verify the mission's "
+            "You are reviewing one task within a larger project. Verify the task's "
             "explicit acceptance criteria and only the checklist items materially "
-            "touched by this mission. Unrelated open items belong to later bounded "
-            "missions: report them honestly, but do not use them to keep this "
-            "mission running. Reply `done` when this bounded objective is satisfied; "
-            "the Manager separately keeps the project stage on HOLD until every "
-            "stage item is certified. Do not run any `validate-*` shell command — "
+            "touched by this task, as a senior colleague would: what did it set "
+            "out to establish, and does the evidence establish it? Unrelated open "
+            "items belong to later tasks: report them honestly, but do not use "
+            "them to keep this task running. Reply `done` when this task's "
+            "objective is satisfied; the Manager separately keeps the project "
+            "stage open until every stage item is met. Do not run any "
+            "`validate-*` shell command — "
             "there isn't one. Read the relevant artifacts yourself."
         )
     elif role_norm == "reviewer":

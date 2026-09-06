@@ -128,7 +128,7 @@ def _transaction_lock_path(project_root: Path) -> Path:
 def figure_manifest_transaction(project_root: Path):
     lock = _transaction_lock_path(project_root)
     lock.parent.mkdir(parents=True, exist_ok=True)
-    with portalocker.Lock(lock, mode="a+", timeout=30):
+    with portalocker.Lock(lock, mode="a+"):
         yield
 
 
@@ -300,7 +300,7 @@ def validate_figure_provenance(
         return report
     try:
         payload = _load_manifest(manifest)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         report.issues.append(
             FigureProvenanceIssue("invalid_manifest", "", str(exc))
         )

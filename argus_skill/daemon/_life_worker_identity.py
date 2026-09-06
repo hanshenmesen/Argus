@@ -51,11 +51,13 @@ def _write_manager_handoff_identity(
     domain: str,
     continuous_generation: int,
     intent_id: str,
+    source_objective: str = "",
+    source_objective_path: str = "",
 ) -> bool:
     path = _manager_handoff_identity_path(runtime_root)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
     payload = {
-        "version": 2,
+        "version": 3,
         "objective_sha256": _objective_sha256(objective),
         "vertical": str(vertical).strip(),
         "domain": str(domain).strip(),
@@ -63,6 +65,12 @@ def _write_manager_handoff_identity(
         "intent_id": str(intent_id),
         "recorded_at": time.time(),
     }
+    source_path = str(source_objective_path or "").strip()
+    if source_path:
+        payload["source_objective_path"] = str(
+            Path(source_path).expanduser().resolve()
+        )
+        payload["source_objective_sha256"] = _objective_sha256(source_objective)
     try:
         tmp.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -87,9 +95,66 @@ def _read_manager_handoff_identity(runtime_root: Path) -> dict[str, Any] | None:
         )
     except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
         return None
-    if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
+    if not isinstance(payload, dict) or payload.get("version") not in {1, 2, 3}:
         return None
     return payload
+
+
+def _refresh_file_backed_objective_for_resume(
+    *,
+    cfg: LifeWorkerConfig,
+    runtime_root: Path,
+    state: ContinuousConfigState,
+) -> bool:
+    """Promote a changed file-backed objective into a fresh Manager handoff.
+
+    A normal ``--resume-continuous`` launch reuses the Manager-clean execution
+    objective persisted in ``continuous.json``. When that handoff records the
+    operator's original ``--objective-file``, compare the current file before
+    adopting it. A changed file becomes an explicit replacement objective;
+    unchanged or stale metadata keeps the fast crash-recovery path.
+    """
+    if (
+        getattr(cfg, "continuous", False)
+        or not getattr(cfg, "resume_continuous", False)
+        or not state.enabled
+    ):
+        return False
+    identity = _read_manager_handoff_identity(runtime_root)
+    if not _manager_handoff_identity_matches(
+        identity,
+        objective=state.objective,
+        vertical=str(identity.get("vertical") or "") if identity else "",
+        domain=str(identity.get("domain") or "") if identity else "",
+        generation=state.generation,
+    ):
+        return False
+    source_path = str((identity or {}).get("source_objective_path") or "").strip()
+    expected_sha = str(
+        (identity or {}).get("source_objective_sha256") or ""
+    ).strip()
+    if not source_path or len(expected_sha) != 64:
+        return False
+    path = Path(source_path).expanduser()
+    try:
+        objective = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        log.warning(
+            "daemon: file-backed continuous objective is unreadable; "
+            "keeping persisted Manager handoff (%s)",
+            path,
+        )
+        return False
+    if not objective or _objective_sha256(objective) == expected_sha:
+        return False
+    cfg.continuous = True
+    cfg.continuous_objective = objective
+    cfg.continuous_objective_file = path.resolve()
+    log.info(
+        "daemon: objective file changed; requesting a fresh Manager handoff (%s)",
+        path,
+    )
+    return True
 
 
 def _legacy_manager_handoff_identity(
@@ -303,7 +368,8 @@ def _preflight_route_on_codex(route: str) -> bool:
     EN: Uses the SAME canonical resolution as the role runners
     (``core.knobs.resolve_role_backend``: ``ARGUS_SKILL_{ROLE}_BACKEND`` →
     ``ARGUS_SKILL_RUNNER_BACKEND`` → ``ARGUS_SKILL_LIFE_BACKEND`` → persisted
-    knob store → codex). A role pinned to copilot/claude/opencode/pi authenticates through
+    knob store → the default this call site names, which is codex — see the
+    comment on the resolve below). A role pinned to copilot/claude/opencode/pi authenticates through
     its OWN CLI (the copilot subscription / claude), NOT the ``model_api`` vault
     — so probing its Azure route is a FALSE gate. Reading the resolver (not raw
     ``os.environ``) is load-bearing: a non-interactive launcher (the web
@@ -313,7 +379,8 @@ def _preflight_route_on_codex(route: str) -> bool:
     vault. The persisted ``/backend`` switch is honoured for exactly this case.
     Unknown/typo'd values fall back to codex so the safety probe is preserved.
     中文：与角色 runner 用同一套规范解析（``resolve_role_backend``：角色 env →
-    RUNNER_BACKEND → LIFE_BACKEND → 持久化 knob → codex）。读解析后的后端而非裸
+    RUNNER_BACKEND → LIFE_BACKEND → 持久化 knob → 本调用点显式传入的默认值，
+    此处为 codex）。读解析后的后端而非裸
     ``os.environ`` 是关键：web/tmux 这类非交互启动器不 source ``.bashrc``，只写在
     交互 shell 里的 copilot 选择在这里就看不见，daemon 会误探并崩在 codex 金库上；
     持久化的 ``/backend`` 切换正是为这种情况兜底。未知值回退 codex 保留安全探测。
@@ -329,13 +396,17 @@ def _preflight_route_on_codex(route: str) -> bool:
     from ..core.knobs import resolve_role_backend
 
     role = route if route in ("engineer", "reviewer", "planner", "manager", "curator") else ""
-    chosen = resolve_role_backend(role)
-    if not chosen:
-        chosen = BACKEND_CODEX
+    # default=BACKEND_CODEX: this is a SAFETY gate — answering "yes, codex" only
+    # keeps the vault probe armed, while answering "no" would skip it. When
+    # nothing is configured the run will itself land on codex, so keeping the
+    # probe is both the correct and the conservative answer. Same reason the
+    # unknown-value branch below returns True.
+    chosen = resolve_role_backend(role, default=BACKEND_CODEX)
     if str(chosen).strip().lower() not in {
         "codex",
         "copilot",
         "claude",
+        "cursor",
         "opencode",
         "pi",
         "grok",

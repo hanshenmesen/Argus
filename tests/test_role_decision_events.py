@@ -11,23 +11,41 @@ from argus_skill.core.role_decision import (
 from argus_skill.engineer.round_execution import _engineer_decision_message
 
 
-def test_extracts_decision_from_nested_backend_event() -> None:
+def test_does_not_extract_decision_from_nested_tool_result() -> None:
     marker = encode_role_decision(
         "planner",
         {"project_done": True, "reason": "complete", "tasks": []},
     )
     raw_event = json.dumps({"type": "tool.result", "content": marker})
 
-    decisions = extract_role_decisions([raw_event])
+    assert extract_role_decisions([raw_event]) == []
+
+
+def test_extracts_marked_decision_with_redundant_closing_brace() -> None:
+    marker = encode_role_decision(
+        "planner",
+        {"project_done": False, "reason": "continue", "tasks": []},
+    )
+
+    decisions = extract_role_decisions([marker + "}"])
 
     assert decisions == [{
         "role": "planner",
         "payload": {
-            "project_done": True,
-            "reason": "complete",
+            "project_done": False,
+            "reason": "continue",
             "tasks": [],
         },
     }]
+
+
+def test_rejects_marked_decision_with_trailing_prose() -> None:
+    marker = encode_role_decision(
+        "planner",
+        {"project_done": False, "reason": "continue", "tasks": []},
+    )
+
+    assert extract_role_decisions([marker + " trailing prose"]) == []
 
 
 def test_does_not_treat_unmarked_tool_json_as_a_role_decision() -> None:
@@ -46,7 +64,7 @@ def test_does_not_treat_unmarked_tool_json_as_a_role_decision() -> None:
     assert extract_role_decisions([raw_event]) == []
 
 
-def test_adapter_preserves_process_decision_without_final_message() -> None:
+def test_adapter_does_not_promote_tool_stdout_to_role_decision() -> None:
     marker = encode_role_decision(
         "reviewer",
         {"status": "done", "reason": "verified", "next_action": ""},
@@ -62,7 +80,7 @@ def test_adapter_preserves_process_decision_without_final_message() -> None:
     )
 
     assert result.agent_messages == []
-    assert result.role_decisions[0]["payload"]["status"] == "done"
+    assert result.role_decisions == []
 
 
 def test_engineer_process_decision_drives_existing_handoff() -> None:

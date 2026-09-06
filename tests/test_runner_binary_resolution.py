@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from argus_skill.agent_cli.agent_cli_runner import AgentCliRunner
 from argus_skill.agent_cli.runner_backend import (
     BACKEND_CODEX,
@@ -14,6 +16,7 @@ from argus_skill.agent_cli.runner_backend import (
     resolve_available_runner,
     resolve_runner_bin,
 )
+from argus_skill.core.knobs import resolve_runner_bin_setting
 
 
 def _write_runner_executable(path: Path, *, exit_code: int = 0) -> Path:
@@ -30,6 +33,48 @@ def _assert_same_path(actual: str | None, expected: Path) -> None:
     assert actual is not None
     assert os.path.normcase(str(Path(actual).resolve())) == os.path.normcase(
         str(expected.resolve())
+    )
+
+
+def test_persisted_runner_bin_stays_bound_to_its_backend() -> None:
+    persisted = {
+        "ARGUS_SKILL_RUNNER_BACKEND": "dsh",
+        "ARGUS_SKILL_RUNNER_BIN": "/opt/bin/dsh",
+    }
+
+    assert (
+        resolve_runner_bin_setting(
+            backend="copilot",
+            env={},
+            persisted=persisted,
+        )
+        == ""
+    )
+    assert (
+        resolve_runner_bin_setting(
+            backend="dsh",
+            env={},
+            persisted=persisted,
+        )
+        == "/opt/bin/dsh"
+    )
+    assert (
+        resolve_runner_bin_setting(
+            env={"ARGUS_SKILL_RUNNER_BACKEND": "copilot"},
+            persisted=persisted,
+        )
+        == ""
+    )
+    assert (
+        resolve_runner_bin_setting(
+            backend="opencode",
+            env={},
+            persisted={
+                "ARGUS_SKILL_RUNNER_BACKEND": "opencod",
+                "ARGUS_SKILL_RUNNER_BIN": "/opt/bin/opencode",
+            },
+        )
+        == "/opt/bin/opencode"
     )
 
 
@@ -149,13 +194,26 @@ def test_existing_codex_never_falls_back_on_runtime_failure(
     _assert_same_path(runner_bin, codex)
 
 
-def test_unknown_backend_typo_does_not_fall_back(
+def test_unknown_backend_typo_is_rejected_not_coerced(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """A typo'd backend must fail loudly, not become codex.
+
+    This test used to assert ``resolve_available_runner("codexx") ==
+    (BACKEND_CODEX, "codex")`` — i.e. it pinned the silent coercion in place.
+    Under that behaviour an operator who mistyped ``ARGUS_SKILL_*_BACKEND``
+    got a run that looked healthy while executing on a provider they never
+    chose, and nothing anywhere named the value they had actually typed.
+    """
     _write_runner_executable(tmp_path / "copilot")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("PATH", str(tmp_path))
 
-    assert resolve_available_runner("codexx") == (BACKEND_CODEX, "codex")
+    with pytest.raises(ValueError) as excinfo:
+        resolve_available_runner("codexx")
+    message = str(excinfo.value)
+    assert "codexx" in message
+    # and it must tell the operator what they could have typed instead
+    assert "copilot" in message

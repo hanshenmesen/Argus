@@ -272,7 +272,14 @@ def test_cli_process_starts_in_its_own_posix_session(_fake_copilot, monkeypatch)
         options=RunnerOptions(),
         run_label="stream-test",
     )
-    assert _fake_copilot["start_new_session"] is (runner_mod.os.name != "nt")
+    if runner_mod.os.name == "nt":
+        assert _fake_copilot["creationflags"] & runner_mod.subprocess.CREATE_NO_WINDOW
+        startup = _fake_copilot["startupinfo"]
+        assert startup is not None
+        assert startup.dwFlags & runner_mod.subprocess.STARTF_USESHOWWINDOW
+        assert startup.wShowWindow == runner_mod.subprocess.SW_HIDE
+    else:
+        assert _fake_copilot["start_new_session"] is True
 
 
 def test_callback_exception_never_breaks_the_turn(_fake_copilot, monkeypatch) -> None:
@@ -448,16 +455,27 @@ def test_engineer_turn_wall_clock_default_and_override(monkeypatch) -> None:
         "router-classify",
         "simple-1",
         "chat-1",
+        "self-debug",
+        "self-implement",
+        "self-micro",
+        "self-review",
+        "self-synthesize",
     ],
 )
-def test_manager_turn_wall_clock_is_bounded_by_default(monkeypatch, run_label: str) -> None:
+def test_manager_turn_wall_clock_is_unbounded_by_default(monkeypatch, run_label: str) -> None:
     monkeypatch.delenv("ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS", raising=False)
 
-    assert _turn_wall_clock_seconds(run_label) == 300
+    assert _turn_wall_clock_seconds(run_label) == 0
 
     monkeypatch.setenv("ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS", "45")
     assert _turn_wall_clock_seconds(run_label) == 45
     monkeypatch.setenv("ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS", "0")
+    assert _turn_wall_clock_seconds(run_label) == 0
+
+
+@pytest.mark.parametrize("run_label", ["planner-bounded-plan", "planner-preview"])
+def test_planner_turn_wall_clock_is_unbounded(monkeypatch, run_label: str) -> None:
+    monkeypatch.setenv("ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS", "1")
     assert _turn_wall_clock_seconds(run_label) == 0
 
 

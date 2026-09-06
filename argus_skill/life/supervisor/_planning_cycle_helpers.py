@@ -13,6 +13,7 @@ requests and the persisted research-target completion gate; they have no
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..memory import BacklogItem
@@ -73,8 +74,15 @@ def _render_revision_request(
 def _research_project_done_issue(
     project_root: object,
     journal_entries: list[Any],
+    *,
+    current_signature: str = "",
+    evidence_root: object | None = None,
 ) -> str:
-    """Require a current-target final Reviewer ``done`` before Planner success."""
+    """Require final review for the state's target and current execution files.
+
+    ``project_root`` owns the target contract; a daemon's manuscript may live
+    separately under ``evidence_root``.
+    """
     from ...core.research_contract import (
         research_target_contract,
         resolve_research_target_level,
@@ -97,6 +105,13 @@ def _research_project_done_issue(
     if target_contract.required and target_level is None:
         return "missing_research_target_level"
     target_set_at = resolve_research_target_set_at(project_root) or 0.0
+    candidate_root = Path(
+        str(evidence_root if evidence_root is not None else project_root)
+    )
+    submission_candidate_exists = any(
+        (candidate_root / relative).is_file()
+        for relative in ("paper/main.tex", "paper/main.pdf")
+    )
     for entry in reversed(journal_entries):
         if str(getattr(entry, "kind", "") or "") not in {
             "mission_complete",
@@ -116,6 +131,35 @@ def _research_project_done_issue(
             str(extra.get("scope") or "").strip().lower() == "final_submission"
             and extra.get("final_submission_certified") is True
         ):
+            if submission_candidate_exists:
+                certified_signature = str(
+                    extra.get("final_submission_signature") or ""
+                )
+                if not certified_signature:
+                    continue
+                if not current_signature:
+                    from ..terminal_state import build_project_state_signature
+
+                    current_signature = build_project_state_signature(
+                        project_root=candidate_root,
+                        state_root=Path(str(project_root)),
+                    )
+                if certified_signature != current_signature:
+                    continue
+            manuscript_binding = extra.get("manuscript_snapshot")
+            if (
+                (candidate_root / "paper/main.tex").is_file()
+                and not isinstance(manuscript_binding, dict)
+            ):
+                continue
+            if isinstance(manuscript_binding, dict):
+                try:
+                    from ...core.manuscript_snapshot import manuscript_review_status
+
+                    if manuscript_review_status(extra, candidate_root).get("status") != "current":
+                        continue
+                except Exception:  # noqa: BLE001 - unreadable binding fails closed
+                    continue
             return ""
     if target_level is None:
         return ""
@@ -172,11 +216,11 @@ def _staged_goal_completion_issue(project_root: object) -> str:
                 "to restamp it"
             )
         return (
-            f"{vertical} final-stage Goal Gate is not Reviewer-certified "
+            f"{vertical} final stage is not Reviewer-certified "
             f"({detail}{f'; {reason}' if reason else ''}){remedy}"
         )
     except Exception:  # noqa: BLE001
-        return "staged Goal Gate could not be resolved"
+        return "staged completion could not be resolved"
 
 
 def goal_gate_task_title(project_root: object) -> str:
@@ -195,7 +239,7 @@ def goal_gate_task_title(project_root: object) -> str:
     return (
         f"Finish and certify the {stage} stage"
         if stage
-        else "Complete and certify the current Goal Gate"
+        else "Finish and certify the current stage"
     )
 
 
@@ -210,7 +254,10 @@ class _PlanCycleState:
         # Set by the intake/gate phase.
         self.operator_messages: list[str] = []
         self.fresh_operator_messages: list[str] = []
+        self.had_operator_messages = False
+        self.operator_context_revision: int = 0
         self.revision_active_items: list[BacklogItem] = []
+        self.revision_witness_active_item_ids: list[str] = []
         self.expected_plan_id: str = ""
         self.expected_plan_version: int = 0
         self.manager_intent: Any = None
@@ -223,6 +270,7 @@ class _PlanCycleState:
         self.existing_items: list[BacklogItem] = []
         self.seen_signatures: dict[tuple[str, ...], BacklogItem] = {}
         self.active_base_signatures: dict[tuple[str, ...], BacklogItem] = {}
+        self.active_node_keys: dict[str, BacklogItem] = {}
         self.terminal_blocker_fingerprints: dict[str, BacklogItem] = {}
         self.recent_failures: dict[Any, Any] = {}
         self.added_titles: list[str] = []
@@ -232,6 +280,7 @@ class _PlanCycleState:
         self.skipped_certification_reproposal_reasons: list[str] = []
         self.skipped_recent_failure_titles: list[str] = []
         self.skipped_subagent_family_failure_titles: list[str] = []
+        self.skipped_task_feedback: list[dict[str, str]] = []
         self.new_plan_id: str = ""
         self.new_plan_version: int = 1
         self.key_map: dict[str, str] = {}

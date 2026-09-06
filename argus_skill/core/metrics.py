@@ -21,6 +21,7 @@ from .event_catalog import canonical_event_type, event_spec
 METRICS_FILE = "metrics.jsonl"
 METRICS_LOCK_FILE = "metrics.lock"
 METRICS_SCHEMA_VERSION = 1
+# Rotation/retention bounds telemetry storage, not task execution.
 DEFAULT_METRICS_MAX_BYTES = 16 * 1024 * 1024
 DEFAULT_METRICS_RETENTION_DAYS = 7
 DEFAULT_METRICS_MAX_ARCHIVES = 14
@@ -30,7 +31,7 @@ _LOCKS_GUARD = threading.Lock()
 
 _WEB_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
 _PROVIDERS = frozenset(
-    {"codex", "copilot", "claude", "opencode", "pi", "grok", "qoder", "dsh", "memory"}
+    {"codex", "copilot", "claude", "cursor", "opencode", "pi", "grok", "qoder", "dsh", "memory"}
 )
 _CALL_STATUSES = frozenset({"completed", "error", "denied"})
 _PRICING_STATUSES = frozenset({"priced", "partial", "unpriced", "not_billed", "unknown"})

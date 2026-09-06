@@ -33,10 +33,11 @@ _BG_SUBAGENT_ADVISORY_ENV = "ARGUS_SKILL_BG_SUBAGENT_ADVISORY"
 _COMPACT_CONTINUATION_PROMPTS_ENV = "ARGUS_SKILL_COMPACT_CONTINUATION_PROMPTS"
 _ROLE_SESSION_MAX_TURNS_ENV = "ARGUS_SKILL_ROLE_SESSION_MAX_TURNS"
 _ROLE_SESSION_MAX_INPUT_TOKENS_ENV = "ARGUS_SKILL_ROLE_SESSION_MAX_INPUT_TOKENS"
+_NARRATIVE_REVIEW_ENFORCEMENT_ENV = "ARGUS_SKILL_NARRATIVE_REVIEW_ENFORCEMENT"
 _CONTINUE_WORK_SENTINEL = "CONTINUE_WORK:"
 _CONTINUE_WORK_MAX_CHARS = 500
-_DEFAULT_DECISION_PROGRESS_TIMEOUT_SECONDS = 30 * 60
-_RUNNER_DEFAULT_HARD_IDLE_SECONDS = 45 * 60
+_DEFAULT_DECISION_PROGRESS_TIMEOUT_SECONDS = 0
+_RUNNER_DEFAULT_HARD_IDLE_SECONDS = 0
 # Framework-owned fallback for ``EngineerConfig.live_search_stages``: the
 # research stage, where idea discovery / literature grounding happens. A
 # vertical that owns a different pipeline (math runs scope/solve/review and has
@@ -62,6 +63,11 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _narrative_review_enforcement() -> str:
+    raw = os.environ.get(_NARRATIVE_REVIEW_ENFORCEMENT_ENV, "shadow")
+    return "blocking" if raw.strip().lower() == "blocking" else "shadow"
 
 
 def parse_continue_work_request(message: str | None) -> str | None:
@@ -229,7 +235,8 @@ def _fit_stall_guard(threshold: int, budget: int) -> int:
 class SupervisedConfig:
     """Knobs for the round-loop control."""
 
-    max_rounds: int = 32
+    # Zero means no arbitrary round ceiling; explicit positive budgets still work.
+    max_rounds: int = 0
     # Keep the historical reviewed loop by default. Planner-classified
     # low-risk bounded work may opt into an Engineer self-review completion.
     require_independent_review: bool = True
@@ -251,12 +258,10 @@ class SupervisedConfig:
             _DEFAULT_DECISION_PROGRESS_TIMEOUT_SECONDS,
         )
     )
-    # Anti-livelock escalation — distinct from the stall guards above, which fire
-    # when the engineer is idle or the Reviewer classifies repeated rounds as
-    # nondecision work. A mission that makes evidence progress every round but
-    # never passes its gate would otherwise drift to ``max_rounds``.
-    # At ``soft_round_limit`` the reviewer is instructed to return ``blocked`` if
-    # the binding constraint is an external/unresolvable dependency. At
+    # Anti-livelock escalation — after ``soft_round_limit``, two consecutive
+    # Reviewer verdicts without ``forward_progress=true`` settle through the
+    # existing no-progress path. Any true verdict in that two-round window lets
+    # productive long work continue. At
     # ``hard_escalate_rounds`` the loop requires an explicit Reviewer progress
     # judgment: known progress (including a short bounded regression before the
     # stall threshold) may continue, while a missing signal ends the mission so
@@ -285,12 +290,22 @@ class SupervisedConfig:
     # ``<life_dir>/events.jsonl``). The reviewer runs in the project work-tree
     # and only sees the engineer's final summary, so it cannot otherwise tell
     # HOW a result was produced (hardcoded answer? skipped step? cheat method?
-    # faked metric?). When set, the reviewer prompt gains an execution-log
-    # audit section pointing here with grep recipes; empty string (memory
-    # backend / tests / unresolvable path) = legacy behaviour, no audit section,
-    # byte-for-byte unchanged. The engineer's shell commands land in the
-    # ``text`` field of each ``engineer.progress`` event in this file.
+    # faked metric?). When set, the reviewer prompt gains a one-line fallback
+    # pointer; empty string (memory backend / tests / unresolvable path) omits
+    # it. The engineer's shell commands still land in the ``text`` field of
+    # each ``engineer.progress`` event in this file.
     engineer_log_path: str = ""
+    # Prompt routing operation selected once from the active vertical/stage.
+    # Narrative editing forces a fresh Engineer context so review wording and
+    # authoring chronology cannot leak into the reader-facing pass.
+    engineer_operation: str = "mission"
+    narrative_mission_id: str = ""
+    narrative_snapshot_root: str = ""
+    # New semantic-loss/cold-read signals calibrate in shadow mode first.
+    # Set ARGUS_SKILL_NARRATIVE_REVIEW_ENFORCEMENT=blocking only after evals.
+    narrative_review_enforcement: str = field(
+        default_factory=_narrative_review_enforcement
+    )
     # Ordinary Markdown file edited directly by Engineer and Reviewer. None
     # disables the shared checkpoint for callers that intentionally opt out.
     checkpoint_path: Path | None = None
@@ -318,8 +333,8 @@ class SupervisedConfig:
         """Keep the round-budget guards reachable when ``max_rounds`` shrinks.
 
         ``stall_threshold`` / ``soft_round_limit`` / ``hard_escalate_rounds``
-        are ABSOLUTE round counts sized for the default ``max_rounds`` (32).
-        A specialized caller may explicitly lower the budget for one mission,
+        are absolute semantic thresholds. A specialized caller may explicitly
+        set a positive round budget for one mission,
         and a guard whose threshold is not strictly reachable within that
         budget can then never fire. Nothing reports this: the value stays in
         the config, is passed
@@ -328,11 +343,6 @@ class SupervisedConfig:
         Semantic stall is counted only from the Reviewer's structured
         ``FORWARD_PROGRESS=false`` judgment. The harness never derives it from
         verdict prose or filesystem activity.
-
-        ``_runtime_execute`` already performs the mirror-image coordination in
-        the unbounded direction (a progressive experiment matrix raises
-        ``max_rounds`` and explicitly zeroes both escalation guards). This does
-        the same for the bounded direction, generically.
 
         Rescaling preserves each guard's MEANING ("stop after this much
         fruitless work") expressed in the budget actually available:
@@ -344,8 +354,8 @@ class SupervisedConfig:
           final round, it is disabled rather than silently becoming a one-strike
           policy. Callers may still request ``stall_threshold=1`` explicitly
           when a two-round budget should stop after its first negative verdict.
-        * ``soft_round_limit`` advises the Reviewer partway through, so it
-          must also land strictly inside the budget.
+        * ``soft_round_limit`` enforces a two-verdict progress window after the
+          boundary, so it must land strictly inside the budget.
         * ``hard_escalate_rounds`` is the point where continuation must be backed
           by the Reviewer's explicit progress judgment. A missing signal ends
           with a planner-readable reason; reaching this boundary on the final

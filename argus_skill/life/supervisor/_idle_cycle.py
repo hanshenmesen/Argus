@@ -18,7 +18,7 @@ from ._constants import (
 )
 
 log = logging.getLogger(__name__)
-_DAEMON_IDLE_EXIT_DEFAULT_MINUTES = 30.0
+_DAEMON_IDLE_EXIT_DEFAULT_MINUTES = 0.0
 def _idle_exit_seconds() -> float:
     """Idle wall-clock (s) before a continuous daemon auto-exits; 0 = never."""
     raw = os.environ.get("ARGUS_SKILL_DAEMON_IDLE_EXIT_MIN", "").strip()
@@ -108,6 +108,22 @@ class IdleCycleMixin:
             if text:
                 out.append(text)
         if out:
+            try:
+                from ...manager.directive import record_operator_messages
+
+                # Persistence must not depend on routing: a message that cannot
+                # be classified right now is still recorded as plain steering.
+                try:
+                    manager = self._bound_manager()
+                except Exception:  # noqa: BLE001
+                    manager = None
+                record_operator_messages(
+                    self.memory.root,
+                    out,
+                    manager=manager,
+                )
+            except Exception:  # noqa: BLE001 - inbox delivery remains fail-soft
+                log.exception("could not persist operator steering ledger")
             self._emit({
                 "type": EventType.LIFE_INBOX_DRAINED,
                 "count": len(out),
@@ -163,7 +179,7 @@ class IdleCycleMixin:
         # In continuous mode, max_missions is not a hard cap — the
         # planner generates new work indefinitely until it declares
         # the project done. Only the host-global daily budget is enforced.
-        if not self.config.continuous:
+        if not self.config.continuous and self.config.budget.max_missions > 0:
             if self._missions_started >= self.config.budget.max_missions:
                 # Suppress the cap message when there's no held-back work.
                 # Treats "you asked for one mission, you got one" as silent
@@ -243,9 +259,21 @@ class IdleCycleMixin:
         """
         if not getattr(self.config, "continuous", False):
             return ""
-        cap = _idle_exit_seconds()
         idle_since = getattr(self, "_idle_since", None)
-        if cap <= 0 or idle_since is None:
+        if idle_since is None:
+            return ""
+        messages = self._drain_user_inbox()
+        if messages:
+            carryover = getattr(self, "_operator_guidance_carryover", None)
+            if carryover is None:
+                carryover = []
+                self._operator_guidance_carryover = carryover
+            carryover.extend(messages)
+            self._reset_idle_backoff()
+            self._emit_status("operator guidance woke the idle Planner")
+            return ""
+        cap = _idle_exit_seconds()
+        if cap <= 0:
             return ""
         if time.monotonic() - idle_since >= cap:
             return "idle_timeout"
@@ -285,7 +313,7 @@ class IdleCycleMixin:
                     str(getattr(item, "title", "")),
                     str(getattr(item, "status", "")),
                 )
-                for item in self.memory.backlog.all()
+                for item in self.memory.backlog.active()
             )
         except Exception:  # noqa: BLE001
             backlog = []

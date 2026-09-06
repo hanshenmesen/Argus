@@ -602,9 +602,10 @@ def test_acp_tool_updates_are_forwarded_as_progress_events(monkeypatch) -> None:
 
     structured = [json.loads(line) for line in emitted if line.startswith("{")]
     assert result.turn_completed
-    assert [event["type"] for event in structured] == ["tool.call", "tool.result"]
-    assert structured[0]["data"]["name"] == "Reading state.json"
-    assert structured[1]["data"]["content"] == "Reading state.json (completed)"
+    assert [event["type"] for event in structured] == ["session.start", "tool.call", "tool.result"]
+    assert structured[0]["data"]["sessionId"] == result.thread_id
+    assert structured[1]["data"]["name"] == "Reading state.json"
+    assert structured[2]["data"]["content"] == "Reading state.json (completed)"
     assert result.tool_activity_observed is True
 
 
@@ -612,9 +613,9 @@ def test_manager_prompt_has_independent_long_idle_timeout(monkeypatch) -> None:
     monkeypatch.delenv("ARGUS_SKILL_COPILOT_ACP_TIMEOUT_S", raising=False)
     monkeypatch.delenv("ARGUS_SKILL_COPILOT_ACP_MANAGER_TIMEOUT_S", raising=False)
 
-    assert copilot_acp._prompt_timeout("manager-frontdoor-classify") == 60.0
-    assert copilot_acp._prompt_timeout("simple-1") == 300.0
-    assert copilot_acp._prompt_timeout("chat-1") == 300.0
+    assert copilot_acp._prompt_timeout("manager-frontdoor-classify") == 0.0
+    assert copilot_acp._prompt_timeout("simple-1") == 0.0
+    assert copilot_acp._prompt_timeout("chat-1") == 0.0
 
     monkeypatch.setenv("ARGUS_SKILL_COPILOT_ACP_TIMEOUT_S", "17")
     monkeypatch.setenv("ARGUS_SKILL_COPILOT_ACP_MANAGER_TIMEOUT_S", "240")
@@ -825,7 +826,7 @@ def test_acp_soft_idle_heartbeat_resets_on_real_event_and_stops(monkeypatch) -> 
     assert len(snapshots) == count_at_completion  # completion stops heartbeats
 
 
-def test_acp_emits_staged_idle_alerts_before_cancelling(monkeypatch) -> None:
+def test_front_door_acp_emits_staged_idle_alerts_before_cancelling(monkeypatch) -> None:
     def _silent_script(req, _proc):
         if req.get("method") == "initialize":
             return [_init_ok(req)]
@@ -835,7 +836,10 @@ def test_acp_emits_staged_idle_alerts_before_cancelling(monkeypatch) -> None:
 
     proc = _FakeAcpProc(_silent_script)
     monkeypatch.setattr(copilot_acp.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(copilot_acp, "_CANCEL_GRACE_S", 0.01)
     client = CopilotAcpClient("copilot-bin")
+    terminated = []
+    monkeypatch.setattr(client, "_terminate_subprocess", terminated.append)
     emitted: list[str] = []
     options = _Opt()
     options.watchdog_soft_idle_seconds = 0.02
@@ -847,7 +851,7 @@ def test_acp_emits_staged_idle_alerts_before_cancelling(monkeypatch) -> None:
         prompt="remain silent",
         resume_thread_id=None,
         options=options,
-        run_label="simple-1",
+        run_label="manager-frontdoor-classify",
         emit=emitted.append,
     )
 
@@ -861,6 +865,7 @@ def test_acp_emits_staged_idle_alerts_before_cancelling(monkeypatch) -> None:
     ]
     assert "hard idle timeout" in str(result.fatal_error).lower()
     assert any(row.get("method") == "session/cancel" for row in proc.written)
+    assert terminated == [proc]
 
 
 def test_acp_timeout_tracks_inactivity_not_total_turn_time(monkeypatch) -> None:

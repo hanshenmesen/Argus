@@ -111,6 +111,7 @@ def _file_content_digest(path: Path) -> bytes:
         if not path.is_file():
             return b"missing-or-non-file"
         size = path.stat().st_size
+        # Large-file head/tail sampling bounds RAM in this status fingerprint.
         if size <= 4 * 1024 * 1024:
             raw = path.read_bytes()
         else:
@@ -168,7 +169,6 @@ def _git_project_digest(
             cwd=project_root,
             check=True,
             capture_output=True,
-            timeout=30,
         ).stdout.strip()
         status_raw = subprocess.run(
             [
@@ -181,7 +181,6 @@ def _git_project_digest(
             cwd=project_root,
             check=True,
             capture_output=True,
-            timeout=30,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return b"git-state-unavailable"
@@ -190,7 +189,6 @@ def _git_project_digest(
     digest.update(b"git-terminal-state-v1\0")
     digest.update(tree)
     digest.update(b"\0")
-    count = 0
     for status, path_text in _git_status_records(status_raw):
         if _ignored_project_path(path_text, extra_prefixes=extra_prefixes):
             continue
@@ -200,10 +198,6 @@ def _git_project_digest(
         digest.update(b"\0")
         digest.update(_file_content_digest(project_root / path_text))
         digest.update(b"\0")
-        count += 1
-        if count >= 2000:
-            digest.update(b"changed-path-limit")
-            break
     return digest.digest()
 
 
@@ -215,7 +209,6 @@ def _fallback_project_digest(
     """Small-tree fallback for non-git workspaces and unit-test fixtures."""
     digest = hashlib.sha256()
     digest.update(b"fallback-terminal-state-v1\0")
-    count = 0
     try:
         for dirpath, dirnames, filenames in os.walk(project_root):
             relative_dir = Path(dirpath).relative_to(project_root)
@@ -243,33 +236,36 @@ def _fallback_project_digest(
                 digest.update(b"\0")
                 digest.update(_file_content_digest(path))
                 digest.update(b"\0")
-                count += 1
-                if count >= 2000:
-                    digest.update(b"file-limit")
-                    return digest.digest()
     except OSError:
         digest.update(b"walk-unavailable")
     return digest.digest()
 
 
-def _review_files(artifact_root: Path) -> list[Path]:
+def _review_files(
+    artifact_root: Path,
+    *,
+    state_root: Path | None = None,
+) -> list[Path]:
     """Find canonical review files without descending into environments/logs."""
+    try:
+        from ..skills.vertical_select import resolve_vertical
+
+        if resolve_vertical(state_root or artifact_root) == "research":
+            current = artifact_root / "paper" / "REVIEW.md"
+            return [current] if current.is_file() else []
+    except Exception:  # noqa: BLE001 - generic discovery remains the fallback
+        pass
     found: list[Path] = []
     try:
         for dirpath, dirnames, filenames in os.walk(artifact_root):
-            relative_dir = Path(dirpath).relative_to(artifact_root)
-            depth = len(relative_dir.parts)
             dirnames[:] = [
                 name
                 for name in sorted(dirnames)
                 if name not in _IGNORED_TOP_LEVEL
                 and not name.endswith(".egg-info")
-                and depth < 4
             ]
             if "REVIEW.md" in filenames:
                 found.append(Path(dirpath) / "REVIEW.md")
-                if len(found) >= 100:
-                    break
     except OSError:
         return []
     return sorted(found)
@@ -298,14 +294,14 @@ def build_terminal_idle_signature(
     from ..core.pipeline_state import read_pipeline_state
 
     try:
-        digest.update(_json_bytes(read_pipeline_state(artifact_root)))
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        digest.update(_json_bytes(read_pipeline_state(state_root or artifact_root)))
+    except (OSError, ValueError):
         digest.update(b"pipeline-state-unavailable")
     digest.update(b"\0")
 
-    for path in _review_files(artifact_root):
+    for path in _review_files(project_root, state_root=state_root or artifact_root):
         try:
-            relative = path.relative_to(artifact_root).as_posix()
+            relative = path.relative_to(project_root).as_posix()
         except ValueError:
             relative = str(path)
         digest.update(relative.encode("utf-8", errors="surrogateescape"))

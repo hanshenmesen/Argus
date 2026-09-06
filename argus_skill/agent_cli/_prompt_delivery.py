@@ -21,6 +21,7 @@ from .runner_backend import (
     BACKEND_OPENCODE,
     BACKEND_PI,
     CLAUDE_FAMILY,
+    runner_child_environment,
 )
 
 _OPENCODE_CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
@@ -227,48 +228,48 @@ class PromptDeliveryMixin:
         prepared.insert(prompt_index, prompt)
         return prepared, None, None
 
-    def _child_env(self, options) -> dict[str, str] | None:
-        if not options.sandbox_mode and not options.isolate_workdir:
+    def _child_env(
+        self,
+        options,
+        *,
+        executable: str | None = None,
+    ) -> dict[str, str] | None:
+        """Build a child environment and repair Node-backed npm wrappers.
+
+        A desktop GUI can discover ``%APPDATA%\\npm\\codex.cmd`` even when it
+        inherited a stale PATH without Node.  Keep existing backend-specific
+        isolation intact, then give a verified Node runtime directory to that
+        batch wrapper only when it needs one.
+        """
+        env: dict[str, str] | None = None
+        if self.backend == BACKEND_OPENCODE:
+            if options.disable_tools:
+                env = _opencode_no_tools_env()
+            elif options.sandbox_mode == "read-only":
+                env = _opencode_read_only_env()
+            elif options.dangerous_yolo or options.full_auto:
+                env = _opencode_full_access_env()
+        if env is None and not options.sandbox_mode and not options.isolate_workdir:
             # Normally the child inherits our environment untouched. Copilot is
             # the exception: left alone it writes every session, log and
             # store row into the operator's personal ~/.copilot, which on a
             # 7x24 host is tens of thousands of Argus sessions burying their own
             # history. Relocate the working state, change nothing else.
             if self.backend == BACKEND_COPILOT:
-                return apply_copilot_home(dict(os.environ))
-            if self.backend == BACKEND_PI:
-                return _apply_pi_automation_env(dict(os.environ))
-            if (
-                self.backend == BACKEND_OPENCODE
-                and (options.dangerous_yolo or options.full_auto)
-            ):
-                return _opencode_full_access_env()
-            if self.backend == BACKEND_DSH:
-                return _apply_dsh_env(
-                    dict(os.environ), options, self.agent_bin
-                )
-            return None
-        if self.backend == BACKEND_OPENCODE and options.disable_tools:
-            return _opencode_no_tools_env()
-        if (
-            self.backend == BACKEND_OPENCODE
-            and options.sandbox_mode == "read-only"
-        ):
-            return _opencode_read_only_env()
-        if (
-            self.backend == BACKEND_OPENCODE
-            and (options.dangerous_yolo or options.full_auto)
-        ):
-            env = _opencode_full_access_env()
-        else:
+                env = apply_copilot_home(dict(os.environ))
+            elif self.backend == BACKEND_PI:
+                env = _apply_pi_automation_env(dict(os.environ))
+            elif self.backend == BACKEND_DSH:
+                env = _apply_dsh_env(dict(os.environ), options, self.agent_bin)
+        if env is None and (options.sandbox_mode or options.isolate_workdir):
             env = sandboxed_child_env()
-        if self.backend == BACKEND_COPILOT:
-            apply_copilot_home(env)
-        elif self.backend == BACKEND_PI:
-            _apply_pi_automation_env(env)
-        if self.backend == BACKEND_DSH:
-            _apply_dsh_env(env, options, self.agent_bin)
-        if options.isolate_workdir:
+            if self.backend == BACKEND_COPILOT:
+                apply_copilot_home(env)
+            elif self.backend == BACKEND_PI:
+                _apply_pi_automation_env(env)
+            if self.backend == BACKEND_DSH:
+                _apply_dsh_env(env, options, self.agent_bin)
+        if env is not None and options.isolate_workdir:
             secret_markers = (
                 "TOKEN",
                 "SECRET",
@@ -302,7 +303,11 @@ class PromptDeliveryMixin:
             env["GH_CONFIG_DIR"] = str(
                 Path(tempfile.gettempdir()) / "argus-no-gh-auth"
             )
-        return env
+        repaired = runner_child_environment(
+            executable or getattr(self, "agent_bin", ""),
+            env=env,
+        )
+        return repaired if repaired is not None else env
 
 
 _DSH_ARGV_PROMPT_LIMIT_BYTES = 90_000
@@ -338,7 +343,11 @@ def _apply_dsh_env(
             env["ARGUS_DSH_MODEL"] = model_id
     elif model:
         env["ARGUS_DSH_MODEL"] = model
-    if getattr(options, "sandbox_mode", None) == "read-only":
+    disable_tools = bool(getattr(options, "disable_tools", False))
+    read_only = getattr(options, "sandbox_mode", None) == "read-only"
+    if disable_tools:
+        env["ARGUS_DSH_DISABLE_TOOLS"] = "1"
+    if read_only:
         env["DSH_PERMISSION_MODE"] = "read-only"
     else:
         env["DSH_PERMISSION_MODE"] = "danger-full-access"

@@ -10,6 +10,21 @@ ROLE_DECISION_PREFIX = "ARGUS_ROLE_DECISION="
 _ROLES = frozenset({"manager", "planner", "engineer", "reviewer"})
 
 
+def _decode_json_value(raw: str) -> Any | None:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    try:
+        decoded, end = json.JSONDecoder().raw_decode(raw)
+    except json.JSONDecodeError:
+        return None
+    trailing = raw[end:].strip()
+    if trailing and not set(trailing) <= {"}", "]", "`"}:
+        return None
+    return decoded
+
+
 def encode_role_decision(role: str, payload: dict[str, Any]) -> str:
     """Encode one decision for the Host event stream."""
     normalized_role = str(role or "").strip().lower()
@@ -25,36 +40,23 @@ def encode_role_decision(role: str, payload: dict[str, Any]) -> str:
 
 
 def extract_role_decisions(values: Iterable[Any]) -> list[dict[str, Any]]:
-    """Extract decisions from assistant messages or nested JSON event lines."""
+    """Extract direct decision events from assistant-authored values.
+
+    Tool-result envelopes are deliberately opaque here. A marker printed by a
+    tool is evidence the role saw, not a decision authored by the role.
+    """
     decisions: list[dict[str, Any]] = []
 
-    def visit(value: Any, *, allow_envelope: bool = False) -> None:
+    def visit(value: Any) -> None:
         if isinstance(value, dict):
             if (
-                allow_envelope
-                and value.get("role") in _ROLES
+                value.get("role") in _ROLES
                 and isinstance(value.get("payload"), dict)
             ):
                 decisions.append(value)
-                return
-            for nested in value.values():
-                visit(nested)
-            return
-        if isinstance(value, list):
-            for nested in value:
-                visit(nested)
             return
         if not isinstance(value, str):
             return
-
-        stripped = value.strip()
-        if stripped.startswith(("{", "[")):
-            try:
-                decoded = json.loads(stripped)
-            except json.JSONDecodeError:
-                pass
-            else:
-                visit(decoded)
 
         for line in value.splitlines():
             marker = line.find(ROLE_DECISION_PREFIX)
@@ -66,9 +68,8 @@ def extract_role_decisions(values: Iterable[Any]) -> list[dict[str, Any]]:
                 .strip("`")
                 .strip()
             )
-            try:
-                decision = json.loads(raw)
-            except json.JSONDecodeError:
+            decision = _decode_json_value(raw)
+            if decision is None:
                 continue
             if (
                 isinstance(decision, dict)
@@ -78,36 +79,33 @@ def extract_role_decisions(values: Iterable[Any]) -> list[dict[str, Any]]:
                 decisions.append(decision)
 
     for value in values:
-        visit(value, allow_envelope=isinstance(value, dict))
+        visit(value)
     return decisions
 
 
 def latest_role_decision(result: Any, role: str) -> dict[str, Any] | None:
-    """Return the latest decision for ``role`` from a runner result."""
+    """Return the first decision event for ``role`` from its own output."""
     normalized_role = str(role or "").strip().lower()
     values: list[Any] = list(getattr(result, "role_decisions", None) or [])
     values.extend(getattr(result, "agent_messages", None) or [])
-    values.extend(getattr(result, "stdout_lines", None) or [])
-    for decision in reversed(extract_role_decisions(values)):
+    for decision in extract_role_decisions(values):
         if decision["role"] == normalized_role:
             return dict(decision["payload"])
     return None
 
 
-def decision_event_instruction(role: str, payload_example: str) -> str:
-    """Render the small shared process-decision instruction."""
+def decision_footer_instruction(example: str) -> str:
+    """Ask for natural reasoning followed by the minimum actionable footer."""
     return (
-        "First send this clear decision event:\n"
-        f"{ROLE_DECISION_PREFIX}"
-        f'{{"role":"{role}","payload":{payload_example}}}\n'
-        "The Host saves this event. Any later response is plain language and is "
-        "not parsed. Detail-dependent operator options set `requires_note:true`."
+        "Reason naturally, then end with only the Host actions below "
+        "(replace examples; omit unused lines):\nDecision:\n"
+        + str(example or "").strip()
     )
 
 
 __all__ = [
     "ROLE_DECISION_PREFIX",
-    "decision_event_instruction",
+    "decision_footer_instruction",
     "encode_role_decision",
     "extract_role_decisions",
     "latest_role_decision",

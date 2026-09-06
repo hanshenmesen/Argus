@@ -11,6 +11,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+from ._process_control import background_subprocess_kwargs
+
 
 class OpenCodeRecoveryMixin:
     """Reconstructs the current-turn events an interrupted OpenCode CLI missed."""
@@ -42,18 +44,16 @@ class OpenCodeRecoveryMixin:
             exported = subprocess.run(
                 command,
                 cwd=options.working_dir or None,
-                env=self._child_env(options),
+                env=self._child_env(options, executable=command[0]),
                 text=True,
                 # UTF-8 avoids a cp1252 decode crash on Windows when the exported
                 # session JSON contains non-Latin-1 model output.
                 encoding="utf-8",
                 errors="replace",
                 capture_output=True,
-                timeout=30.0,
                 check=False,
+                **background_subprocess_kwargs(),
             )
-        except subprocess.TimeoutExpired:
-            return [], "OpenCode session export timed out after an incomplete event stream."
         except OSError as exc:
             return [], f"OpenCode session export failed: {exc}"
         if exported.returncode != 0:
@@ -189,13 +189,14 @@ class OpenCodeRecoveryMixin:
             located = subprocess.run(
                 command,
                 cwd=options.working_dir or None,
-                env=self._child_env(options),
+                env=self._child_env(options, executable=command[0]),
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 capture_output=True,
                 timeout=10.0,
                 check=False,
+                **background_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired:
             return None, "OpenCode database path lookup timed out."

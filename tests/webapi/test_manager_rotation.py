@@ -332,7 +332,7 @@ def test_manager_stream_announces_classification_before_model_call(
         assert fragments == [
             (
                 "phase",
-                {"role": "manager", "label": "Manager · classifying this message"},
+                {"role": "manager", "label": "Understanding your request…"},
             )
         ]
         return None, "simple"
@@ -433,6 +433,8 @@ def test_natural_language_abort_is_control_not_backlog_work(
     assert result["control"] == "abort"
     assert result["requested"] is True
     assert result["item_id"] == item.id
+    assert result["reply"] == "我已要求当前任务停止。"
+    assert item.id not in result["reply"]
     assert len(memory.backlog.all()) == 1
     request = json.loads(
         (life / "running_item_abort.json").read_text(encoding="utf-8")
@@ -572,7 +574,10 @@ def test_natural_language_config_change_is_applied_inline(tmp_path: Path, monkey
     r2 = manager_bridge.manager_message("s-cfg00001", "how's it going?", global_root=tmp_path)
     assert r2["kind"] == "chat"
     assert r2["reply"] == "chatted"
-    assert triaged == ["how's it going?"]
+    # The follow-up turn reaches triage wrapped in prior-turn context; the
+    # current operator message rides at the end of the contextualized body.
+    assert len(triaged) == 1
+    assert triaged[0].endswith("how's it going?")
 
 
 def test_active_mission_config_change_is_still_applied_inline(

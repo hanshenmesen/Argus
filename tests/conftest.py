@@ -7,8 +7,7 @@ that does not set it writes into the DEVELOPER'S REAL ``~/.argus-skill``.
 That is not a cosmetic leak. Observed on this checkout: running
 ``tests/apps/test_cli_parser.py`` created real sessions named after the test's
 own objective string, spawned real daemons against the real home, and those
-daemons ran the real Manager — including its self-maintenance loop, whose
-Engineer then EDITED THE SOURCE CHECKOUT while the suite was running. The
+daemons ran the real Manager and Engineer against the source checkout. The
 spawned daemon also killed the pytest process partway through the file, so the
 run ended with no summary and every later failure was invisible.
 
@@ -73,24 +72,18 @@ def _isolate_argus_state_roots(
     monkeypatch.delenv("COPILOT_HOME", raising=False)
 
     monkeypatch.setenv("ARGUS_SKILL_HOME", str(root))
+    # Model resolution inspects Codex's provider config to decide whether an
+    # OpenAI model id is valid. Never let a developer's ~/.codex/config.toml
+    # change default-model assertions. CODEX_HOME remains overridable by tests
+    # that deliberately exercise a custom provider.
+    monkeypatch.setenv("CODEX_HOME", str(root / "codex-home"))
 
-    special = root / "special_prompts"
-    special.mkdir(parents=True, exist_ok=True)
-    # Seed one trusted directive so the lifetime entry gate passes and tests
-    # exercise what they actually target. 0644 is required: the trust check
-    # rejects group/world-writable files (the default umask yields 0664). A
-    # test that specifically exercises the missing-prompt gate points
-    # ARGUS_SKILL_SPECIAL_PROMPTS_DIR somewhere empty itself.
-    house_rules = special / "10-house-rules.md"
-    house_rules.write_text("Operational house rules for this box.\n", encoding="utf-8")
-    house_rules.chmod(0o644)
-    monkeypatch.setenv("ARGUS_SKILL_SPECIAL_PROMPTS_DIR", str(special))
-
-    # A test must never be able to hand a real daemon the developer's checkout
-    # as its self-maintenance source tree.
-    source = root / "source"
-    source.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("ARGUS_SKILL_SOURCE_ROOT", str(source))
+    # ARGUS_SKILL_SOURCE_ROOT deliberately stays UNSET (the loop above already
+    # dropped any developer-shell value). Setting it now ARMS the source-root
+    # startup preflight, so an ambient throwaway path would make every real
+    # daemon/WebAPI boot in the suite refuse startup; the self-maintenance
+    # machine that once read it as a maintenance source tree is gone. A test
+    # that exercises the preflight sets its own root.
 
 
 

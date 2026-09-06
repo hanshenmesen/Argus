@@ -165,7 +165,11 @@ def test_planner_structured_stage_request_advances_before_enqueue(
     pipeline = project_root / ".argus" / "PIPELINE_STATE.json"
     pipeline.parent.mkdir(parents=True)
     pipeline.write_text(
-        json.dumps({"vertical": "research", "current_stage": "plan"}),
+        json.dumps({"vertical": "research", "current_stage": "idea"}),
+        encoding="utf-8",
+    )
+    (project_root / "HANDOFF.md").write_text(
+        "# HANDOFF — IDEA\n\nThe idea is selected and ready to implement.",
         encoding="utf-8",
     )
     supervisor = _make_supervisor(
@@ -175,9 +179,9 @@ def test_planner_structured_stage_request_advances_before_enqueue(
             [
                 "PROJECT_DONE=false",
                 "REASON=run the real benchmark next",
-                "ADVANCE_TO_STAGE=benchmark",
-                "TASK_KEY=benchmark",
-                "TASK_TITLE=Run real benchmark",
+                "ADVANCE_TO_STAGE=experiment",
+                "TASK_KEY=experiment",
+                "TASK_TITLE=Run decisive experiment",
                 "TASK_OBJECTIVE=Execute the real public benchmark.",
             ]
         ),
@@ -186,9 +190,9 @@ def test_planner_structured_stage_request_advances_before_enqueue(
     supervisor.config.project_state_dir = project_root
 
     assert supervisor._plan_next_work() is True
-    assert json.loads(pipeline.read_text())["current_stage"] == "benchmark"
+    assert json.loads(pipeline.read_text())["current_stage"] == "experiment"
     item = supervisor.memory.backlog.all()[0]
-    assert "stage:benchmark" in item.tags
+    assert "stage:experiment" in item.tags
 
 
 def test_missing_parent_context_ref_is_dropped_without_rejecting_batch(
@@ -379,7 +383,7 @@ def test_dedup_uses_canonical_scope_and_acceptance_metadata(
             "TASK_ACCEPTANCE_CHECK=validator exits zero",
             "TASK_SCOPE=final_submission",
             "TASK_STAGE_CLOSING=false",
-            "TASK_REQUIRE_INDEPENDENT_REVIEW=false",
+            "TASK_REQUIRE_INDEPENDENT_REVIEW=true",
             "TASK_SKIP_STAGE_TRANSITION=false",
         ]
     )
@@ -421,7 +425,7 @@ def test_duplicate_prerequisite_key_maps_to_existing_backlog_item(
             "TASK_ACCEPTANCE_CHECK=input bundle exists",
             "TASK_SCOPE=bounded",
             "TASK_STAGE_CLOSING=false",
-            "TASK_REQUIRE_INDEPENDENT_REVIEW=false",
+            "TASK_REQUIRE_INDEPENDENT_REVIEW=true",
             "TASK_SKIP_STAGE_TRANSITION=false",
             "TASK_KEY=child",
             "TASK_DEPS=parent",
@@ -431,7 +435,7 @@ def test_duplicate_prerequisite_key_maps_to_existing_backlog_item(
             "TASK_ACCEPTANCE_CHECK=analysis report exists",
             "TASK_SCOPE=bounded",
             "TASK_STAGE_CLOSING=false",
-            "TASK_REQUIRE_INDEPENDENT_REVIEW=false",
+            "TASK_REQUIRE_INDEPENDENT_REVIEW=true",
             "TASK_SKIP_STAGE_TRANSITION=false",
         ]
     )

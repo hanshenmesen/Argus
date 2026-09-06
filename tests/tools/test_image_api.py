@@ -120,6 +120,61 @@ def test_windows_atomic_replace_retries_a_transient_sharing_violation(
     assert target.read_text(encoding="utf-8") == "new"
 
 
+@pytest.mark.parametrize(("platform_name", "attempt_count"), [("nt", 6), ("posix", 1)])
+def test_atomic_replace_propagates_persistent_permission_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+    attempt_count: int,
+) -> None:
+    source = tmp_path / "source.tmp"
+    target = tmp_path / "target.json"
+    source.write_text("new", encoding="utf-8")
+    target.write_text("old", encoding="utf-8")
+    attempts = 0
+    sleeps: list[float] = []
+
+    def denied(_source, _destination):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("cannot replace")
+
+    monkeypatch.setattr(image_api.os, "replace", denied)
+    monkeypatch.setattr(image_api.time, "sleep", sleeps.append)
+
+    with pytest.raises(PermissionError, match="cannot replace"):
+        image_api._atomic_replace(source, target, platform_name=platform_name)
+
+    assert attempts == attempt_count
+    assert len(sleeps) == attempt_count - 1
+    assert target.read_text(encoding="utf-8") == "old"
+    assert source.read_text(encoding="utf-8") == "new"
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_atomic_writes_clean_up_after_replace_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    json_output: bool,
+) -> None:
+    target = tmp_path / "image.json"
+    target.write_bytes(b"old")
+
+    def denied(_source, _destination):
+        raise OSError("cannot replace")
+
+    monkeypatch.setattr(image_api.os, "replace", denied)
+
+    with pytest.raises(OSError, match="cannot replace"):
+        if json_output:
+            image_api._atomic_write_json(target, {"value": "new"})
+        else:
+            image_api._atomic_write(target, b"new", force=True)
+
+    assert target.read_bytes() == b"old"
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_generate_image_writes_artifact_and_secret_free_sidecar(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

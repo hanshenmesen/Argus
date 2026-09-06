@@ -1,24 +1,31 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProjectRow } from '../api';
 import { Wordmark } from './Wordmark';
 import { StatusDot } from './primitives';
 import { ago, uptime } from '../lib/format';
-import { filterProjects } from '../../../core/src/projects';
+import { filterProjects, hasHumanProjectLabel } from '../../../core/src/projects';
 import type { ThemeMode } from './TopBar';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { DaemonSpendBadge } from './DaemonSpendBadge';
 import {
   faAnglesLeft,
   faAnglesRight,
+  faChevronDown,
   faEllipsis,
+  faFolder,
   faGear,
   faLanguage,
   faMoon,
+  faPlay,
   faSun,
 } from '@fortawesome/free-solid-svg-icons';
 import { useI18n } from '../i18n';
 
 type Scope = 'local' | 'all';
+
+function projectGroupLabel(path: string): string {
+  const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/);
+  return parts.at(-1) || path;
+}
 
 export function recommendedSidebarScope(
   projects: ProjectRow[],
@@ -42,6 +49,8 @@ export function Sidebar({
   onSelect,
   onPrefetch,
   onManage,
+  onResume,
+  resumingId,
   onOpenPanel,
   onNew,
   loading,
@@ -53,7 +62,6 @@ export function Sidebar({
   onToggleCollapse,
   themeMode,
   onCycleTheme,
-  expandedWidth = 256,
 }: {
   projects: ProjectRow[];
   activeId: string | null;
@@ -61,6 +69,8 @@ export function Sidebar({
   onSelect: (id: string) => void;
   onPrefetch?: (id: string) => void;
   onManage: (id: string) => void;
+  onResume?: (id: string) => void;
+  resumingId?: string | null;
   onOpenPanel: (p: 'doctor' | 'config' | 'identity') => void;
   onNew: () => void;
   loading: boolean;
@@ -72,12 +82,12 @@ export function Sidebar({
   onToggleCollapse: () => void;
   themeMode: ThemeMode;
   onCycleTheme: () => void;
-  expandedWidth?: number;
 }) {
   const { locale, setLocale, t } = useI18n();
   const [scope, setScope] = useState<Scope>('local');
   const initialScopeResolved = useRef(false);
   const [query, setQuery] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const slim = collapsed && !mobileOpen;
   const normalizedLocalCwd = localCwd.trim();
   const localProjects = useMemo(
@@ -92,7 +102,8 @@ export function Sidebar({
     setScope(recommendedSidebarScope(projects, activeId, normalizedLocalCwd));
   }, [activeId, loading, normalizedLocalCwd, projects]);
   const scoped = scope === 'local' ? localProjects : projects;
-  const visible = query.trim() ? filterProjects(scoped, query) : scoped;
+  const rawVisible = query.trim() ? filterProjects(scoped, query) : scoped;
+  const visible = rawVisible;
   const grouped = useMemo(() => {
     if (scope === 'local') return visible.length > 0 ? [[normalizedLocalCwd || 'Local', visible] as const] : [];
     const groups = new Map<string, ProjectRow[]>();
@@ -106,16 +117,17 @@ export function Sidebar({
   }, [normalizedLocalCwd, scope, visible]);
   const themeIcon = themeMode === 'light' ? faSun : faMoon;
   const nextTheme = themeMode === 'light' ? 'dark' : 'light';
+  const groupIsCollapsed = (path: string) => collapsedGroups.has(path) && !query.trim();
 
   return (
     <aside
       data-state={slim ? 'collapsed' : 'expanded'}
-      style={{ '--sidebar-width': `${expandedWidth}px` } as CSSProperties}
-      className={`glass-panel glass-panel--side fixed inset-y-0 left-0 z-40 flex h-full shrink-0 flex-col border-r transition-[width,transform,visibility] duration-panel ease-panel lg:visible lg:static lg:z-auto lg:translate-x-0 ${
+      data-resizable-panel="left"
+      className={`glass-panel glass-panel--side fixed inset-y-0 left-0 z-50 flex h-full shrink-0 flex-col border-r transition-[width,transform,visibility] duration-panel ease-panel lg:visible lg:static lg:z-auto lg:translate-x-0 ${
         slim ? 'w-14' : 'w-64 lg:w-[var(--sidebar-width)]'
       } ${mobileOpen ? 'visible translate-x-0' : 'invisible -translate-x-full'}`}
     >
-      <div className={`flex h-12 shrink-0 items-center border-b border-line/50 ${slim ? 'justify-center' : 'justify-between px-4'}`}>
+      <div className={`chrome-seam-surface flex h-12 shrink-0 items-center border-b border-line/50 ${slim ? 'justify-center' : 'justify-between px-4'}`}>
         {slim ? (
           <Wordmark size={22} compact />
         ) : (
@@ -182,19 +194,54 @@ export function Sidebar({
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-3 scroll-thin">
+          <div className="mobile-scroll-region min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-3 scroll-thin">
             {loading && projects.length === 0 ? <div className="px-1 py-3 text-xs text-ink-faint">{t('common.loading')}</div> : null}
             {error ? (
               <button type="button" onClick={onRetry} className="mb-2 w-full rounded-md bg-err/5 px-3 py-2 text-left text-xs text-err">
                 {t('sidebar.refreshFailed')}
               </button>
             ) : null}
-            {!loading && !error && visible.length === 0 ? <div className="px-1 py-4 text-xs text-ink-faint">{t('sidebar.noSessions')}</div> : null}
+            {!loading && !error && visible.length === 0 ? (
+              <div className="px-1 py-4 text-xs text-ink-faint">
+                <div>{query.trim() ? t('sidebar.noMatches', { query: query.trim() }) : t('sidebar.noSessions')}</div>
+                {query.trim() ? (
+                  <button
+                    type="button"
+                    onClick={() => setQuery('')}
+                    className="mt-2 text-xs text-ink-dim underline underline-offset-2 hover:text-ink"
+                  >
+                    {t('sidebar.clearSearch')}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {grouped.map(([path, rows]) => (
               <section key={path} className="mb-4 last:mb-0">
-                <div className="mb-1 truncate px-1 font-mono text-xs text-ink-faint" title={path}>{path}</div>
-                {rows.map((project) => {
+                <button
+                  type="button"
+                  aria-expanded={!groupIsCollapsed(path)}
+                  title={path}
+                  onClick={() => setCollapsedGroups((current) => {
+                    const next = new Set(current);
+                    if (next.has(path)) next.delete(path);
+                    else next.add(path);
+                    return next;
+                  })}
+                  className="mb-1 flex h-7 w-full items-center gap-2 rounded-md px-1.5 text-left text-[11px] font-medium text-ink-faint hover:bg-bg/70 hover:text-ink-dim"
+                >
+                  <FontAwesomeIcon icon={faChevronDown} className={`h-2.5 w-2.5 transition-transform ${groupIsCollapsed(path) ? '-rotate-90' : ''}`} />
+                  <FontAwesomeIcon icon={faFolder} className="h-3 w-3" />
+                  <span className="min-w-0 flex-1 truncate">{projectGroupLabel(path)}</span>
+                  <span className="font-mono text-[10px]">{rows.length}</span>
+                </button>
+                {!groupIsCollapsed(path) ? rows.map((project) => {
                   const active = project.id === activeId;
+                  const hasHumanLabel = hasHumanProjectLabel(project);
+                  const name = hasHumanLabel
+                    ? (project.label || project.display_name || '').trim()
+                    : project.objective.trim() || project.id || t('sidebar.unnamedSession');
+                  const incompatible = project.daemon_alive && project.daemon_protocol_compatible === false;
+                  const resumable = !project.daemon_alive && project.last_active > 0 && Boolean(project.workdir?.trim());
                   return (
                     <div
                       key={project.id}
@@ -202,7 +249,7 @@ export function Sidebar({
                       onPointerEnter={() => {
                         if (!active) onPrefetch?.(project.id);
                       }}
-                      className={`session-card group relative mb-1 w-full rounded-md transition-colors duration-150 ease-panel ${
+                      className={`session-card group relative mb-0.5 h-14 w-full rounded-md transition-colors duration-150 ease-panel ${
                         active ? 'text-ink' : 'text-ink-dim hover:text-ink'
                       }`}
                     >
@@ -214,39 +261,56 @@ export function Sidebar({
                           if (!active) onPrefetch?.(project.id);
                         }}
                         aria-current={active ? 'page' : undefined}
-                        title={`${project.label || project.id}${project.objective ? ` — ${project.objective}` : ''}`}
-                        className="w-full min-w-0 px-3 py-2.5 pr-10 text-left"
+                        title={`${name}${!hasHumanLabel && name !== project.id ? ` · ${project.id}` : ''}${project.objective && project.objective !== name ? ` — ${project.objective}` : ''}`}
+                        className={`flex h-14 w-full min-w-0 flex-col justify-center px-2.5 text-left ${resumable ? 'pr-[4.75rem]' : 'pr-10'}`}
                       >
                         <div className="flex min-w-0 items-center gap-2">
-                          <StatusDot ok={project.daemon_alive} title={project.daemon_alive ? t('sidebar.daemonAlive') : t('sidebar.stopped')} />
-                          <span className="min-w-0 flex-1 truncate text-sm font-medium">{project.label || project.id}</span>
-                        </div>
-                        <div className="mt-1 flex min-w-0 items-center justify-between gap-2 pl-4 text-xs text-ink-faint">
-                          <span className="min-w-0 truncate">
-                            {project.daemon_alive ? t('sidebar.runningFor', { uptime: uptime(project.uptime_seconds) }) : ago(project.last_active)}
-                          </span>
-                          <DaemonSpendBadge
-                            settledUsd={project.spend_usd}
-                            knownUsd={project.known_cost_usd}
-                            status={project.spend_status}
-                            calls={project.usage_calls}
-                            premiumRequests={project.premium_requests}
-                            live={project.daemon_alive}
+                          <StatusDot
+                            ok={project.daemon_alive && !incompatible}
+                            title={incompatible ? t('sidebar.updateRequired') : project.daemon_alive ? t('sidebar.daemonAlive') : t('sidebar.stopped')}
                           />
+                          <span className="min-w-0 flex-1 truncate text-sm font-medium">{name}</span>
+                        </div>
+                        <div className="mt-1 min-w-0 truncate pl-3.5 text-[11px] text-ink-faint">
+                          <span className={`min-w-0 truncate ${incompatible ? 'text-warn' : ''}`}>
+                            {incompatible
+                              ? t('sidebar.updateRequired')
+                              : project.daemon_alive
+                                ? t('sidebar.runningFor', { uptime: uptime(project.uptime_seconds) })
+                                : ago(project.last_active)}
+                          </span>
                         </div>
                       </button>
+                      {resumable && onResume ? (
+                        <button
+                          type="button"
+                          disabled={resumingId != null}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onResume(project.id);
+                          }}
+                          aria-label={t('sidebar.resume')}
+                          title={t('sidebar.resumeHint', { workdir: project.workdir ?? '' })}
+                          className="absolute right-9 top-3 flex h-8 w-8 items-center justify-center rounded-md text-blue opacity-100 hover:bg-blue/10 disabled:opacity-40 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+                        >
+                          {resumingId === project.id ? '…' : <FontAwesomeIcon icon={faPlay} className="h-3 w-3" />}
+                        </button>
+                      ) : null}
                       <button
                         type="button"
-                        onClick={() => onManage(project.id)}
-                        aria-label={t('sidebar.manage', { name: project.label || project.id })}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onManage(project.id);
+                        }}
+                        aria-label={t('sidebar.manage', { name })}
                         title={t('sidebar.manageHint')}
-                        className="absolute right-1.5 top-1.5 flex h-8 w-8 items-center justify-center rounded-md text-ink-faint opacity-100 transition-opacity hover:bg-panel-raised hover:text-ink sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+                        className="absolute right-1 top-3 flex h-8 w-8 items-center justify-center rounded-md text-ink-faint opacity-100 transition-opacity hover:bg-panel-raised hover:text-ink sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
                       >
                         <FontAwesomeIcon icon={faEllipsis} className="h-4 w-4" />
                       </button>
                     </div>
                   );
-                })}
+                }) : null}
               </section>
             ))}
           </div>

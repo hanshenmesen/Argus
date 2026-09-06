@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from ..agent_cli._process_control import windows_hidden_subprocess_kwargs
 from ..core.daemon_lock import DaemonAlreadyRunning, acquire_global_daemon_lock
 from .state import (
     _daemon_log_path,
@@ -31,6 +32,31 @@ _DAEMON_PUBLISH_TIMEOUT_SECONDS = 5.0
 _WINDOWS_DAEMON_PUBLISH_TIMEOUT_SECONDS = 180.0
 _DAEMON_STABILITY_SECONDS = 0.5
 _DAEMON_POLL_INTERVAL_SECONDS = 0.1
+
+
+def _close_inherited_fds(workspace_lease_fd: int | None) -> None:
+    keep = {0, 1, 2}
+    if workspace_lease_fd is not None:
+        keep.add(workspace_lease_fd)
+    try:
+        names = os.listdir("/proc/self/fd")
+    except FileNotFoundError:
+        first = 3
+        if workspace_lease_fd is not None:
+            os.closerange(first, workspace_lease_fd)
+            first = workspace_lease_fd + 1
+        os.closerange(first, 4096)
+        return
+    for name in names:
+        try:
+            fd = int(name)
+        except ValueError:
+            continue
+        if fd not in keep:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _wait_for_stable_daemon_status(
@@ -85,7 +111,11 @@ def _windows_daemon_command(config: Any) -> list[str]:
         ]
     )
     if config.continuous:
-        command.extend(["--continuous", "--objective", config.continuous_objective])
+        objective_file = getattr(config, "continuous_objective_file", None)
+        if objective_file is not None:
+            command.extend(["--continuous", "--objective-file", str(objective_file)])
+        else:
+            command.extend(["--continuous", "--objective", config.continuous_objective])
     if config.resume_continuous:
         command.append("--resume-continuous")
     if not config.continuous_open_ended:
@@ -153,10 +183,10 @@ def _spawn_windows_background_process(
     # Unicode status glyphs and must not crash before publishing daemon status.
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
-    creationflags = (
-        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    )
+    spawn_options = windows_hidden_subprocess_kwargs()
+    spawn_options["creationflags"] = int(
+        spawn_options.get("creationflags", 0)
+    ) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with log_path.open("ab") as log_handle:
@@ -168,7 +198,7 @@ def _spawn_windows_background_process(
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 close_fds=True,
-                creationflags=creationflags,
+                **spawn_options,
             )
         deadline = time.monotonic() + _WINDOWS_DAEMON_PUBLISH_TIMEOUT_SECONDS
         exit_rc: int | None = None
@@ -386,22 +416,7 @@ def spawn_detached_process(
     # connections queue to a daemon that never accepts). The daemon opens every
     # fd it actually needs (pid lock, status sidecar, events) AFTER this point,
     # so dropping the inherited table is safe and correct daemonisation.
-    try:
-        _keep = {0, 1, 2}
-        if workspace_lease_fd is not None:
-            _keep.add(workspace_lease_fd)
-        for _name in os.listdir("/proc/self/fd"):
-            try:
-                _fd = int(_name)
-            except ValueError:
-                continue
-            if _fd not in _keep:
-                try:
-                    os.close(_fd)
-                except OSError:
-                    pass
-    except FileNotFoundError:  # /proc unavailable — bounded fallback
-        os.closerange(3, 4096)
+    _close_inherited_fds(workspace_lease_fd)
 
     logging.basicConfig(
         level=logging.INFO,

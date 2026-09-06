@@ -82,7 +82,8 @@ class SkillLoopConfig:
             True,
         )
     )
-    max_rounds: int = 32
+    # Zero means no wall-clock-independent ceiling; semantic stall guards still apply.
+    max_rounds: int = 0
     no_progress_threshold: int = 2
     # Anti-livelock thresholds threaded into SupervisedConfig: at
     # ``soft_round_limit`` the reviewer is told to escalate an unresolvable
@@ -270,8 +271,7 @@ class SkillLoop(
             objective_for_skill: str | None = None,
             review_objective: str | None = None,
             original_objective: str | None = None,
-            scope: str = "",
-            work_kind: str = "") -> LoopOutcome:
+            scope: str = "") -> LoopOutcome:
         """Run one mission end-to-end.
 
         ``task`` is the *full* prompt the engineer sees (typically a long
@@ -287,11 +287,31 @@ class SkillLoop(
         vertical_state_root = Path(self.config.vertical_state_root or workdir)
         run_id = self.config.session_id or f"run-{uuid.uuid4().hex}"
         from .roles.prompts import resolve_role_prompt
-        from .roles.prompts.engineer import mission_request
+        from .roles.prompts.engineer import MISSION, mission_request
+
+        routed_vertical = str(self.config.active_vertical or "").strip().lower()
+        if not routed_vertical:
+            from .skills.vertical_select import resolve_vertical
+
+            routed_vertical = resolve_vertical(vertical_state_root)
+        from .skills.stage_machine import current_stage
+
+        active_stage = current_stage(vertical_state_root)
+        engineer_operation = MISSION
+        if routed_vertical:
+            from .verticals._base import load_vertical_contract
+
+            engineer_operation = load_vertical_contract(
+                routed_vertical,
+                project_root=vertical_state_root,
+            ).engineer_operation(active_stage, default=MISSION)
         engineer_prompt_context = resolve_role_prompt(
             mission_request(
                 vertical_state_root,
-                vertical=self.config.active_vertical or None,
+                vertical=routed_vertical or None,
+                altitude_root=workdir,
+                stage=active_stage if engineer_operation != MISSION else None,
+                operation=engineer_operation,
             )
         )
         active_vertical = engineer_prompt_context.vertical
@@ -303,7 +323,6 @@ class SkillLoop(
         supervised = self._supervised_for_mission(
             vertical=active_vertical,
             project_root=vertical_state_root,
-            work_kind=work_kind,
         )
         if self.config.wiki_enabled:
             from .wiki.lifecycle import ensure_project_wiki
@@ -379,6 +398,8 @@ class SkillLoop(
                 checkpoint_path=self.config.checkpoint_path,
                 context_packet_path=self.config.context_packet_path,
                 engineer_log_path=self.config.engineer_log_path,
+                engineer_operation=engineer_operation,
+                narrative_mission_id=run_id,
                 operator_questions_allowed=self.config.operator_questions_allowed,
                 operator_question_policy_root=self.config.operator_question_policy_root,
             ),
@@ -416,14 +437,13 @@ class SkillLoop(
         project_root: Path,
         configured: frozenset[str],
         *,
-        work_kind: str = "",
         preserve_configured: bool = True,
     ) -> frozenset[str]:
         """Let the active vertical declare its own Engineer live-search stages.
 
         ``configured`` always retains the public ``frozenset`` API. Its private
-        construction provenance decides whether a work-kind-specific vertical
-        default may replace it; comparing values cannot distinguish an omitted
+        construction provenance decides whether a vertical default may replace
+        it; comparing values cannot distinguish an omitted
         default from an explicitly passed ``frozenset({"research"})``.
 
         Errors deliberately propagate. ``resolve_role_prompt`` above has already
@@ -446,7 +466,6 @@ class SkillLoop(
         contract = load_vertical_contract(vertical, project_root=project_root)
         return contract.live_search_stages(
             configured,
-            work_kind=work_kind,
             preserve_configured=preserve_configured,
         )
 
@@ -455,7 +474,6 @@ class SkillLoop(
         *,
         vertical: str,
         project_root: Path,
-        work_kind: str = "",
     ) -> SupervisedEngineer:
         """Return the SupervisedEngineer THIS mission should run on.
 
@@ -473,7 +491,6 @@ class SkillLoop(
             vertical,
             project_root,
             configured,
-            work_kind=work_kind,
             preserve_configured=engineer_config._live_search_stages_explicit,
         )
         if (

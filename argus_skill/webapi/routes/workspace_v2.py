@@ -13,7 +13,6 @@ import itertools
 import json
 import mimetypes
 import os
-import selectors
 import stat
 import subprocess
 import threading
@@ -99,7 +98,7 @@ def _inside(parent: Path, child: Path) -> bool:
 def _safe_root(raw: str) -> Path:
     resolved = _resolved_directory(raw)
     bases = _allowed_bases()
-    if not bases or not any(_inside(base, resolved) for base in bases):
+    if not any(_inside(base, resolved) for base in bases):
         raise HTTPException(status_code=400, detail="workspace root is outside the allowed data roots")
     return resolved
 
@@ -129,7 +128,7 @@ def _workspace_profiles(ctx: ServerContext, sid: str) -> list[dict[str, Any]]:
             continue
         add_profile({
             "id": f"project:{row_sid}",
-            "label": str(row.get("display_name") or row.get("label") or row_sid or root.name),
+            "label": str(row.get("display_name") or row.get("label") or row_sid),
             "path": str(root),
             "source": "project",
             "project_sid": row_sid,
@@ -401,8 +400,6 @@ def _atomic_write_confined_windows(
         raise HTTPException(status_code=400, detail="invalid output directory")
     temporary = f".{name}.tmp-{os.getpid()}-{time.time_ns()}"
     descriptor: int | None = None
-    target: Path | None = None
-    temporary_path: Path | None = None
     with contextlib.ExitStack() as stack:
         current = _windows_guard_directory_chain(root, stack)
         for raw_part in parts:
@@ -450,9 +447,8 @@ def _atomic_write_confined_windows(
         finally:
             if descriptor is not None:
                 os.close(descriptor)
-            if temporary_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    temporary_path.unlink()
+            with contextlib.suppress(FileNotFoundError):
+                temporary_path.unlink()
     return PurePosixPath(directory, name).as_posix()
 
 
@@ -555,100 +551,31 @@ def _git(root: Path, *args: str, max_bytes: int = 2 * 1024 * 1024) -> str:
         *args,
     ]
     process: subprocess.Popen[bytes] | None = None
-    selector: selectors.BaseSelector | None = None
     payload = bytearray()
-    truncated = timed_out = False
+    truncated = False
     try:
         process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=safe_env)
         assert process.stdout is not None
-        if os.name == "nt":
-            # Windows pipes cannot be registered with SelectSelector and Python
-            # 3.11 does not expose os.set_blocking there. Keep the same memory
-            # bound by reading on a daemon thread and killing Git at max_bytes.
-            reader_state = {"truncated": False}
-
-            def _read_stdout() -> None:
-                try:
-                    while len(payload) <= max_bytes:
-                        chunk = process.stdout.read(
-                            min(64 * 1024, max_bytes + 1 - len(payload))
-                        )
-                        if not chunk:
-                            return
-                        payload.extend(chunk)
-                        if len(payload) > max_bytes:
-                            reader_state["truncated"] = True
-                            with contextlib.suppress(Exception):
-                                process.kill()
-                            return
-                except OSError:
-                    return
-
-            reader = threading.Thread(target=_read_stdout, daemon=True)
-            reader.start()
-            reader.join(timeout=8.0)
-            if reader.is_alive():
-                timed_out = True
-                process.kill()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=.5)
-            if reader.is_alive():
-                with contextlib.suppress(OSError):
-                    process.stdout.close()
-                reader.join(timeout=.5)
-            truncated = reader_state["truncated"]
-        else:
-            selector = selectors.DefaultSelector()
-            os.set_blocking(process.stdout.fileno(), False)
-            selector.register(process.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + 8.0
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    process.kill()
-                    break
-                for key, _mask in selector.select(timeout=min(.1, remaining)):
-                    try:
-                        chunk = os.read(
-                            key.fileobj.fileno(),
-                            min(64 * 1024, max_bytes + 1 - len(payload)),
-                        )
-                    except BlockingIOError:
-                        chunk = b""
-                    if chunk:
-                        payload.extend(chunk)
-                        if len(payload) > max_bytes:
-                            truncated = True
-                            process.kill()
-                            break
-                if truncated:
-                    break
-                if process.poll() is not None:
-                    while len(payload) <= max_bytes:
-                        try:
-                            chunk = os.read(
-                                process.stdout.fileno(),
-                                min(64 * 1024, max_bytes + 1 - len(payload)),
-                            )
-                        except BlockingIOError:
-                            break
-                        if not chunk:
-                            break
-                        payload.extend(chunk)
-                    truncated = len(payload) > max_bytes
-                    break
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=.5)
+        # Bounded pipe reads work on Windows too, without selectors or reader threads.
+        while len(payload) <= max_bytes:
+            chunk = process.stdout.read(min(64 * 1024, max_bytes + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        truncated = len(payload) > max_bytes
+        if truncated:
+            process.kill()
     except (OSError, subprocess.SubprocessError):
         if process is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError):
                 process.kill()
         return ""
     finally:
-        if selector is not None:
-            selector.close()
-    if timed_out or process is None or (process.returncode not in {0, -9} and not truncated):
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            process.wait()
+    if process.returncode != 0 and not truncated:
         return ""
     text = bytes(payload[:max_bytes]).decode("utf-8", errors="replace")
     return text + ("\n… output truncated\n" if truncated else "")
@@ -674,7 +601,7 @@ def _github_status() -> dict[str, Any]:
         payload = json.loads(result.stdout or "{}")
         rows = payload.get("hosts", {}).get("github.com", [])
         active = next((row for row in rows if row.get("active")), rows[0] if rows else None)
-    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, AttributeError):
         active = None
     if not isinstance(active, dict):
         return {"authenticated": False, "host": "github.com", "login": "", "protocol": "", "scopes": []}
@@ -961,12 +888,11 @@ def register_workspace_v2_routes(app, ctx: ServerContext, server_mod) -> None:
         manuscript_path = body.manuscript_path or _latest_manuscript(workspace)
         if not manuscript_path:
             raise HTTPException(status_code=409, detail="no final manuscript was found in the approved project workspace")
-        if manuscript_path:
-            suffix = PurePosixPath(manuscript_path).suffix.lower()
-            if suffix not in {".tex", ".md", ".pdf"}:
-                raise HTTPException(status_code=415, detail="final manuscript must be TeX, Markdown, or PDF")
-            fd, _info = _open_confined_file(workspace, manuscript_path)
-            os.close(fd)
+        suffix = PurePosixPath(manuscript_path).suffix.lower()
+        if suffix not in {".tex", ".md", ".pdf"}:
+            raise HTTPException(status_code=415, detail="final manuscript must be TeX, Markdown, or PDF")
+        fd, _info = _open_confined_file(workspace, manuscript_path)
+        os.close(fd)
         created_at = time.time()
         request_id = f"fr-{time.time_ns()}"
         report_path = f"reviews/final_review_{request_id}.md"

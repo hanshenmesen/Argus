@@ -293,7 +293,7 @@ class PlanningCycleMixin(
         try:
             if any(
                 item.status in {"pending", "running"} and item.title == title
-                for item in self.memory.backlog.all()
+                for item in self.memory.backlog.active()
             ):
                 return None
         except Exception:  # noqa: BLE001
@@ -317,7 +317,6 @@ class PlanningCycleMixin(
         return TaskSpec(
             title=title,
             objective=objective,
-            impact_score=5,
             impact_area="throughput",
             evidence=f"live self-watched jobs: {job_ids}",
             hypothesis=(
@@ -427,11 +426,13 @@ class PlanningCycleMixin(
 
         from ...skills.stage_machine import current_stage
 
-        stage = current_stage(self._artifact_root()).strip().lower()
+        root = Path(self._artifact_root())
+        candidate_root = Path(self._project_workdir())
+        stage = current_stage(root).strip().lower()
         if not stage:
             return None
         items = sorted(
-            self.memory.backlog.all(),
+            self.memory.backlog.history(),
             key=lambda item: (float(item.finished_ts or 0), float(item.ts or 0)),
             reverse=True,
         )
@@ -492,6 +493,56 @@ class PlanningCycleMixin(
                     or not str(review.get("reason") or "").strip()
                 ):
                     continue
+                mission_scope = str(mission.get("scope") or "").strip().lower()
+                manuscript_binding = review.get("manuscript_snapshot")
+                if (
+                    mission_scope == "final_submission"
+                    and not isinstance(manuscript_binding, dict)
+                ):
+                    from ...core.stage_certificate import latest_stage_review
+
+                    stage_review = latest_stage_review(self.memory.root, stage)
+                    if (
+                        not isinstance(stage_review, dict)
+                        or str(stage_review.get("task_id") or "") != item.id
+                        or str(stage_review.get("review_status") or "") != "done"
+                        or Path(
+                            str(stage_review.get("project_root") or "")
+                        ).resolve()
+                        != candidate_root.resolve()
+                    ):
+                        continue
+                    manuscript_binding = stage_review.get("manuscript_snapshot")
+                    try:
+                        reviewed_at = float(stage_review.get("recorded_at") or 0.0)
+                        rendered_at = (candidate_root / "paper" / "main.pdf").stat().st_mtime
+                    except (OSError, TypeError, ValueError):
+                        continue
+                    if reviewed_at <= 0.0 or rendered_at > reviewed_at:
+                        continue
+                if mission_scope == "final_submission":
+                    if not isinstance(manuscript_binding, dict):
+                        continue
+                    try:
+                        from ...core.manuscript_snapshot import (
+                            manuscript_review_status,
+                        )
+
+                        if manuscript_review_status(
+                            {"manuscript_snapshot": manuscript_binding},
+                            candidate_root,
+                        ).get("status") != "current":
+                            continue
+                    except Exception:  # noqa: BLE001 - exact binding fails closed
+                        continue
+                    reviewed_signature = str(
+                        review.get("final_submission_signature") or ""
+                    )
+                    if (
+                        reviewed_signature
+                        and reviewed_signature != self._final_submission_signature()
+                    ):
+                        continue
                 return (
                     item,
                     SimpleNamespace(
@@ -502,8 +553,9 @@ class PlanningCycleMixin(
                             review.get("operator_question") or ""
                         ).strip(),
                         review_source="reviewer",
+                        manuscript_snapshot=manuscript_binding,
                     ),
-                    str(mission.get("scope") or ""),
+                    mission_scope,
                 )
             return None
         return None
@@ -553,7 +605,30 @@ class PlanningCycleMixin(
             "trigger": "reviewed_stage_empty_plan_reconciliation",
             "recovered_item_id": item.id,
         })
-        if decision.source == "manager_llm":
+        if (
+            decision.action == "complete"
+            and mission_scope.strip().lower() == "final_submission"
+        ):
+            manuscript_binding = getattr(review, "manuscript_snapshot", None)
+            if not isinstance(manuscript_binding, dict):
+                return ""
+            if not self._emit({
+                "type": EventType.LIFE_MISSION_COMPLETED,
+                "item_id": item.id,
+                "title": item.title,
+                "objective": item.objective,
+                "scope": "final_submission",
+                "independent_review_required": True,
+                "success": True,
+                "status": "done",
+                "summary": "Recovered the existing independent final certification.",
+                "final_submission_certified": True,
+                "final_submission_signature": self._final_submission_signature(),
+                "manuscript_snapshot": dict(manuscript_binding),
+                "certification_recovered": True,
+            }):
+                return ""
+        if decision.source in {"manager_llm", "stage_completion_gate_hold"}:
             outcome = dict(item.outcome)
             outcome["stage_certification"] = {
                 "advance": "certified",
@@ -853,7 +928,7 @@ class PlanningCycleMixin(
             if persisted is None:
                 return {}
             self._emit({
-                "type": "life.vertical.resolved",
+                "type": EventType.LIFE_VERTICAL_RESOLVED,
                 "vertical": persisted,
                 "profile_hint": "persisted",
                 "agent_layer": "planner",
@@ -861,9 +936,11 @@ class PlanningCycleMixin(
             return {"vertical": persisted}
 
         mgr = self._bound_manager()
-        from ...manager.directive import active_manager_directive_message
+        from ...core.operator_context import build_operator_context_block
 
-        directive = active_manager_directive_message(artifact_root)
+        directive, _operator_context_revision = build_operator_context_block(
+            "manager", artifact_root, consume_once=False
+        )
         selection_objective = "\n\n".join(
             part
             for part in (
@@ -913,7 +990,7 @@ class PlanningCycleMixin(
         except Exception:  # noqa: BLE001 - stage is prompt context only
             pass
         self._emit({
-            "type": "life.vertical.resolved",
+            "type": EventType.LIFE_VERTICAL_RESOLVED,
             "vertical": division.vertical,
             "profile_hint": "manager-per-mission",
             "agent_layer": "planner",
@@ -937,8 +1014,7 @@ class PlanningCycleMixin(
         project_done normalization, the no-new-tasks rejection, and finally
         backlog dedupe/enqueue/commit. Each phase mutates a shared
         ``_PlanCycleState`` scratch object and returns ``None`` to continue the
-        cycle, or a non-``None`` result that the caller should return
-        immediately.
+        cycle, or a non-``None`` result to return after applying task retirement.
         """
         state = _PlanCycleState(revision_request)
         for phase in (
@@ -956,7 +1032,11 @@ class PlanningCycleMixin(
         ):
             result = phase(state)
             if result is not None:
-                return result
+                break
+        if state.verdict is not None and not state.verdict.error:
+            self._pc_retire_tasks(state)
+        if result is not None:
+            return result
         return self._pc_emit_final_verdict(state)
 
     def _pc_reconcile_reviewed_stage(
@@ -966,7 +1046,23 @@ class PlanningCycleMixin(
         if state.revision_request is not None:
             return None
         action = self._reconcile_reviewed_stage_empty_plan(None)
-        return PLAN_RETRY if action in {"advance", "complete", "rollback"} else None
+        if action in {"advance", "complete", "rollback"}:
+            return PLAN_RETRY
+        if (
+            not state.had_operator_messages
+            and self._effective_final_certification_gate(self._artifact_root())
+            and self._journal_has_final_certification()
+        ):
+            from ...planner import PlannerVerdict
+
+            state.verdict = PlannerVerdict(
+                project_done=True,
+                waiting=False,
+                new_tasks=[],
+                reason="independent final certification is current",
+            )
+            return self._pc_normalize_project_done(state)
+        return None
 
 
 __all__ = [

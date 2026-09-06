@@ -49,11 +49,27 @@ from .paths import config_path
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "KnobStoreCorruptError",
     "read_persisted_knobs",
     "write_persisted_knob",
     "write_persisted_knobs",
     "persisted_knob",
 ]
+
+
+class KnobStoreCorruptError(RuntimeError):
+    """``config.json`` exists but does not hold a knob map.
+
+    The caller is expected to surface this to the operator, not to substitute
+    an empty map. Every resolver in this codebase treats "no persisted knob"
+    as "use the hard-coded default", so swallowing a parse failure silently
+    reverts EVERY persisted operator switch at once — the backend of every
+    role, the model of every route, the budget cap — with nothing in any
+    artifact to say it happened. The fix is to repair or delete
+    ``core.paths.config_path()``; a missing file is normal and still yields an
+    empty map.
+    """
+
 
 _THREAD_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = (
     weakref.WeakValueDictionary()
@@ -82,8 +98,18 @@ def _write_lock(path: Path):
 
 
 def read_persisted_knobs() -> dict[str, str]:
-    """Read the full persisted-knob map. Empty dict if missing/malformed —
-    a corrupt or absent config.json must never break knob resolution."""
+    """Read the full persisted-knob map.
+
+    Empty dict when the file is absent or unreadable — that is the normal
+    "operator has never persisted a switch" state, and it correctly means
+    "use the hard-coded defaults".
+
+    A file that EXISTS but does not parse as a JSON object raises
+    :class:`KnobStoreCorruptError`. It used to log a warning and return ``{}``,
+    which is indistinguishable from "nothing persisted": every role silently
+    dropped to its codex/default backend and every persisted model choice
+    vanished, with the only trace a warning in a log nobody reads.
+    """
     path = config_path()
     try:
         text = path.read_text(encoding="utf-8")
@@ -91,11 +117,20 @@ def read_persisted_knobs() -> dict[str, str]:
         return {}
     try:
         data = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        log.warning("knob_store: %s is not valid JSON — ignoring", path)
-        return {}
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise KnobStoreCorruptError(
+            f"persisted knob store {path} is not valid JSON: {exc}. "
+            f"Every persisted operator switch (role backends, models, budget "
+            f"cap) is unreadable until it is repaired or deleted."
+        ) from exc
     if not isinstance(data, dict):
-        return {}
+        # Valid JSON of the wrong shape is the same failure with a quieter
+        # symptom — it used to return {} without even a warning.
+        raise KnobStoreCorruptError(
+            f"persisted knob store {path} holds a JSON "
+            f"{type(data).__name__}, expected an object mapping "
+            f"ARGUS_SKILL_* names to values. Repair or delete it."
+        )
     return {str(k): str(v) for k, v in data.items() if isinstance(k, str)}
 
 
@@ -122,7 +157,50 @@ def write_persisted_knobs(values: Mapping[str, str]) -> bool:
     path = config_path()
     try:
         with _write_lock(path):
+            # A corrupt store raises KnobStoreCorruptError out of this
+            # function. Deliberate: the read-modify-write below would
+            # otherwise replace the operator's unparseable file with a map
+            # holding only `updates`, silently discarding every other switch
+            # it contained. `except OSError` below does not catch it.
             data = read_persisted_knobs()
+            from ..agent_cli.runner_backend import normalize_runner_backend
+
+            combined = {**data, **updates}
+            shared_before = str(
+                data.get("ARGUS_SKILL_RUNNER_BACKEND")
+                or data.get("ARGUS_SKILL_LIFE_BACKEND")
+                or ""
+            ).strip()
+            shared_after = str(
+                combined.get("ARGUS_SKILL_RUNNER_BACKEND")
+                or combined.get("ARGUS_SKILL_LIFE_BACKEND")
+                or ""
+            ).strip()
+            for runner_bin_name, runner_bin in data.items():
+                if (
+                    not runner_bin
+                    or runner_bin_name in updates
+                    or (
+                        runner_bin_name != "ARGUS_SKILL_RUNNER_BIN"
+                        and not runner_bin_name.endswith("_RUNNER_BIN")
+                    )
+                ):
+                    continue
+                if runner_bin_name == "ARGUS_SKILL_RUNNER_BIN":
+                    before, after = shared_before, shared_after
+                else:
+                    backend_name = (
+                        f"{runner_bin_name.removesuffix('_RUNNER_BIN')}_BACKEND"
+                    )
+                    before = str(data.get(backend_name) or shared_before).strip()
+                    after = str(combined.get(backend_name) or shared_after).strip()
+                if (
+                    before
+                    and after
+                    and normalize_runner_backend(before)
+                    != normalize_runner_backend(after)
+                ):
+                    updates[runner_bin_name] = ""
             data.update(updates)
             fd, tmp_name = tempfile.mkstemp(
                 dir=path.parent,

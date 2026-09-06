@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,29 +10,28 @@ from ...core.model_visible_text import (
     MODEL_INTEGRITY_BOUNDARY,
     sanitize_model_visible_text,
 )
-from ...core.role_decision import decision_event_instruction
+from ...core.role_decision import decision_footer_instruction
 from ..task_contract import (
     EFFECTIVE_TASK_CONTRACT,
-    format_native_shell_command,
     native_shell_summary,
 )
 from .types import ChecklistMode, RoleName, RolePromptRequest
 
 EVALUATE = "evaluate"
+SCIENCE_LOSS_CHECK = "science_loss_check"
+COLD_READ = "cold_read"
 
-OPERATIONS = frozenset({EVALUATE})
+OPERATIONS = frozenset({EVALUATE, SCIENCE_LOSS_CHECK, COLD_READ})
 
 _REEVALUATE_HEADER = (
     "## NEW ROUND — RE-EVALUATE INDEPENDENTLY (resumed reviewer)\n"
     "You are resuming your OWN thread ONLY to avoid re-sending the static rubric "
-    "— NOT to defer to your previous verdict. The role, rubric, and decision "
-    "rules from earlier in this thread still bind, but THIS round's artifacts "
-    "below are the ONLY evidence: re-verify against them from scratch. Your prior "
-    "verdict is not a prior and must never be rubber-stamped; judge this round on "
-    "its own artifacts, summary, and log audit.\n\n"
+    "— NOT to rubber-stamp your previous verdict. Previously certified evidence "
+    "remains settled context. Independently judge the current delta, rechecking "
+    "only inputs it changed, evidence that is stale or contradictory, and gaps "
+    "the prior verdict left unresolved. The role, rubric, and decision rules "
+    "still bind.\n\n"
 )
-
-_MAX_SHARED_CTX_CHARS = 100_000_000
 
 # Acceptance settles effort, never truth. Once one round accepted a 6% score on
 # a benchmark where the model publishes ~80%, this boundary forbade every later
@@ -63,29 +61,32 @@ _INCREMENTAL_REREVIEW_BOUNDARY = (
 # locally correct round without anything ever questioning the plan itself.
 # Keep these values in step with ``argus_skill.reviewer._parsing``.
 _PLAN_SIGNAL_VOCABULARY = (
-    "`plan_signal` is `continue`, or `reconsider` when the evidence says the "
-    "plan itself — not this round's execution — is what now stands between the "
-    "operator and the objective; rounds that each repair a different symptom of "
-    "one design are evidence for that. Then add `plan_challenge` (the assumption "
-    "you are challenging), `plan_alternative` (the better route), and "
-    "`authority_impact`: `technical` for a working choice the team may replace, "
-    "`manager_contract` or `operator` for a commitment only they can relax. A "
-    "plan the team authored for itself is a working choice.\n"
+    "`plan_signal` is `continue`, or `reconsider` when new evidence lowers the "
+    "current plan's expected value. With it, add evidence-backed `plan_challenge` "
+    "and `authority_impact`: `technical` for working choices; `manager_contract` "
+    "or `operator` only for their commitments. A plan the team authored for itself "
+    "is a working choice. Add `plan_alternative` only when you actually have one; "
+    "without it Manager uses ordinary `revise`.\n"
 )
 
 
 def evaluate_request(
     project_root: Path | str,
     *,
+    altitude_root: Path | str | None = None,
     scope: str = "",
     stage: str | None = None,
     vertical: str | None = None,
     checklist_mode: ChecklistMode = ChecklistMode.AUTO,
+    operation: str = EVALUATE,
 ) -> RolePromptRequest:
     return RolePromptRequest(
         role=RoleName.REVIEWER,
-        operation=EVALUATE,
+        operation=operation,
         project_root=project_root,
+        # The facts are about the work, which lives in the worktree, not in
+        # state/projects/<session>/ where the stage is read from.
+        altitude_root=altitude_root,
         vertical=vertical,
         stage=stage,
         scope=scope,
@@ -130,11 +131,11 @@ def _verification_directive() -> str:
 
 
 _PRODUCT_ACCEPTANCE_DIRECTIVE = (
-    "For UI/API/CLI/service changes, require product-user acceptance. Safely use "
-    "isolated state, non-production port, test-only credentials and the public entry "
-    "point; inspect, then stop it. Never cause external or irreversible effects. Unit "
-    "tests alone do not prove that flow. Report unavailable trials; use a decisive "
-    "check for library work.\n\n"
+    "When a mission claims a user-facing UI/API/CLI/service flow, test the safe "
+    "public entry point; unit tests alone do not prove it. Internal exploratory "
+    "changes need no product ceremony: their feedback experiment is the trial. "
+    "Never cause external or irreversible effects. Report unavailable trials; "
+    "use a decisive check for library work.\n\n"
 )
 
 
@@ -189,89 +190,14 @@ def _engineer_log_audit_block(
     measured: bool,  # noqa: ARG001 — kept for call-site symmetry
     compact: bool = False,
 ) -> str:
-    """Reviewer prompt section for auditing the engineer's execution log."""
+    """One-line fallback pointer when the Engineer's own account looks wrong."""
     path = (engineer_log_path or "").strip()
     if not path:
         return ""
     call_id = (engineer_call_id or "").strip()
-    if compact:
-        scope = f"current engineer call id `{call_id}`" if call_id else "the current engineer round"
-        return (
-            "## Engineer execution log (on-demand)\n"
-            f"Log: `{path}`; scope: {scope}. Do not read or grep it routinely. "
-            "Previously certified process evidence remains valid. Inspect this log "
-            "only for a concrete contradiction, implausible result, missing material "
-            "provenance, or suspected shortcut; otherwise spend the review judging "
-            "the result and next research decision.\n\n"
-        )
-    if call_id:
-        current_call_rows = format_native_shell_command(
-            [
-                sys.executable,
-                "-I",
-                "-m",
-                "argus_skill.tools.event_log_query",
-                "--log",
-                path,
-                "--call-id",
-                call_id,
-            ]
-        )
-        query_block = (
-            f"Current engineer call id: `{call_id}`. Scope every audit command "
-            "to this id so prior rounds and this Reviewer's own prompt cannot "
-            "pollute the evidence. The query parses top-level JSON fields and "
-            "reads rolled logs in chronological order:\n"
-            f"    {current_call_rows}\n"
-        )
-        log_row_description = (
-            "The call-scoped raw `agent.io.*` rows record the commands, tool "
-            "results, and assistant messages produced by this invocation."
-        )
-    else:
-        query_block = (
-            "No exact call id is available. Do not scan the whole project history "
-            "unless a concrete concern cannot be resolved from current artifacts.\n"
-        )
-        log_row_description = (
-            "Each `engineer.progress` event's `text` field is what the engineer "
-            "actually DID this round — a shell command it ran, a tool call, or a "
-            "reasoning beat."
-        )
-    if measured:
-        when_clause = (
-            "MEASURED-BENCHMARK mode is active, so this is a RED-FLAG-ONLY check: "
-            "you already TRUST the frozen scorer's pasted RESULT line and must NOT "
-            "burn the round re-deriving an honest number. Inspect the log ONLY when "
-            "the engineer pasted NO RESULT line, the number is implausible / "
-            "self-contradictory, or the score jumped suspiciously. Otherwise "
-            "skip this section.\n"
-        )
-    else:
-        when_clause = (
-            "Decide WHEN to dig: you do not need to read the log every round, but "
-            "you SHOULD when the artifact is suspicious, the result is "
-            "surprisingly good, a checklist item cannot be independently verified "
-            "from the produced files, or the summary is thin on HOW the work was "
-            "done. When the engineer's own summary already shows the verification "
-            "output and it is internally consistent, a quick log skim is enough.\n"
-        )
+    scope = f" (current call `{call_id}`)" if call_id else ""
     return (
-        "## Engineer execution-log audit (process correctness — SUPPLEMENTARY)\n"
-        "This round's engineer EXECUTION LOG is on disk at:\n"
-        f"  {path}\n"
-        "It is the per-project event log (NOT in the git work-tree). "
-        f"{log_row_description}\n"
-        f"{query_block}\n"
-        "Result-traceability (does the final artifact match the checklist?) tells "
-        "you the OUTCOME is real. This log tells you the PROCESS was honest — the "
-        "two are different, and an artifact can match the checklist while the "
-        "process may still contradict the claim.\n\n"
-        f"{when_clause}\n"
-        "Choose any further inspection yourself from the concrete concern and the "
-        "actual event fields; do not classify the process by a preset keyword list. "
-        "If the process matches the claim, judge the result as usual. This audit "
-        "supplements result traceability and never changes frozen measurements.\n\n"
+        f"The event log is at `{path}`{scope} if the Engineer's account seems wrong.\n\n"
     )
 
 
@@ -289,8 +215,6 @@ def _format_engineer_shared_context(
     if skill:
         parts.append(f"- skill_used: {skill}")
     if prev:
-        if len(prev) > _MAX_SHARED_CTX_CHARS:
-            prev = prev[:_MAX_SHARED_CTX_CHARS].rstrip() + "..."
         indented = "\n".join("    " + line for line in prev.splitlines())
         parts.append("- previous_review_summary:\n" + indented)
     return "\n".join(parts) + "\n\n"
@@ -299,6 +223,7 @@ def _format_engineer_shared_context(
 def render_reviewer_prompt(
     owner: Any,
     *,
+    operation: str = EVALUATE,
     resumed: bool = False,
     objective: str,
     original_objective: str = "",
@@ -336,10 +261,45 @@ def render_reviewer_prompt(
     )
     from .registry import resolve_role_prompt
 
-    error_text = main_error or "none"
+    error_text = sanitize_model_visible_text(main_error or "none")
+    engineer_account = sanitize_model_visible_text(main_summary)
+    if len(engineer_account) > 6000:
+        omitted_chars = len(engineer_account) - 5900
+        engineer_account = (
+            engineer_account[:4000]
+            + f"\n…[middle omitted {omitted_chars} characters]…\n"
+            + engineer_account[-1900:]
+        )
     # Reviewer receives Skill-library paths and searches independently; no
     # Skill body is selected or injected by the runtime.
     _proot = resolve_project_root(vertical_state_root or working_dir)
+    try:
+        from ...core.manuscript_snapshot import (
+            manuscript_review_artifact_statuses,
+        )
+
+        stale_review_facts = [
+            fact
+            for fact in manuscript_review_artifact_statuses(_proot)
+            if fact["status"] != "current"
+        ]
+        review_validity_block = ""
+        if stale_review_facts:
+            review_validity_block = (
+                "## Manuscript-bound review validity (mechanical facts)\n"
+                + "\n".join(
+                    f"- {fact['path']}: {fact['message']}"
+                    for fact in sorted(
+                        stale_review_facts,
+                        key=lambda item: (str(item["path"]), str(item["message"])),
+                    )
+                )
+                + "\nTreat these records as stale facts, never as passed/certified. "
+                "Do not request a new model review merely because they are stale; "
+                "judge the next action under the current plan.\n\n"
+            )
+    except Exception:  # noqa: BLE001 - optional paper facts never break review
+        review_validity_block = ""
     scope_normalized = (scope or "").strip().lower().replace("-", "_")
     _persisted = _persisted_vertical(_proot)
     explicit_vertical = str(vertical or "").strip()
@@ -347,6 +307,7 @@ def render_reviewer_prompt(
     prompt_context = resolve_role_prompt(
         evaluate_request(
             _proot,
+            altitude_root=resolve_project_root(working_dir) if working_dir else None,
             scope=scope_normalized,
             vertical=routed_vertical,
             # Suppressed only when this project has no pipeline state to read a
@@ -375,6 +336,7 @@ def render_reviewer_prompt(
                 if explicit_vertical and not _persisted
                 else ChecklistMode.AUTO
             ),
+            operation=operation,
         )
     )
     persisted_prompt_context = (
@@ -383,6 +345,7 @@ def render_reviewer_prompt(
                 _proot,
                 vertical=routed_vertical,
                 checklist_mode=ChecklistMode.NONE,
+                operation=operation,
             )
         )
         if routed_vertical is not None
@@ -401,18 +364,28 @@ def render_reviewer_prompt(
         if review_libraries.block:
             matched_review_skill_block = review_libraries.block + "\n\n"
     stage = prompt_context.stage
+    research_context_block = ""
+    if prompt_context.vertical == "research" and operation == EVALUATE:
+        from ...verticals.research.prompt_policy import active_research_context
+
+        research_context_block = active_research_context(
+            stage, resolve_project_root(working_dir) if working_dir else _proot
+        )
     direct_workflow = resolve_workflow_mode(_proot) == "direct"
     _measured = not _requires_engineering_audit and os.environ.get(
         "ARGUS_SKILL_MEASURED_MODE", ""
     ).strip().lower() in ("1", "true", "yes", "on")
     # Vertical-owned policy arrives through the prompt catalog; this module
     # contributes only role-wide review behavior.
-    optimize_banner = "" if direct_workflow else prompt_context.role_banner
+    optimize_banner = prompt_context.role_banner
     if prompt_context.requires_independent_review and not _requires_engineering_audit:
         optimize_banner = ""
-    research_target_instruction = ""
+    verification_instruction = ""
     _research_target_level = resolve_research_target_level(_proot)
-    if _research_target_level is not None:
+    if (
+        _research_target_level is not None
+        or prompt_context.verification_stage_profiles
+    ):
         # Two separate things, previously one sentence: `research_target_level`
         # says what finishing the PROJECT means, and the verification profile
         # says what THIS round has to show. Conflating them made every early
@@ -426,34 +399,60 @@ def render_reviewer_prompt(
             _stage = ""
         _policy = resolve_policy(
             _proot,
+            scope=scope_normalized,
             stage=_stage,
             vertical=_persisted_vertical(_proot),
             target_level=_research_target_level,
             stage_profiles=prompt_context.verification_stage_profiles,
         )
-        research_target_instruction = (
-            f"Project target `{_research_target_level}` defines project completion, "
-            f"not this round's bar. This round: {policy_line(_policy)}. The integrity "
-            "floor is identical at every profile. Judge directly and explain in "
-            "`reason`. If the direction cannot reach the target, return "
-            "`replan_requested`.\n"
-            "End with `RESEARCH_RESULT=<JSON>` over evidence you inspected. "
-            "`evidence` and `limitations` are JSON string arrays; a survey is "
-            "`literature_review` with `novelty_status` `known` or `not_applicable`. "
-            "Every field below takes one listed value verbatim — any other value "
-            "voids the whole result, however well it describes the work:\n"
-            + "".join(
-                f"{_field}: {' '.join(_choices)}\n"
-                for _field, _choices in RESULT_FIELD_CHOICES
+        verification_instruction = (
+            (
+                f"Project target `{_research_target_level}` defines project "
+                "completion, not this round's bar. "
             )
-            + "\n"
+            if _research_target_level is not None
+            else (
+                "The active vertical owns when verification becomes final; "
+                "judge this mission at its current stage, not at the last "
+                "stage's acceptance bar. "
+            )
+        ) + (
+            f"This round: {policy_line(_policy)}. The integrity floor is "
+            "identical at every profile. Judge directly and explain in `reason`. "
         )
+        if _research_target_level is not None:
+            verification_instruction += (
+                "If the direction cannot reach the target, return "
+                "`replan_requested`.\n"
+                "End with `RESEARCH_RESULT=<JSON>` over evidence you inspected. "
+                "`evidence` and `limitations` are JSON string arrays; a survey is "
+                "`literature_review` with `novelty_status` `known` or "
+                "`not_applicable`. Use one listed value per field so the record "
+                "stays comparable across campaigns; the block summarizes your "
+                "verdict and never replaces it:\n"
+                + "".join(
+                    f"{_field}: {' '.join(_choices)}\n"
+                    for _field, _choices in RESULT_FIELD_CHOICES
+                )
+                + "\n"
+            )
+    surprise_judgment_block = (
+        "What observed result or pattern most changed your belief — including a "
+        "positive surprise — and what is the cheapest observation that would "
+        "distinguish a new scientific explanation from an artifact? `none` is valid "
+        "and produces no work; if the answer could change the claim or route, use "
+        "ordinary `reconsider` to hand it to Planner.\n"
+        if _research_target_level is not None
+        else ""
+    )
     # Live search-altitude facts (NO verdict) so the reviewer can SEE the
     # floor history when judging forward_progress — i.e. distinguish "this
     # round advanced a declared structural line" from "Nth single-knob
     # nibble at a floor that has not moved in N attempts". Empty for
     # verticals that do not surface it.
-    search_altitude_block = prompt_context.search_altitude
+    search_altitude_block = sanitize_model_visible_text(
+        prompt_context.search_altitude
+    )
     if _measured:
         stage_checklist = (
             "## MEASURED-BENCHMARK MODE — TRUST the scorer, judge the IDEA\n"
@@ -481,7 +480,7 @@ def render_reviewer_prompt(
             "in the operator's language (Chinese here), answerable in a sentence "
             "— no jargon/JSON/template names.\n"
             "- `done` is rare here — only at/above the known ceiling.\n"
-            "Ignore GROUND_TRUTH/gate/marker/status/provenance files (the harness "
+            "Ignore GROUND_TRUTH/marker/status/provenance files (the harness "
             "ignores them) and artifact hygiene — the scorer's number is the only "
             "evidence. A round that MEASURED a real number, even a worse one, made "
             "progress by ruling out a mechanism. This OVERRIDES the generic "
@@ -510,14 +509,25 @@ def render_reviewer_prompt(
     stage_order = prompt_context.stage_order
     stage_idx = stage_order.index(stage) if stage in stage_order else 0
     earlier_stages = ", ".join(stage_order[:stage_idx]) or "(none)"
-    rollback_block = (
-        "## Upstream defects\n"
-        f"Current stage: `{stage}`. Earlier stages: {earlier_stages}.\n"
-        "Rollback only when a concrete earlier defect makes the current result unusable. "
-        "Optional or non-claim-critical artifacts are advisory. If rollback is necessary, "
-        "return `replan_requested` with the earliest stage and evidence; Manager owns rollback. "
-        "Never edit `.argus/PIPELINE_STATE.json`."
-    )
+    if prompt_context.vertical == "research":
+        rollback_block = (
+            "## Upstream defects\n"
+            f"Current stage: `{stage}`. Earlier stages: {earlier_stages}.\n"
+            "Research stages are forward-only. If an earlier method, experiment, "
+            "or paper defect affects current work, keep this stage and return the "
+            "concrete repair as `next_action`; never request rollback or reopen "
+            "idea selection. Never edit `.argus/PIPELINE_STATE.json`."
+        )
+    else:
+        rollback_block = (
+            "## Upstream defects\n"
+            f"Current stage: `{stage}`. Earlier stages: {earlier_stages}.\n"
+            "Rollback only when a concrete earlier defect makes the current result "
+            "unusable. Optional or non-claim-critical artifacts are advisory. If "
+            "rollback is necessary, return `replan_requested` with the earliest "
+            "stage and evidence; Manager owns rollback. Never edit "
+            "`.argus/PIPELINE_STATE.json`."
+        )
     operator_text = (
         "\n".join(f"- {line}" for line in operator_messages) if operator_messages else "- none"
     )
@@ -546,13 +556,18 @@ def render_reviewer_prompt(
         skill_used=active_skill_id,
         prev_review_summary=prev_review_summary,
     )
+    shared_context_block = sanitize_model_visible_text(shared_context_block)
     incremental_review_block = ""
     if round_index > 1 and prev_review_summary.strip():
         incremental_review_block = _INCREMENTAL_REREVIEW_BOUNDARY
     # Prefer direct runtime and verifier evidence over the Engineer's summary
     # when callers provide it. Omit the block when no such evidence exists.
     evidence_block = (
-        f"\nRaw verification evidence:\n{raw_evidence.rstrip()}\n" if raw_evidence.strip() else ""
+        "\nRaw verification evidence:\n"
+        + sanitize_model_visible_text(raw_evidence.rstrip())
+        + "\n"
+        if raw_evidence.strip()
+        else ""
     )
     # Background-subagent context (rendered by the engineer/runner from the
     # live ``.argus_subagents`` registry). Present only when this mission has
@@ -563,7 +578,9 @@ def render_reviewer_prompt(
     background_block = ""
     if background_context.strip():
         background_block = (
-            f"\n{background_context.strip()}\n\n"
+            "\n"
+            + sanitize_model_visible_text(background_context.strip())
+            + "\n\n"
             "Reviewer note on the above: these are SUPERVISED subagents with "
             "their own independent supervisor, so their autonomous progress is "
             "NOT by itself the engineer's forward progress. If the engineer only "
@@ -577,29 +594,25 @@ def render_reviewer_prompt(
     _ = prior_checkpoint
     _ = checkpoint_path
     checkpoint_block = ""
-    # Anti-livelock escalation directive (supplied by the round loop once a
-    # mission passes the soft round limit): tell the reviewer to escalate an
-    # unresolvable EXTERNAL blocker to `blocked` instead of looping `continue`.
+    # Anti-livelock rule supplied at the soft round boundary.
     escalate_block = ""
     if escalate_hint:
         escalate_block = (
             f"## Escalation directive (operator harness — IMPORTANT)\n{escalate_hint}\n\n"
         )
-    # Engineer execution-log audit (process correctness). The reviewer runs
-    # in the project work-tree and only receives the engineer's final
-    # summary, so it cannot otherwise SEE how a result was produced. When the
-    # supervisor threads the absolute path to this mission's execution log
-    # (``<life_dir>/events.jsonl``), give the reviewer grep recipes to audit
-    # PROCESS correctness — not just whether the artifact matches the
-    # checklist, but whether the engineer reached it honestly. Empty path
-    # (memory backend / tests / unresolvable life_dir) → block omitted, prompt
-    # byte-for-byte unchanged (back-compat).
+    # The Engineer's own account is primary. Keep the execution log as a
+    # one-line fallback pointer for a concrete contradiction instead of asking
+    # every Reviewer to reconstruct the round from grep recipes. Empty path
+    # (memory backend / tests / unresolvable life_dir) omits the pointer.
     engineer_log_audit_block = _engineer_log_audit_block(
         engineer_log_path,
         engineer_call_id=engineer_call_id,
         round_index=round_index,
         measured=_measured,
         compact=not bool((main_error or "").strip()),
+    )
+    engineer_log_audit_block = sanitize_model_visible_text(
+        engineer_log_audit_block
     )
     if direct_workflow:
         rollback_block = ""
@@ -616,9 +629,11 @@ def render_reviewer_prompt(
         )
     )
     handoff_policy = (
-        "`done` closes a bounded direct task when its mission contract and decisive "
-        "check pass. Use `continue` for one concrete material gap and give one next "
-        "action; leave optional hardening advisory."
+        "`done` closes a direct task when its contract and decisive check "
+        "pass. Use `replan_requested` only to change the plan; `plan_signal` is "
+        "advisory and cannot override `status`. Use `continue` for a material gap and give "
+        "the next work package; "
+        "leave optional hardening advisory."
         if direct_workflow
         else (
             "`done` needs enough evidence for the material outcome, not exhaustive proof or "
@@ -629,55 +644,72 @@ def render_reviewer_prompt(
             "claim needs code-path evidence plus profiling, timing, or a controlled comparison. "
             "Integrity is mandatory but not scientific value by itself. Ask the "
             "operator only for authority/information they own. "
-            "Bounded `done` closes; final-submission `done` may certify."
+            "An ordinary task's `done` closes that task; a final-submission `done` may certify the project."
         )
     )
+    # Keep the requested footer smaller than the compatibility parser. Legacy
+    # FRONTIER_*, NEXT_DECISION_POINT, REGRESSION_ENVELOPE,
+    # CHECKPOINT_RECOMMENDED, and SESSION_SIGNAL lines remain readable, but the
+    # Reviewer is not asked to fill them in. The fields below each feed round
+    # settlement, operator routing, research certification, or plan adjudication.
     static = (
-        optimize_banner
-        + research_target_instruction
-        + EFFECTIVE_TASK_CONTRACT
+        EFFECTIVE_TASK_CONTRACT
         + "\n\n"
         + (shell_contract + "\n\n" if shell_contract else "")
         + MODEL_INTEGRITY_BOUNDARY
         + "\n\n"
         + _PRODUCT_ACCEPTANCE_DIRECTIVE
         + "\n\n## Reviewer role\n"
-        "Default to `done` when the outcome materially works; optional polish is advisory. "
-        "Inspect claim-critical uncertainty; use tools only in proportion to unresolved "
-        "uncertainty. You do not change the work under review: not its sources, not its "
-        "artifacts, not its build. Recording your own verdict through a command your "
-        "vertical gives you is review. Use `continue` for one "
-        "concrete in-scope material gap, `replan_requested` rarely for a wrong target or "
-        "real boundary change, and `blocked` only for an external blocker. Semantic "
-        "external claims need primary-source grounding; community implementations may "
-        "suffice for implementation details. Do not demand extra research, abstractions, "
-        "defensive machinery, or future-proofing.\n\n"
-        + ("" if _requires_engineering_audit else _verification_directive())
-        + audit_integrity_block
+        "`done`: outcome works at the current verification profile. "
+        "Inspect claim-critical uncertainty with proportional tools. You do not change "
+        "the work under review: not its sources, not its artifacts, not its build. "
+        "Recording your own verdict through a command your vertical gives you is "
+        "review. Use `continue` for one concrete in-scope material gap, "
+        "`replan_requested` for a wrong target or real boundary change, and `blocked` "
+        "only externally. External claims need primary-source grounding; "
+        "community implementations may "
+        "suffice for implementation details. Do not demand work outside the current "
+        "profile or future-proofing. In `explore`/`develop`, require feedback-producing "
+        "experiments or research. Never reward virtue's form in negative results, "
+        "hedging, limitation lists, or repeat runs—only anchored, decision-changing "
+        "content; "
+        "positive and negative claims share one evidence standard.\n\n"
         + "## Decision\n"
-        "The payload uses `status`, `reason`, `next_action`, `forward_progress`, "
-        "`plan_signal`, and only when relevant `operator_question` and "
-        "`operator_options`. Each option must be an object like "
-        "{\"id\":\"a\",\"label\":\"Use A\",\"description\":\"What choosing A does.\"}, "
-        "not a bare string."
+        "REASON, NEXT_ACTION, and OPERATOR_QUESTION are human-facing. Use the "
+        "operator's language. State evidence and consequence plainly; make any "
+        "question answerable in one sentence. Avoid enum and template names. "
+        "Write options as `id::label::description`, separated by semicolons."
         + (
             " Include the inspected `research_result` contract."
             if _research_target_level is not None
             else ""
         )
         + "\n"
-        + decision_event_instruction(
-            "reviewer",
-            '{"status":"done","reason":"requested outcome is materially complete",'
-            '"next_action":"","forward_progress":true,"plan_signal":"continue"}',
+        + decision_footer_instruction(
+            "STATUS=done\n"
+            "REASON=requested outcome is materially complete\n"
+            "NEXT_ACTION=\n"
+            "FORWARD_PROGRESS=true\n"
+            "PLAN_SIGNAL=continue"
         )
+        + "\nPlan change verdict:\n"
+        "STATUS=replan_requested\n"
+        "PLAN_CHALLENGE=failed assumption\n"
+        "AUTHORITY_IMPACT=technical"
+        + "\nFor a real operator-owned choice only, add "
+        "`OPERATOR_QUESTION=...` and "
+        "`OPERATOR_OPTIONS=a::Use A::What choosing A does; "
+        "b::Use B::What choosing B does`.\n"
         + "\nJudge forward_progress against the operator goal, not activity: a "
         "repair can be locally correct and still leave the objective where it "
         "was, and saying so is not a rejection of the work.\n"
         + _PLAN_SIGNAL_VOCABULARY
         + "Put the next Engineer "
         "instruction only in next_action. Do not inspect or edit "
-        "checkpoint/context-packet/handoff bookkeeping.\n\n"
+        "checkpoint or context bookkeeping.\n\n"
+        + ("" if _requires_engineering_audit else _verification_directive())
+        + audit_integrity_block
+        + verification_instruction
         + wiki_curator_skill_block
         + direct_memory_edit_block
         + matched_review_skill_block
@@ -685,20 +717,23 @@ def render_reviewer_prompt(
         + "\n\n"
         + rollback_block
         + "\n\n"
+        + surprise_judgment_block
         + venv_skill_block
-        + "\n\n## Handoff policy\n"
+        + "\n\n## What each verdict means\n"
         + handoff_policy
         + "\n\n"
         + objective_block
-        + "Operator messages:\n"
-        f"{operator_text}\n\n"
-        "Planner guidance:\n"
+        + "Planner guidance:\n"
         f"{planner_review_instruction or 'none'}\n\n"
+        + (optimize_banner + "\n\n" if optimize_banner else "")
     )
     # Per-round DELTA — everything that changes round to round. Fresh
     # Reviewers receive this after the full static rubric every time.
     delta = (
         (_REEVALUATE_HEADER if resumed else "")
+        + research_context_block
+        + ("\n\n" if research_context_block else "")
+        + review_validity_block
         + search_altitude_block
         + f"{checkpoint_block}"
         + f"{escalate_block}"
@@ -709,13 +744,16 @@ def render_reviewer_prompt(
         + f"{incremental_review_block}"
         + f"{background_block}"
         + f"Main agent fatal error: {error_text}\n\n"
-        + "Main agent last summary:\n"
-        + f"{main_summary}\n\n"
+        + "## Engineer's account of this round\n"
+        + engineer_account
+        + "\n\n"
         + f"{evidence_block}"
+        # OperatorContext is intentionally the final live-facts block: this
+        # preserves the static cache prefix and improves steering recency.
+        + "Operator messages:\n"
+        + operator_text
     )
     objective_context = f"{objective_block}{operator_text}\n{planner_review_instruction or 'none'}"
-    static = sanitize_model_visible_text(static)
-    delta = sanitize_model_visible_text(delta)
     owner._last_prompt_block_stats = _prompt_block_stats(
         {
             "static_total": static,
@@ -724,7 +762,10 @@ def render_reviewer_prompt(
             "matched_skill": matched_review_skill_block,
             "direct_memory": direct_memory_edit_block,
             "wiki_curator": wiki_curator_skill_block,
-            "research_target": research_target_instruction,
+            "research_target": verification_instruction,
+            "surprise_judgment": surprise_judgment_block,
+            "manuscript_review_validity": review_validity_block,
+            "research_context": research_context_block,
             "objective_context": objective_context,
             "checkpoint": checkpoint_block,
             "execution_log_audit": engineer_log_audit_block,
@@ -739,12 +780,14 @@ def render_reviewer_prompt(
 
 def assemble_reviewer_prompt(static: str, delta: str) -> str:
     """Form the exact prompt sent to a fresh Reviewer session."""
-    return sanitize_model_visible_text(static + delta)
+    return static + delta
 
 
 __all__ = [
+    "COLD_READ",
     "EVALUATE",
     "OPERATIONS",
+    "SCIENCE_LOSS_CHECK",
     "assemble_reviewer_prompt",
     "evaluate_request",
     "render_reviewer_prompt",

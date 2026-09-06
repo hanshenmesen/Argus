@@ -10,6 +10,7 @@ from ..core.model_visible_text import (
     contains_integrity_judgment,
     has_material_blocker,
     sanitize_model_judgment_text,
+    sanitize_model_visible_text,
 )
 from ..core.models import ReviewDecision
 from ..core.operator_decision import (
@@ -159,29 +160,48 @@ def _session_signal(value: Any) -> dict[str, str]:
 
 
 def _apply_model_judgment_policy(decision: ReviewDecision) -> ReviewDecision:
-    """Ensure opaque integrity identifiers cannot become Reviewer blockers."""
+    """Ignore hash-only blockers without overruling substantive judgment."""
     original_reason = str(decision.reason or "")
     original_next_action = str(decision.next_action or "")
-    integrity_judgment = contains_integrity_judgment(original_reason + "\n" + original_next_action)
-    decision.reason = sanitize_model_judgment_text(original_reason)
-    decision.next_action = sanitize_model_judgment_text(original_next_action)
+    original_judgment = original_reason + "\n" + original_next_action
+    integrity_judgment = contains_integrity_judgment(original_judgment)
+    material_blocker = has_material_blocker(original_judgment)
+
+    def sanitize_without_gutting_material_paragraphs(value: str) -> str:
+        kept: list[str] = []
+        for paragraph in value.splitlines():
+            sanitized = sanitize_model_judgment_text(paragraph)
+            if not sanitized and paragraph.strip() and has_material_blocker(paragraph):
+                # Redact opaque values, but retain a paragraph whose engineering
+                # meaning would otherwise disappear with its integrity wording.
+                sanitized = sanitize_model_visible_text(paragraph).strip()
+            if sanitized:
+                kept.append(sanitized)
+        return "\n".join(kept)
+
+    decision.reason = sanitize_without_gutting_material_paragraphs(original_reason)
+    decision.next_action = sanitize_without_gutting_material_paragraphs(
+        original_next_action
+    )
     decision.operator_question = sanitize_model_judgment_text(decision.operator_question)
     if (
-        decision.status != "done"
+        decision.status == "blocked"
         and integrity_judgment
         and not decision.operator_question
         and not decision.next_action
-        and not has_material_blocker(decision.reason)
+        and not material_blocker
     ):
-        decision.status = "done"
-        decision.reason = decision.reason or (
-            "No model-relevant blocker remains after ignoring machine-only integrity metadata."
+        decision.status = "continue"
+        policy_note = (
+            "Policy note: machine-only integrity metadata does not by itself "
+            "justify blocking the project."
         )
+        decision.reason = "\n".join(filter(None, (decision.reason, policy_note)))
     elif not decision.reason:
-        decision.reason = (
-            "The Reviewer cited only machine-only integrity metadata and did not "
-            "identify a semantic blocker."
-        )
+        # Preserve the Reviewer's text whenever possible. This fallback only
+        # covers a non-blocked verdict whose entire rationale was an opaque
+        # integrity assertion.
+        decision.reason = sanitize_model_visible_text(original_reason).strip()
     frontier = decision.frontier_report
     if isinstance(frontier, dict):
         change = str(frontier.get("change") or "")
@@ -192,26 +212,13 @@ def _apply_model_judgment_policy(decision: ReviewDecision) -> ReviewDecision:
             for key in ("cause", "scope", "budget", "recovery_test", "exit_trigger")
         )
         if change == "bounded_regression" and not envelope_complete:
-            decision.status = "replan_requested"
             decision.reason += (
-                " The reported regression has no complete cause, scope, budget, "
-                "recovery test, and exit trigger, so it cannot be accepted as bounded."
+                " Note: the bounded-regression report omitted one or more of cause, "
+                "scope, budget, recovery test, and exit trigger."
             )
-            decision.next_action = (
-                "Replan with a complete regression envelope or restore the prior frontier."
-            )
-            decision.planner_report.update({
-                "forward_progress": False,
-                "plan_signal": "reconsider",
-                "challenge": "The proposed regression was not bounded.",
-                "alternative": "Bound the repair debt or choose a route without it.",
-                "authority_impact": "technical",
-            })
         elif change == "expanding_regression" and decision.status == "done":
-            decision.status = "replan_requested"
-            decision.next_action = (
-                decision.next_action
-                or "Diagnose the expanding regression and revise or abandon the route."
+            decision.reason += (
+                " Note: the same verdict reports an expanding regression."
             )
     return decision
 
@@ -321,6 +328,10 @@ def decision_from_payload(payload: Mapping[str, Any]) -> ReviewDecision | None:
     )
 
 
+# Compatibility reader, not a prompt schema. Several older sessions emitted
+# frontier/session bookkeeping; accepting it is cheap, but the current prompt
+# only asks for fields that affect settlement, operator routing, research
+# certification, or Manager plan adjudication.
 _VERDICT_KEYS = (
     "STATUS",
     "REASON",
@@ -353,6 +364,7 @@ def _parse_named_verdict(text: str) -> ReviewDecision | None:
     answer we could not understand.
     """
     from ..core.role_reply import (
+        decision_footer_text,
         read_block,
         read_key_values,
         read_optional,
@@ -385,7 +397,9 @@ def _parse_named_verdict(text: str) -> ReviewDecision | None:
             reason=reason.strip()[:5000],
             next_action=read_block(text, "NEXT_ACTION", _VERDICT_KEYS).strip()[:1500],
             operator_question=read_optional(values, "OPERATOR_QUESTION")[:500],
-            operator_options=parse_agent_operator_options(text),
+            operator_options=parse_agent_operator_options(
+                decision_footer_text(text)
+            ),
             checkpoint_recommended=(
                 read_optional(values, "CHECKPOINT_RECOMMENDED").casefold() == "true"
             ),

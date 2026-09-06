@@ -26,6 +26,7 @@ from ..core.session import (
     read_session_meta,
     resolve_session_workdir,
     session_lifecycle_lock,
+    session_workdir_is_bound,
     update_session_meta,
     write_session_meta,
 )
@@ -69,7 +70,7 @@ def _worker_config_from_env(life_dir: Path, global_root: Path) -> LifeWorkerConf
         global_root=global_root,
     )
     meta = read_session_meta(global_root, life_dir.name)
-    if meta is None:
+    if not session_workdir_is_bound(meta):
         prior = _srv().read_daemon_status(life_dir).project_workdir
         project_workdir = migrate_legacy_session_workdir(
             global_root,
@@ -86,7 +87,11 @@ def _worker_config_from_env(life_dir: Path, global_root: Path) -> LifeWorkerConf
         # All four roles use the same persisted execution root. Internal daemon
         # state remains under life_dir regardless of where project work happens.
         project_workdir=project_workdir,
-        backend=resolve_role_backend(""),
+        # default="codex": the cockpit autostart has no --backend flag to
+        # honour, so the chain is the operator's ONLY channel here; codex
+        # matches LifeWorkerConfig's own dataclass default, which is what this
+        # field held before when nothing was configured.
+        backend=resolve_role_backend("", default="codex"),
         engineer_model=resolve_role_model(
             "engineer", role_env="ARGUS_SKILL_ENGINEER_MODEL",
         ),
@@ -101,7 +106,7 @@ def _worker_config_from_env(life_dir: Path, global_root: Path) -> LifeWorkerConf
         ),
         global_daily_cap_usd=budget.global_daily_cap_usd,
         planner_task_iteration_max_cycles=int(
-            os.environ.get("ARGUS_SKILL_PLANNER_TASK_ITERATION_MAX_CYCLES", "6")
+            os.environ.get("ARGUS_SKILL_PLANNER_TASK_ITERATION_MAX_CYCLES", "0")
         ),
     )
 
@@ -148,7 +153,7 @@ def list_running_daemons(
             continue
         life_dir = core_paths.session_state_root(sid, root=root)
         try:
-            items = LifeMemory.open(life_dir).backlog.all()
+            items = LifeMemory.open(life_dir).backlog.active()
         except Exception:  # noqa: BLE001
             items = []
         unfinished = [
@@ -252,6 +257,11 @@ def start_project_daemon(
             "error": f"daemon workdir is unavailable: {exc}",
             "daemon": _daemon_dict(_srv().read_daemon_status(life_dir)),
         }
+    # Web project workers are finite unless they adopt a persisted campaign
+    # that is explicitly both enabled and open-ended. Otherwise the dataclass's
+    # CLI-oriented 7x24 default would keep a drained task process alive forever,
+    # including one started with the cockpit's Resume button.
+    config.continuous_open_ended = False
     if resume_continuous:
         continuous = _srv().read_continuous_state(life_dir)
         if (
@@ -308,9 +318,7 @@ def start_project_daemon(
     startup_recovery_diagnostic = ""
     try:
         rc = _srv().spawn_detached_daemon(config, quiet=True)
-        startup_diagnostic = str(
-            getattr(config, "last_spawn_error", "") or ""
-        ).strip()
+        startup_diagnostic = config.last_spawn_error.strip()
         if _retryable_windows_spawn_failure(rc, startup_diagnostic):
             # The first launcher can finish just as its runtime publishes
             # status. Never create a second worker if that happened; otherwise
@@ -327,9 +335,7 @@ def start_project_daemon(
                     startup_diagnostic,
                 )
                 rc = _srv().spawn_detached_daemon(config, quiet=True)
-                second_diagnostic = str(
-                    getattr(config, "last_spawn_error", "") or ""
-                ).strip()
+                second_diagnostic = config.last_spawn_error.strip()
                 if rc == 0:
                     startup_recovery_diagnostic = startup_diagnostic
                     startup_diagnostic = ""
@@ -340,7 +346,11 @@ def start_project_daemon(
         return {
             "rc": 2,
             "already_alive": False,
-            "error": f"background executor failed to start: {type(exc).__name__}: {exc}",
+            "error": (
+                "The background worker could not start. "
+                "Check the startup diagnostic and try again."
+            ),
+            "startup_diagnostic": f"{type(exc).__name__}: {exc}",
             "daemon": _daemon_dict(_srv().read_daemon_status(life_dir)),
         }
     result = {
@@ -387,9 +397,10 @@ def start_project_daemon(
                 ),
                 "daemon": _daemon_dict(_srv().read_daemon_status(life_dir)),
             }
-        result["error"] = f"background executor failed to start (rc={rc})"
-        if startup_diagnostic:
-            result["error"] += f": {startup_diagnostic}"
+        result["error"] = (
+            "The background worker could not start. "
+            "Check the startup diagnostic and try again."
+        )
         log.error(
             "background executor failed to start for session %s (rc=%s): %s",
             sid,
@@ -409,7 +420,7 @@ def _write_parked_state(
     previous_pid: int | None,
 ) -> None:
     try:
-        items = LifeMemory.open(victim_dir).backlog.all()
+        items = LifeMemory.open(victim_dir).backlog.active()
         unfinished = [
             {
                 "id": item.id,
@@ -752,5 +763,14 @@ def stop_project_daemon(
     life_dir = project_life_dir(sid, global_root=global_root)
     if life_dir is None:
         return None
-    rc = _srv().stop_daemon(life_dir, drain=drain, force=force)
-    return {"rc": rc}
+    # An explicit UI force-stop is the Codex-style interrupt path: give the
+    # verified daemon one second to honor its control marker, then terminate
+    # only that captured process tree. Ordinary stop/drain semantics are
+    # unchanged and remain available to lifecycle/upgrade flows.
+    rc = _srv().stop_daemon(
+        life_dir,
+        timeout=1.0 if force else 10.0,
+        drain=drain,
+        force=force,
+    )
+    return {"rc": rc, "forced": force}

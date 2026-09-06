@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from ..core.vertical_contract import VerticalLibraryContext
 from .loop_state import MissionContext, SkillLibraryState
@@ -20,10 +21,9 @@ class SkillLibraryMixin:
         required_skill_paths = self._prepare_vertical_libraries(mission)
         state = SkillLibraryState()
         state.skill_libraries = self.engineer_mission.libraries(
+            task=mission.skill_task,
             required_relative_paths=required_skill_paths,
         )
-        # Paths and discovery instructions only: no runtime matching, adaptation,
-        # copying, or Skill-body injection.
         state.skill_text = state.skill_libraries.block
         state.reviewer_skill_block = self.reviewer.mission.libraries().block
         return state
@@ -32,16 +32,25 @@ class SkillLibraryMixin:
         """Let the provider run optional domain setup with explicit inputs."""
         required_skill_paths: list[str] = []
         try:
+            from ..core.pipeline_state import pipeline_state_exists
             from ..verticals._base import load_vertical_contract
             from .stage_machine import current_stage
 
-            stage = current_stage(mission.workdir) or ""
+            state_root = Path(self.config.vertical_state_root or mission.workdir)
+            if not pipeline_state_exists(state_root):
+                log.warning(
+                    "vertical Skill-library state cannot be determined: "
+                    "PIPELINE_STATE.json is missing at resolved state root %s",
+                    state_root,
+                )
+            stage = current_stage(state_root) or ""
             contract = load_vertical_contract(
                 mission.active_vertical,
                 project_root=mission.workdir,
             )
             contract.prepare_libraries(VerticalLibraryContext(
                 workdir=mission.workdir,
+                state_root=state_root,
                 stage=str(stage).strip().lower(),
                 objective=mission.skill_task,
                 direction=(

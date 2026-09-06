@@ -81,7 +81,7 @@ def _model_visible_context_ref(ref: Mapping[str, Any]) -> dict[str, str]:
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError):
+    except (OSError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -136,9 +136,10 @@ def _latest_reviewed_handoff(root: Path) -> dict[str, Any]:
 def render_mission_brief(path: Path | str | None) -> str:
     """Project canonical mission/frontier state into one compact role briefing.
 
-    The projection selects named semantic fields only.  In particular it never
-    reads a checkpoint or copies an Engineer transcript/summary, and it writes
-    no state of its own.  Missing fields are omitted rather than inferred.
+    The projection selects named semantic fields only. It never reads a
+    checkpoint or transcript and writes no state of its own. The prior round's
+    capped Engineer account is carried explicitly so a fresh continuation does
+    not have to infer work from Reviewer status enums.
     """
     if not path:
         return ""
@@ -162,14 +163,11 @@ def render_mission_brief(path: Path | str | None) -> str:
     lines = ["## MissionBrief"]
     workdir = _brief_text(mission.get("execution_workdir"), limit=4000)
     stage = _brief_text(mission.get("stage"), limit=120)
-    work_kind = _brief_text(mission.get("work_kind"), limit=80)
     acceptance = _brief_text(mission.get("acceptance_check"))
     if workdir:
         lines.append(f"- Workdir: `{workdir}`")
     if stage:
         lines.append(f"- Stage: {stage}")
-    if work_kind:
-        lines.append(f"- Work kind: {work_kind}")
     owns_paths = [
         str(item).strip()
         for item in (mission.get("owns_paths") or [])
@@ -207,6 +205,9 @@ def render_mission_brief(path: Path | str | None) -> str:
     if reason:
         result = f"{status}: {reason}" if status else reason
         lines.append(f"- Decisive result: {result}")
+    engineer_summary = _brief_text(reviewed.get("engineer_summary"), limit=1200)
+    if engineer_summary:
+        lines.append(f"- Engineer account: {engineer_summary}")
     if reviewed and status != "done":
         missing = _brief_items(frontier.get("remaining_work"))
         if missing:
@@ -252,7 +253,6 @@ def create_mission_context(
     stage: str,
     objective: str,
     scope: str = "",
-    work_kind: str = "scope",
     acceptance_check: str = "",
     plan_hypothesis: str = "",
     goal_contribution: str = "",
@@ -302,9 +302,6 @@ def create_mission_context(
         "mission_id": str(mission_id),
         "stage": str(stage or ""),
         "scope": str(scope or ""),
-        # The default parameter still types new callers as scope, while an
-        # explicitly empty value preserves a pre-work-kind backlog mission.
-        "work_kind": str(work_kind or "").strip(),
         "objective": str(objective or "").strip(),
         "acceptance_check": str(acceptance_check or "").strip(),
         "plan_hypothesis": str(plan_hypothesis or "").strip(),
@@ -359,7 +356,6 @@ def record_engineer_handoff(
         return None
     mission_path = Path(mission_context_path)
     root = mission_path.parent
-    _ = engineer_summary
     payload = {
         "schema_version": CONTEXT_PACKET_VERSION,
         "kind": "round_engineer_handoff",
@@ -367,6 +363,7 @@ def record_engineer_handoff(
         "mission_id": root.name,
         "round": max(1, int(round_index)),
         "producer_role": "engineer",
+        "engineer_summary": str(engineer_summary or "").strip()[:4000],
         "session_id": str(thread_id or ""),
         "checkpoint": _file_reference(checkpoint_path),
         "frontier": _file_reference(root / FRONTIER_FILENAME),
@@ -396,13 +393,34 @@ def record_reviewed_handoff(
         return None
     mission_path = Path(mission_context_path)
     root = mission_path.parent
-    _ = engineer_summary
     review_payload: dict[str, Any] = {
         "status": str(getattr(review, "status", "") or ""),
         "reason": str(getattr(review, "reason", "") or "")[:4000],
         "next_action": str(getattr(review, "next_action", "") or "")[:4000],
         "operator_question": str(getattr(review, "operator_question", "") or "")[:1000],
     }
+    review_source = str(getattr(review, "review_source", "") or "").strip()
+    if review_source:
+        review_payload["review_source"] = review_source
+    manuscript_binding = getattr(review, "manuscript_snapshot", None)
+    if isinstance(manuscript_binding, dict):
+        review_payload["manuscript_snapshot"] = dict(manuscript_binding)
+    mission = _read_json_object(mission_path)
+    if (
+        str(mission.get("scope") or "").strip().lower() == "final_submission"
+        and isinstance(manuscript_binding, dict)
+    ):
+        candidate_root_text = str(mission.get("execution_workdir") or "").strip()
+        candidate_root = Path(candidate_root_text).expanduser()
+        if candidate_root_text and candidate_root.is_dir():
+            from .terminal_state import build_project_state_signature
+
+            review_payload["final_submission_signature"] = (
+                build_project_state_signature(
+                    project_root=candidate_root,
+                    state_root=root,
+                )
+            )
     frontier_path = root / FRONTIER_FILENAME
     from ..core.task_frontier import load_task_frontier, save_task_frontier
 
@@ -423,6 +441,7 @@ def record_reviewed_handoff(
         "mission_id": root.name,
         "round": max(1, int(round_index)),
         "producer_role": "reviewer",
+        "engineer_summary": str(engineer_summary or "").strip()[:4000],
         "review": review_payload,
         "checkpoint": _file_reference(checkpoint_path),
         "frontier": _file_reference(frontier_path),

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from argus_skill.core.models import ReviewDecision, RunnerResult
 from argus_skill.engineer.runner import (
     EngineerConfig,
@@ -64,10 +66,9 @@ def test_backend_death_is_blocked_not_continue() -> None:
     assert decision.backend_unavailable is True
 
 
-def test_empty_clean_output_stays_continue() -> None:
-    # A clean exit (exit_code==0, no fatal) with empty output is a MODEL-quality
-    # miss, NOT infra death: it must stay "continue" and NOT trip the backend
-    # escalation path (otherwise a flaky empty turn would falsely fail the loop).
+def test_empty_clean_output_is_reviewer_failure_not_engineer_work() -> None:
+    # An empty Reviewer turn says nothing about implementation. Routing it as
+    # continue manufactures another Engineer round from no evidence.
     class _EmptyCleanResult:
         agent_messages: list[str] = []
         exit_code = 0
@@ -79,8 +80,8 @@ def test_empty_clean_output_stays_continue() -> None:
             return _EmptyCleanResult()
 
     decision = _evaluate(Reviewer(runner=_EmptyRunner()))
-    assert decision.status == "continue"
-    assert decision.backend_unavailable is False
+    assert decision.status == "blocked"
+    assert decision.backend_unavailable is True
 
 
 def test_process_decision_succeeds_without_final_reviewer_message() -> None:
@@ -115,12 +116,17 @@ def test_invalid_named_footer_is_not_credited_as_evidence() -> None:
 
     decision = _evaluate(Reviewer(runner=_InvalidRunner()))
 
-    assert decision.status == "continue"
+    assert decision.status == "blocked"
+    assert decision.backend_unavailable is True
 
 
-def test_unavailable_engineer_model_blocks_once_with_actionable_error(
+def test_unavailable_engineer_model_pauses_for_provider_cooldown(
     tmp_path: Path,
 ) -> None:
+    """A model the CLI rejects is treated as a provider outage: the mission
+    pauses for cooldown (so the daemon retries it later instead of marking
+    the whole backlog blocked), the Reviewer never runs, and the operator
+    alert still fires."""
     events: list[dict] = []
 
     class _UnavailableModelEngineer:
@@ -157,12 +163,65 @@ def test_unavailable_engineer_model_blocks_once_with_actionable_error(
         on_event=events.append,
     )
 
-    assert status == "blocked"
+    assert status == "paused_provider_cooldown"
     assert engineer_runner.calls == 1
     assert len(rounds) == 1
+    assert rounds[0].stop_kind == "provider_cooldown"
     assert "model is unavailable" in reason.lower()
     alerts = [event for event in events if event.get("type") == "round.model_configuration_error"]
     assert len(alerts) == 1 and alerts[0]["operator_alert"] is True
+
+
+@pytest.mark.parametrize(
+    "fatal_error",
+    [
+        'Error: 421 "Misdirected Request"\nError: Failed to load models (Request ID: 1)',
+        "Error: Access denied by policy settings (Request ID: 2)",
+    ],
+)
+def test_provider_startup_refusal_pauses_instead_of_consuming_missions(
+    tmp_path: Path,
+    fatal_error: str,
+) -> None:
+    """A CLI that cannot reach any model (no catalog, policy denial) is a
+    provider outage. On 2026-09-06 such an outage ran every queued mission
+    through two failing rounds and settled it as error; the mission must pause
+    for cooldown instead so the backlog survives until access returns."""
+    events: list[dict] = []
+
+    class _RefusedEngineer:
+        calls = 0
+
+        def run_exec(self, **_kwargs):
+            self.calls += 1
+            return RunnerResult(exit_code=1, agent_messages=[], fatal_error=fatal_error)
+
+    class _ReviewerMustNotRun:
+        def evaluate(self, **_kwargs):  # pragma: no cover - contract assertion
+            raise AssertionError("Reviewer must not run when the provider refused")
+
+    engineer_runner = _RefusedEngineer()
+    engine = SupervisedEngineer(
+        engineer_runner=engineer_runner,
+        reviewer=_ReviewerMustNotRun(),
+        engineer_config=EngineerConfig(model="gpt-5.6-sol"),
+        reviewer_config=ReviewerConfig(model="gpt-5.6-sol"),
+    )
+    status, rounds, _message, _reason, _tid = engine.run(
+        objective="prove a theorem",
+        engineer_prompt_builder=lambda _next, _static=True: "prove it",
+        supervised_config=SupervisedConfig(
+            max_rounds=10,
+            backend_failure_backoff_seconds=0,
+            background_subagent_advisory=False,
+        ),
+        workdir=tmp_path,
+        on_event=events.append,
+    )
+
+    assert status == "paused_provider_cooldown"
+    assert engineer_runner.calls == 1
+    assert rounds[0].stop_kind == "provider_cooldown"
 
 
 # --------------------------------------------------------------------------- #
@@ -326,7 +385,7 @@ def test_watchdog_timeout_retries_once_from_checkpoint_in_fresh_session(
     assert status == "done"
     assert runner.calls == 2
     assert runner.resume_thread_ids == [None, None]
-    assert [include_static for include_static, _prompt in prompts] == [True, False]
+    assert [include_static for include_static, _prompt in prompts] == [True, True]
     assert reviewer.calls == 1
     assert len(rounds) == 2
     retry = next(event for event in events if event["type"] == "round.watchdog.retry")

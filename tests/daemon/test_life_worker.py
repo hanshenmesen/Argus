@@ -69,9 +69,19 @@ _ENV_VARS_TO_CLEAR = (
 
 
 @pytest.fixture(autouse=True)
-def _clear_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clear_ambient_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     for name in _ENV_VARS_TO_CLEAR:
         monkeypatch.delenv(name, raising=False)
+    # Deleting ARGUS_SKILL_HOME alone makes core.paths.global_root() fall back
+    # to the REAL ~/.argus-skill, so persisted host knobs (e.g. a pinned
+    # ARGUS_SKILL_SOURCE_ROOT in config.json) leak into every test — the
+    # daemon's source-root preflight then refuses to boot (rc=2). Point the
+    # runtime root at an empty per-test directory instead; tests that
+    # exercise default-root resolution or the worker's own export override
+    # this (monkeypatching global_root, or delenv'ing again themselves).
+    monkeypatch.setenv("ARGUS_SKILL_HOME", str(tmp_path / "ambient-home"))
 
 
 def test_max_active_daemons_defaults_to_64(
@@ -86,13 +96,13 @@ def test_max_active_daemons_defaults_to_64(
     assert life_worker_mod._max_active_daemons(LifeWorkerConfig(life_dir=tmp_path)) == 64
 
 
-def test_runner_namespace_uses_bounded_round_default_with_env_override(
+def test_runner_namespace_has_no_round_default_with_env_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = LifeWorkerConfig(life_dir=tmp_path, backend="memory")
 
-    assert _runner_namespace(config).max_rounds == 32
+    assert _runner_namespace(config).max_rounds == 0
 
     monkeypatch.setenv("ARGUS_SKILL_MAX_ROUNDS", "7")
     assert _runner_namespace(config).max_rounds == 7
@@ -111,6 +121,55 @@ def test_daemon_strict_release_preflight_fails_before_backend_probe(
     result = worker._rf_vault_preflight(SimpleNamespace(cfg=worker.config))
 
     assert result == 2
+
+
+def test_daemon_source_root_preflight_fails_before_backend_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = LifeWorker(LifeWorkerConfig(life_dir=tmp_path, backend="memory"))
+    monkeypatch.setattr(
+        "argus_skill.core.runtime_identity.source_root_preflight_error",
+        lambda: "source-root mismatch",
+    )
+
+    result = worker._rf_vault_preflight(SimpleNamespace(cfg=worker.config))
+
+    assert result == 2
+
+
+def test_daemon_refuses_a_mismatched_configured_source_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end through the real preflight: a hijacked launcher loads some
+    other worktree, so the configured deployment root no longer matches the
+    loaded package and the daemon must not come up."""
+    monkeypatch.setenv("ARGUS_SKILL_SOURCE_ROOT", str(tmp_path / "other-worktree"))
+    worker = LifeWorker(LifeWorkerConfig(life_dir=tmp_path, backend="memory"))
+
+    assert worker._rf_vault_preflight(SimpleNamespace(cfg=worker.config)) == 2
+
+
+def test_daemon_bootstrap_pins_pip_user_off_for_inherited_child_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 7x24 maintenance engineer runs dangerous_yolo by default: the codex
+    child inherits os.environ untouched, so PIP_USER=0 (the guard against
+    pip's silent user-install launcher hijack, 2026-09-05) only reaches it if
+    the daemon's own boot pins it. Exercise the real boot entry — dropping the
+    configure_framework_python_env call from _rf_bootstrap_environment must
+    fail HERE, not only in unit tests of the helper."""
+    monkeypatch.setenv("PIP_USER", "1")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    # The env wiring is under test; keep the pytest process's own handlers.
+    monkeypatch.setattr(LifeWorker, "_install_signal_handlers", lambda self: None)
+    worker = LifeWorker(LifeWorkerConfig(life_dir=tmp_path, backend="memory"))
+
+    worker._rf_bootstrap_environment()
+
+    assert os.environ["PIP_USER"] == "0"
 
 
 def test_max_active_daemons_preserves_env_and_persisted_overrides(
@@ -462,6 +521,10 @@ def test_clean_spawn_execs_helper_without_inheriting_parent_fds(
     assert captured["errors"] == "replace"
     if os.name == "nt":
         assert captured["timeout"] > 180.0
+        assert captured["creationflags"] & life_worker_mod.subprocess.CREATE_NO_WINDOW
+        startup = captured["startupinfo"]
+        assert startup.dwFlags & life_worker_mod.subprocess.STARTF_USESHOWWINDOW
+        assert startup.wShowWindow == life_worker_mod.subprocess.SW_HIDE
     else:
         assert captured["timeout"] == 15.0
     payload = json.loads(captured["input"])
@@ -895,6 +958,70 @@ def test_daemon_sink_counts_life_mission_completed() -> None:
     sink.handle_event({"type": "life.mission.completed"})
 
     assert worker._missions_completed == 1
+
+
+def test_daemon_fails_running_item_when_executor_thread_dead(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = LifeMemory.open(tmp_path)
+    memory.init()
+    item = BacklogItem.new(title="stalled", objective="finish the task")
+    memory.backlog.add(item)
+    memory.backlog.mark_running(item.id)
+    events: list[dict[str, Any]] = []
+    worker = LifeWorker(LifeWorkerConfig(life_dir=tmp_path, backend="memory"))
+    dead_executor = threading.Thread(target=lambda: None)
+    dead_executor.start()
+    dead_executor.join()
+    worker._supervisor_execution_threads = {"primary": dead_executor}
+    state = SimpleNamespace(
+        mem=memory,
+        runtime_root=tmp_path,
+        sink=SimpleNamespace(handle_event=events.append),
+    )
+    monkeypatch.setattr(
+        "argus_skill.daemon._life_worker_run._RUNNING_STALL_POLL_SECONDS",
+        0.01,
+    )
+
+    worker._start_running_stall_watcher(state)
+    try:
+        _wait_for_backlog_item_status(memory, item.id, "failed", timeout=1.0)
+    finally:
+        worker._stop_running_stall_watcher()
+
+    stored = next(row for row in memory.backlog.history() if row.id == item.id)
+    assert stored.status == "failed"
+    assert stored.last_error == "executor exited without completing the task"
+    assert len(events) == 1
+    assert events[0]["type"] == "life.mission.completed"
+    assert events[0]["success"] is False
+    assert events[0]["status"] == "failed"
+
+
+def test_daemon_does_not_fail_quiet_item_while_supervisor_is_running(
+    tmp_path: Path,
+) -> None:
+    memory = LifeMemory.open(tmp_path)
+    memory.init()
+    item = BacklogItem.new(title="quiet", objective="wait for external workers")
+    memory.backlog.add(item)
+    memory.backlog.mark_running(item.id)
+    memory.backlog.update(item.id, started_ts=time.time() - 31.0)
+    events: list[dict[str, Any]] = []
+    worker = LifeWorker(LifeWorkerConfig(life_dir=tmp_path, backend="memory"))
+    state = SimpleNamespace(
+        mem=memory,
+        runtime_root=tmp_path,
+        sink=SimpleNamespace(handle_event=events.append),
+    )
+    worker._supervisor_execution_active.set()
+
+    assert worker._fail_stalled_running_items(state) == []
+    stored = next(row for row in memory.backlog.active() if row.id == item.id)
+    assert stored.status == "running"
+    assert events == []
 
 
 def test_life_worker_continues_when_telegram_poller_start_fails(
@@ -1389,215 +1516,6 @@ def test_handoff_lock_wait_retries_until_available(
     assert attempts == 3
 
 
-def test_life_worker_post_mission_hook_canaries_reviewed_self_maintenance(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spawned: dict[str, object] = {}
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    framework = tmp_path / "framework"
-    framework.mkdir()
-
-    class _Maintenance:
-        def prepare_reviewed_change(self, _outcome):
-            return candidate
-
-        def mark_handoff_failed(self, _reason):
-            raise AssertionError("reviewed candidate should reach standby")
-
-    def _fake_spawn(config: LifeWorkerConfig, **kwargs: object) -> bool:
-        spawned["config"] = config
-        spawned.update(kwargs)
-        return True
-
-    monkeypatch.setattr(life_worker_mod, "_spawn_handoff_candidate", _fake_spawn)
-    monkeypatch.setattr(
-        "argus_skill.core.runtime_identity.source_root",
-        lambda: framework,
-    )
-
-    cfg = LifeWorkerConfig(life_dir=tmp_path, backend="memory")
-    worker = LifeWorker(cfg)
-    worker._self_maintenance = _Maintenance()
-
-    assert worker._post_mission_hook({"status": "done"}) == "daemon_handoff"
-    assert worker._stop.is_set()
-    assert spawned["config"] is cfg
-    assert spawned["candidate_source_root"] == candidate
-    assert spawned["rollback_source_root"] == framework
-    assert "self-maintenance" in str(spawned["reason"])
-
-
-def test_worker_reconciles_prepared_item_before_backlog_drain(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    life_dir = tmp_path / "life"
-    memory = LifeMemory.open(life_dir)
-    memory.init()
-    worktree = life_dir / "self-maintenance" / "repairs" / "incident123"
-    worktree.mkdir(parents=True)
-    item = memory.backlog.add(BacklogItem.new(
-        title="repair",
-        objective="repair",
-        tags=["framework_maintenance"],
-        execution_workdir=str(worktree),
-    ))
-    state_path = life_dir / "self-maintenance" / "state.json"
-    state_path.write_text(
-        json.dumps({
-            "phase": "preparing",
-            "repair_mode": "packaged_clone",
-            "incident_id": "incident123",
-            "worktree": str(worktree),
-        }),
-        encoding="utf-8",
-    )
-    runtime = tmp_path / "site-packages" / "argus_skill"
-    runtime.mkdir(parents=True)
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.setattr(
-        "argus_skill.core.runtime_identity.source_root",
-        lambda: runtime,
-    )
-    monkeypatch.setattr(
-        "argus_skill.core.runtime_identity.source_revision",
-        lambda: "",
-    )
-    config = LifeWorkerConfig(
-        life_dir=life_dir,
-        backend="codex",
-        project_workdir=project,
-        poll_interval=0.0,
-    )
-    worker = LifeWorker(config)
-    observed: list[tuple[str, str]] = []
-
-    class _Budget:
-        @staticmethod
-        def can_start(**_kwargs):
-            return True, ""
-
-    class _Supervisor:
-        config = SimpleNamespace(budget=_Budget())
-        _missions_started = 0
-        _planning_cycles = 0
-
-        def run(self):
-            state = worker._self_maintenance._state()
-            observed.append((state["phase"], state["active_item_id"]))
-            memory.backlog.mark_done(item.id)
-            worker._stop.set()
-            return {"stopped_by": ""}
-
-    supervisor = _Supervisor()
-    rf_state = SimpleNamespace(
-        runtime_root=life_dir,
-        cfg=config,
-        runner=SimpleNamespace(manager=SimpleNamespace()),
-        mem=memory,
-        sink=SimpleNamespace(handle_event=lambda _event: None),
-        daemon_sink=SimpleNamespace(self_maintenance=None),
-        sup=supervisor,
-    )
-
-    assert worker._rf_init_self_maintenance(rf_state) is None
-    worker._rf_main_loop(rf_state)
-
-    assert observed == [("queued", item.id)]
-    assert memory.backlog.all()[0].status == "done"
-
-
-def test_life_worker_post_mission_hook_closes_canary_during_continuous_drain(
-    tmp_path: Path,
-) -> None:
-    summaries: list[dict[str, object]] = []
-    outcome = {"status": "done", "success": True, "item_id": "mission-1"}
-
-    class _Maintenance:
-        def publish_after_canary(self, *, summary):
-            summaries.append(summary)
-            return "reviewed-commit"
-
-        @staticmethod
-        def prepare_reviewed_change(_outcome):
-            return None
-
-    worker = LifeWorker(LifeWorkerConfig(life_dir=tmp_path, backend="memory"))
-    worker._self_maintenance = _Maintenance()
-
-    assert worker._post_mission_hook(outcome) == ""
-    assert summaries == [{
-        "stopped_by": "",
-        "planning_cycles": 0,
-        "results": [outcome],
-    }]
-    assert not worker._stop.is_set()
-
-
-def test_life_worker_post_mission_hook_rolls_back_failed_canary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rollback = tmp_path / "rollback"
-    rollback.mkdir()
-    spawned: dict[str, object] = {}
-
-    class _Maintenance:
-        @staticmethod
-        def publish_after_canary(*, summary):  # noqa: ARG004
-            return f"rollback:{rollback}"
-
-        @staticmethod
-        def prepare_reviewed_change(_outcome):
-            raise AssertionError("failed canary must roll back before preparing work")
-
-        @staticmethod
-        def mark_handoff_failed(_reason):
-            raise AssertionError("rollback should reach standby")
-
-    def _fake_spawn(config: LifeWorkerConfig, **kwargs: object) -> bool:
-        spawned["config"] = config
-        spawned.update(kwargs)
-        return True
-
-    monkeypatch.setattr(life_worker_mod, "_spawn_handoff_candidate", _fake_spawn)
-    cfg = LifeWorkerConfig(life_dir=tmp_path, backend="memory")
-    worker = LifeWorker(cfg)
-    worker._self_maintenance = _Maintenance()
-
-    assert worker._post_mission_hook({"status": "failed", "success": False}) == (
-        "daemon_handoff"
-    )
-    assert worker._stop.is_set()
-    assert spawned["config"] is cfg
-    assert spawned["candidate_source_root"] == rollback
-    assert "restore prior runtime" in str(spawned["reason"])
-
-
-def test_life_worker_post_mission_hook_noops_without_reviewed_candidate(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spawn_called = False
-
-    def _fake_spawn(*_args: object, **_kwargs: object) -> bool:
-        nonlocal spawn_called
-        spawn_called = True
-        return True
-
-    monkeypatch.setattr(life_worker_mod, "_spawn_handoff_candidate", _fake_spawn)
-
-    worker = LifeWorker(LifeWorkerConfig(life_dir=tmp_path, backend="memory"))
-    worker._self_maintenance = None
-
-    assert worker._post_mission_hook({"status": "done"}) == ""
-    assert not worker._stop.is_set()
-    assert spawn_called is False
-
-
 def test_worker_runtime_context_includes_research_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1715,27 +1633,41 @@ def test_handoff_child_publishes_standby_then_runs(
     assert not config_path.exists()
 
 
-@pytest.mark.parametrize(
-    "phase",
-    ["canary_running", "local_active", "pr_open", "adopted"],
-)
-def test_failed_self_maintenance_handoff_marks_failed_before_rollback(
+def test_failed_handoff_rolls_back_only_to_this_runs_prior_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    phase: str,
 ) -> None:
     import argus_skill.daemon.handoff as handoff_mod
 
     cfg = LifeWorkerConfig(life_dir=tmp_path / "life", backend="memory")
     cfg.life_dir.mkdir(parents=True)
-    state_path = cfg.life_dir / "self-maintenance" / "state.json"
-    state_path.parent.mkdir()
-    state_path.write_text(
-        json.dumps({"phase": phase}),
-        encoding="utf-8",
-    )
     rollback = tmp_path / "prior-source"
     rollback.mkdir()
+    deployed = tmp_path / "deployed-source"
+    deployed.mkdir()
+    gate_spawned: dict[str, object] = {}
+
+    def fake_gate_spawn(config, **kwargs):
+        gate_spawned["config"] = config
+        gate_spawned.update(kwargs)
+        return True
+
+    handoff_mod.request_deployment_handoff(
+        cfg.life_dir / "maintenance" / "receipts",
+        deployed,
+    )
+    monkeypatch.setattr(life_worker_mod, "_spawn_handoff_candidate", fake_gate_spawn)
+    monkeypatch.setattr(
+        "argus_skill.core.runtime_identity.source_root",
+        lambda: rollback,
+    )
+    worker = LifeWorker(cfg)
+
+    assert worker._deployment_handoff_gate() == "daemon_handoff"
+    assert gate_spawned["candidate_source_root"] == deployed
+    assert gate_spawned["rollback_source_root"] == rollback
+    assert not (cfg.life_dir / "maintenance" / "receipts" / "daemon-roll.json").exists()
+
     config_path = tmp_path / "handoff-config.json"
     ready_path = tmp_path / "handoff-ready.json"
     config_path.write_text(
@@ -1756,10 +1688,7 @@ def test_failed_self_maintenance_handoff_marks_failed_before_rollback(
     monkeypatch.setenv(life_worker_mod._HANDOFF_CONFIG_ENV, str(config_path))
     monkeypatch.setenv(life_worker_mod._HANDOFF_READY_ENV, str(ready_path))
     monkeypatch.setenv(life_worker_mod._HANDOFF_TOKEN_ENV, "token-failed")
-    monkeypatch.setenv(
-        handoff_mod._HANDOFF_ROLLBACK_SOURCE_ENV,
-        str(rollback),
-    )
+    monkeypatch.setenv(handoff_mod._HANDOFF_ROLLBACK_SOURCE_ENV, str(rollback))
     monkeypatch.setattr(
         life_worker_mod,
         "_acquire_daemon_lock_with_timeout",
@@ -1769,8 +1698,8 @@ def test_failed_self_maintenance_handoff_marks_failed_before_rollback(
     monkeypatch.setattr(handoff_mod, "_spawn_handoff_candidate", fake_spawn)
 
     assert life_worker_mod.run_handoff_child() == 2
-    assert json.loads(state_path.read_text())["phase"] == "canary_failed"
     assert spawned["candidate_source_root"] == rollback
+    assert "rollback_source_root" not in spawned
 
 
 def test_daemon_pid_path(tmp_path: Path) -> None:
@@ -2153,6 +2082,8 @@ def test_resume_with_explicit_new_objective_runs_manager_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    objective_file = tmp_path / "OBJECTIVE.md"
+    objective_file.write_text("new raw objective", encoding="utf-8")
     LifeMemory.open(tmp_path).init()
     write_continuous_config(
         tmp_path,
@@ -2230,6 +2161,7 @@ def test_resume_with_explicit_new_objective_runs_manager_handoff(
             poll_interval=0.01,
             continuous=True,
             continuous_objective="new raw objective",
+            continuous_objective_file=objective_file,
             resume_continuous=True,
         )
     )
@@ -2241,6 +2173,12 @@ def test_resume_with_explicit_new_objective_runs_manager_handoff(
     assert seen["objective"] == "new manager-clean objective"
     assert seen["vertical_resolved"] is True
     assert read_continuous_state(tmp_path).objective == "new manager-clean objective"
+    identity = json.loads((tmp_path / "manager-handoff.json").read_text())
+    assert identity["version"] == 3
+    assert identity["source_objective_path"] == str(objective_file.resolve())
+    assert identity["source_objective_sha256"] == life_worker_mod._objective_sha256(
+        "new raw objective"
+    )
     events = [
         json.loads(line)
         for line in (tmp_path / "events.jsonl").read_text().splitlines()
@@ -2734,6 +2672,51 @@ def test_daemon_manager_decision_failure_preserves_persisted_campaign(
     assert degraded[0]["objective_dispatched"] is False
 
 
+def test_bounded_daemon_exits_when_manager_objective_is_not_dispatched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    LifeMemory.open(tmp_path).init()
+    monkeypatch.setenv("ARGUS_SKILL_DAEMON_TEST_ALLOW_MEMORY_CONTINUOUS", "1")
+    monkeypatch.delenv("ARGUS_SKILL_TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("ARGUS_SKILL_TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setattr(
+        "argus_skill.manager.Manager.decide_vertical",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("invalid Manager route")
+        ),
+    )
+
+    class FakeSupervisor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def run(self) -> dict[str, Any]:
+            raise AssertionError("bounded handoff failure must not drain")
+
+    monkeypatch.setattr("argus_skill.daemon.life_worker.LifeSupervisor", FakeSupervisor)
+    worker = LifeWorker(
+        LifeWorkerConfig(
+            life_dir=tmp_path,
+            backend="memory",
+            poll_interval=0.01,
+            continuous=True,
+            continuous_objective="write the bounded paper package",
+            continuous_open_ended=False,
+        )
+    )
+    worker._install_signal_handlers = lambda: None  # type: ignore[method-assign]
+
+    assert worker.run_forever() == 2
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    failed = [event for event in events if event["type"] == "life.manager.intent.failed"]
+    assert len(failed) == 1
+    assert "event_validation" not in failed[0]
+
+
 def test_daemon_boot_leaves_paused_objective_untouched(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2924,72 +2907,6 @@ def test_project_done_does_not_disable_newer_same_value_rearm(
     assert state.objective == "objective"
 
 
-def test_project_done_is_persisted_before_self_maintenance_handoff(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    write_continuous_config(
-        tmp_path,
-        enabled=True,
-        objective="objective",
-    )
-    before = read_continuous_state(tmp_path)
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    worker = LifeWorker(
-        LifeWorkerConfig(
-            life_dir=tmp_path,
-            backend="memory",
-            project_workdir=tmp_path,
-        )
-    )
-    worker._adopted_continuous_generation = before.generation
-
-    class FakeBudget:
-        def can_start(self, **_kwargs):
-            return True, ""
-
-    class FakeSupervisor:
-        config = SimpleNamespace(budget=FakeBudget())
-        _missions_started = 0
-        _planning_cycles = 0
-
-        def run(self):
-            return {"stopped_by": "project_done"}
-
-    class FakeMaintenance:
-        def reconcile_pull_request(self):
-            return ""
-
-        def audit_if_due(self, **_kwargs):
-            return f"adopt:{candidate}"
-
-        def publish_after_canary(self, **_kwargs):
-            return ""
-
-        def mark_handoff_failed(self, _reason):
-            pytest.fail("handoff should succeed")
-
-    monkeypatch.setattr(
-        life_worker_mod,
-        "_spawn_handoff_candidate",
-        lambda *_args, **_kwargs: True,
-    )
-    worker._self_maintenance = FakeMaintenance()
-    rf_state = SimpleNamespace(
-        runtime_root=tmp_path,
-        cfg=worker.config,
-        runner=SimpleNamespace(manager=None),
-        sup=FakeSupervisor(),
-    )
-
-    worker._rf_main_loop(rf_state)
-
-    after = read_continuous_state(tmp_path)
-    assert after.enabled is False
-    assert after.done_reason == "planner declared project done"
-
-
 def test_bounded_daemon_exits_after_project_done(
     tmp_path: Path,
 ) -> None:
@@ -3002,7 +2919,6 @@ def test_bounded_daemon_exits_after_project_done(
             continuous_open_ended=False,
         )
     )
-    worker._self_maintenance = None
     worker._curator = None
     calls = 0
 
@@ -3028,6 +2944,43 @@ def test_bounded_daemon_exits_after_project_done(
     assert calls == 1
 
 
+def test_bounded_daemon_exits_after_plain_backlog_is_drained(
+    tmp_path: Path,
+) -> None:
+    worker = LifeWorker(
+        LifeWorkerConfig(
+            life_dir=tmp_path,
+            backend="memory",
+            project_workdir=tmp_path,
+            poll_interval=0.0,
+            continuous_open_ended=False,
+        )
+    )
+    worker._curator = None
+    calls = 0
+
+    class FakeSupervisor:
+        config = SimpleNamespace(budget=SimpleNamespace(can_start=lambda **_kwargs: (True, "")))
+        _missions_started = 0
+        _planning_cycles = 0
+
+        def run(self):
+            nonlocal calls
+            calls += 1
+            return {"stopped_by": "backlog_empty"}
+
+    rf_state = SimpleNamespace(
+        runtime_root=tmp_path,
+        cfg=worker.config,
+        runner=SimpleNamespace(manager=None),
+        sup=FakeSupervisor(),
+    )
+
+    worker._rf_main_loop(rf_state)
+
+    assert calls == 1
+
+
 def test_open_ended_daemon_stays_resident_after_project_done(
     tmp_path: Path,
 ) -> None:
@@ -3040,7 +2993,6 @@ def test_open_ended_daemon_stays_resident_after_project_done(
             continuous_open_ended=True,
         )
     )
-    worker._self_maintenance = None
     worker._curator = None
     calls = 0
 
@@ -3080,7 +3032,6 @@ def test_daemon_stop_does_not_log_drain_failure(
             poll_interval=0.0,
         )
     )
-    worker._self_maintenance = None
     worker._curator = None
 
     class FakeSupervisor:

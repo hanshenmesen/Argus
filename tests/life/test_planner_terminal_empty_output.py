@@ -8,8 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from argus_skill.core.event_catalog import EventType
 from argus_skill.core.models import RunnerResult
 from argus_skill.core.role_decision import encode_role_decision
@@ -27,7 +25,7 @@ from argus_skill.life.supervisor._constants import (
 )
 from argus_skill.life.supervisor._core import LifeSupervisor
 from argus_skill.manager import Manager
-from argus_skill.planner import NO_CONCRETE_TASKS_ERROR, WORK_KINDS
+from argus_skill.planner import NO_CONCRETE_TASKS_ERROR
 
 
 class _RecordingSink:
@@ -126,6 +124,10 @@ class _EmptyThenTaskPlannerRunner(_EmptyPlannerThenManagerRunner):
                     [
                         "PROJECT_DONE=false",
                         "REASON=repair retry produced concrete next work",
+                        # The fixture project sits in the `delivery` stage, and
+                        # a decision that creates tasks while a stage is active
+                        # must name one.
+                        "ADVANCE_TO_STAGE=delivery",
                         "TASK_KEY=planner-empty-repair",
                         "TASK_TITLE=Repair empty planner verdict handling",
                         (
@@ -321,6 +323,51 @@ def _make_supervisor(
     return supervisor, backend, sink
 
 
+def test_review_purchase_hook_releases_stage_blocker_before_deferring(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from argus_skill.core.vertical_contract import PlannerReviewPurchaseDecision
+    from argus_skill.life.supervisor._planning_cycle_helpers import _PlanCycleState
+    from argus_skill.planner import PlannerVerdict, TaskSpec
+    from argus_skill.verticals import _base
+
+    supervisor, _backend, sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+    )
+    monkeypatch.setenv("ARGUS_SKILL_FORCE_STAGE_CLOSING", "1")
+    monkeypatch.setattr(
+        _base,
+        "load_vertical_contract",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            planner_task_issues=lambda *_args: (),
+            review_purchase=lambda **_kwargs: PlannerReviewPurchaseDecision(
+                defer_reason="current review exists",
+                release_stage_closing_blocker=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_stage_closing_reproposal_blocker",
+        lambda _task: (SimpleNamespace(), "needs repair", 1.0),
+    )
+    state = _PlanCycleState(None)
+    state.verdict = PlannerVerdict(
+        project_done=False,
+        reason="review already purchased",
+        new_tasks=[TaskSpec(title="Final paper review", objective="Review the paper.")],
+    )
+
+    supervisor._pc_build_dedupe_index(state)
+    supervisor._pc_build_pending_items(state)
+
+    assert state.pending_items == []
+    assert sink.events[-1]["skip_category"] == "paper_review_purchase_deferred"
+
+
 def test_bounded_completed_campaign_stops_before_planner_cycle(
     tmp_path: Path,
     monkeypatch,
@@ -333,10 +380,8 @@ def test_bounded_completed_campaign_stops_before_planner_cycle(
     supervisor.config.open_ended = False
     monkeypatch.setattr(
         supervisor,
-        "_plan_next_work",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("completed bounded campaign must not enter Planner")
-        ),
+        "_manager_publish_project_report",
+        lambda _reason: "reported",
     )
 
     result = supervisor.run()
@@ -347,6 +392,80 @@ def test_bounded_completed_campaign_stops_before_planner_cycle(
         event.get("type") == EventType.LIFE_PLANNER_START
         for event in sink.events
     )
+
+
+def test_direct_research_can_complete_its_bounded_deliverable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    supervisor, backend, _sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+    )
+    supervisor.config.open_ended = False
+    project = Path(supervisor.config.artifact_root)
+    from argus_skill.skills import stage_machine
+    from argus_skill.skills.vertical_select import persist_vertical
+
+    persist_vertical(
+        project,
+        "research",
+        research_target_level="exploratory",
+        workflow_mode="direct",
+    )
+    monkeypatch.setattr(
+        stage_machine,
+        "_ensure_stage_completion",
+        lambda *_args, **_kwargs: None,
+    )
+    stage_machine.complete_final_stage(
+        project,
+        reason="The reviewed direct objective is complete.",
+        allow_early_completion=True,
+    )
+    state = json.loads(
+        (project / ".argus" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
+    )
+    assert state["stages"]["idea"]["status"] == "done"
+    assert backend.planner_calls == 0
+
+
+def test_bounded_staged_research_still_requires_submission_journal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    supervisor, _backend, _sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+    )
+    supervisor.config.open_ended = False
+    project = Path(supervisor.config.artifact_root)
+    from argus_skill.skills import stage_machine
+    from argus_skill.skills.vertical_select import persist_vertical
+
+    persist_vertical(
+        project,
+        "research",
+        research_target_level="exploratory",
+        workflow_mode="staged",
+    )
+    state_path = project / ".argus" / "PIPELINE_STATE.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["current_stage"] = "submission"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(
+        stage_machine,
+        "_ensure_stage_completion",
+        lambda *_args, **_kwargs: None,
+    )
+    stage_machine.complete_final_stage(
+        project,
+        reason="The staged final stage is complete.",
+    )
+
+    assert supervisor._bounded_completion_reason() == ""
 
 
 def test_standing_campaign_is_not_stopped_by_bounded_completion_certificate(
@@ -545,24 +664,23 @@ def test_nonterminal_empty_plan_does_not_park_when_questions_are_forbidden(
     assert error_event["stop_kind"] == "planner_empty_plan"
 
 
-class _StructuredWorkKindPlannerRunner(_EmptyPlannerThenManagerRunner):
-    def __init__(self, work_kind: str) -> None:
-        super().__init__()
-        self.work_kind = work_kind
-
+class _StructuredPlannerRunner(_EmptyPlannerThenManagerRunner):
     def run_exec(self, *, prompt, options, run_label, resume_thread_id=None):
         assert run_label.startswith("planner.cycle")
         self.planner_calls += 1
         payload = {
             "project_done": False,
-            "reason": "one explicitly typed task remains",
+            "reason": "one structured task remains",
+            # The fixture project sits in the `delivery` stage, and a decision
+            # that creates tasks while a stage is active must name one. This
+            # fixture is not testing stage selection.
+            "advance_to_stage": "delivery",
             "tasks": [{
                 "key": "typed-task",
                 "deps": [],
                 "title": "Execute typed work",
                 "objective": "Run the task exactly as structured.",
                 "scope": "bounded",
-                "work_kind": self.work_kind,
             }],
         }
         return RunnerResult(
@@ -574,38 +692,48 @@ class _StructuredWorkKindPlannerRunner(_EmptyPlannerThenManagerRunner):
         )
 
 
-@pytest.mark.parametrize("work_kind", WORK_KINDS)
-def test_structured_work_kind_persists_and_reaches_engineer_context(
+def test_active_planner_node_key_reuses_item_across_rewording(
     tmp_path: Path,
     monkeypatch,
-    work_kind: str,
 ) -> None:
-    supervisor, backend, _sink = _make_supervisor(
+    supervisor, backend, sink = _make_supervisor(
         tmp_path,
         monkeypatch,
         terminal_stage_done=False,
-        backend=_StructuredWorkKindPlannerRunner(work_kind),
+        backend=_StructuredPlannerRunner(),
     )
+    existing = supervisor.memory.backlog.add(BacklogItem.new(
+        title="Assess publication-scale evidence gaps",
+        objective="Inspect the current evidence boundary.",
+        node_key="typed-task",
+        tags=["planner"],
+    ))
 
-    assert supervisor._plan_next_work() is True
+    supervisor._plan_next_work()
 
     assert backend.planner_calls == 1
-    pending = supervisor.memory.backlog.pending()
-    assert len(pending) == 1
-    item = pending[0]
-    assert item.work_kind == work_kind
-    assert f"- work_kind: {work_kind}" in supervisor._build_mission_prelude(item)
+    active = supervisor.memory.backlog.active()
+    assert [item.id for item in active] == [existing.id]
+    skipped = next(
+        event
+        for event in sink.events
+        if event.get("type") == EventType.LIFE_PLANNER_TASK_SKIPPED
+    )
+    assert skipped["matched_item_id"] == existing.id
+    assert skipped["reason"] == "duplicate pending/running task"
 
 
-def test_legacy_backlog_item_keeps_generic_work_kind_without_prose_inference() -> None:
+def test_legacy_backlog_item_ignores_work_kind() -> None:
     item = BacklogItem.from_jsonable({
         "id": "legacy-item",
         "ts": 1.0,
         "title": "Deliver optimized algorithm",
         "objective": "Set up the environment, validate, and ship.",
+        "work_kind": "validation",
     })
 
-    assert item.work_kind == ""
+    assert not hasattr(item, "work_kind")
+    assert "work_kind" not in item.to_jsonable()
 
 
 def test_nonterminal_empty_plan_repair_exhaustion_stops_for_operator_input(
@@ -792,7 +920,7 @@ def test_newer_replan_review_blocks_older_stage_replay(
         },
     )
 
-    assert supervisor._plan_next_work() is True
+    assert supervisor._plan_next_work() == PLAN_RETRY
 
     assert backend.planner_calls == 2
     assert backend.manager_calls == 0
@@ -874,6 +1002,77 @@ def test_bounded_continuous_campaign_replays_deferred_stage_review(
         and event.get("recovered_item_id") == item.id
         for event in sink.events
     )
+
+
+def test_deterministic_stage_gate_hold_is_not_re_adjudicated_next_cycle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    backend = _EmptyThenTaskPlannerRunner()
+    backend.manager_action = "advance"
+    backend.manager_target_stage = "solve"
+    supervisor, backend, sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+        backend=backend,
+        split_memory=True,
+    )
+    project = Path(supervisor.config.project_worktree)
+    _write_reviewed_math_scope_state(project)
+    monkeypatch.setattr(
+        "argus_skill.verticals._base.vertical_stage_completion_issues",
+        lambda *_args, **_kwargs: ("scope evidence is incomplete",),
+    )
+    item = supervisor.memory.backlog.add(
+        BacklogItem.new(
+            title="Define the mathematical scope",
+            objective="State the admissible conjecture class and completion bar.",
+            tags=["planner", "scope:bounded", "stage:scope"],
+        )
+    )
+    mission_path = create_mission_context(
+        life_dir=supervisor.memory.project_root,
+        mission_id=item.id,
+        stage="scope",
+        objective=item.objective,
+        scope="bounded",
+    )
+    record_reviewed_handoff(
+        mission_context_path=mission_path,
+        round_index=1,
+        engineer_summary="",
+        review=SimpleNamespace(
+            status="done",
+            reason="The scope is ready to advance.",
+            next_action="",
+            operator_question="",
+        ),
+        checkpoint_path=None,
+    )
+    supervisor.memory.backlog.mark_done(
+        item.id,
+        outcome={
+            "execution_status": "completed",
+            "review_status": "done",
+            "stage_certification": "not_assessed",
+            "interruption_kind": "none",
+            "resumable": False,
+        },
+    )
+
+    assert supervisor._reconcile_reviewed_stage_empty_plan(None) == ""
+    stored = next(row for row in supervisor.memory.backlog.all() if row.id == item.id)
+    assert stored.outcome["stage_certification"] == "not_certified"
+    assert backend.manager_calls == 1
+    assert any(
+        event.get("type") == "life.manager.stage_decision"
+        and event.get("source") == "stage_completion_gate_hold"
+        for event in sink.events
+    )
+
+    assert supervisor._reconcile_reviewed_stage_empty_plan(None) == ""
+    assert backend.manager_calls == 1
 
 
 def test_review_only_item_is_never_replayed_into_stage_writer(
@@ -1004,6 +1203,168 @@ def test_replan_with_no_planner_tasks_reaches_the_manager(
     assert outcome != PLAN_ERROR
 
 
+def test_terminal_replan_trigger_revises_active_same_plan_siblings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    supervisor, backend, sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+        backend=_StructuredPlannerRunner(),
+    )
+    trigger = BacklogItem(
+        id=BacklogItem.new_id(),
+        ts=time.time(),
+        title="Score completed run",
+        objective="Score the completed run.",
+        status="failed",
+        plan_id="plan-1",
+        plan_version=1,
+        node_key="score-run",
+    )
+    sibling = BacklogItem(
+        id=BacklogItem.new_id(),
+        ts=time.time(),
+        title="Gate matched follow-up",
+        objective="Gate the matched follow-up.",
+        status="pending",
+        plan_id="plan-1",
+        plan_version=1,
+        node_key="gate-follow-up",
+    )
+    supervisor.memory.backlog.add_many([trigger, sibling])
+
+    outcome = supervisor._plan_next_work(
+        revision_request={
+            "item_id": trigger.id,
+            "expected_plan_id": "plan-1",
+            "expected_plan_version": 1,
+            "review_reason": "the completed run invalidates the sibling path",
+        }
+    )
+
+    assert outcome is True
+    assert backend.planner_calls == 1
+    stored = {item.id: item for item in supervisor.memory.backlog.all()}
+    assert stored[trigger.id].status == "failed"
+    assert stored[sibling.id].status == "superseded"
+    replacement = next(
+        item for item in stored.values()
+        if item.plan_id != "plan-1" and item.status == "pending"
+    )
+    assert replacement.plan_version == 2
+    proposed = next(
+        event for event in sink.events
+        if event.get("type") == "life.plan.revision.proposed"
+    )
+    assert proposed["active_item_ids"] == [sibling.id]
+    committed = next(
+        event for event in sink.events
+        if event.get("type") == "life.plan.revision.committed"
+    )
+    assert committed["superseded_item_ids"] == [sibling.id]
+
+
+def test_terminal_replan_trigger_without_active_siblings_plans_fresh(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    supervisor, backend, sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+        backend=_StructuredPlannerRunner(),
+    )
+    trigger = BacklogItem(
+        id=BacklogItem.new_id(),
+        ts=time.time(),
+        title="Score completed run",
+        objective="Score the completed run.",
+        status="failed",
+        plan_id="plan-1",
+        plan_version=1,
+        node_key="score-run",
+    )
+    supervisor.memory.backlog.add(trigger)
+
+    outcome = supervisor._plan_next_work(
+        revision_request={
+            "item_id": trigger.id,
+            "expected_plan_id": "plan-1",
+            "expected_plan_version": 1,
+            "review_reason": "the completed run leaves no same-plan work",
+        }
+    )
+
+    assert outcome is True
+    assert backend.planner_calls == 1
+    stored = {item.id: item for item in supervisor.memory.backlog.all()}
+    assert stored[trigger.id].status == "failed"
+    pending = supervisor.memory.backlog.pending()
+    assert len(pending) == 1
+    assert pending[0].plan_version == 1
+    rejected = next(
+        event for event in sink.events
+        if event.get("type") == "life.plan.revision.rejected"
+    )
+    assert "planning fresh work instead" in rejected["reason"]
+    assert rejected["expected_plan_id"] == "plan-1"
+    assert rejected["expected_plan_version"] == 1
+
+
+def test_stale_terminal_replan_trigger_still_rejects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    supervisor, backend, sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+        backend=_StructuredPlannerRunner(),
+    )
+    trigger = BacklogItem(
+        id=BacklogItem.new_id(),
+        ts=time.time(),
+        title="Score old completed run",
+        objective="Score the old completed run.",
+        status="failed",
+        plan_id="plan-1",
+        plan_version=1,
+        node_key="score-old-run",
+    )
+    active_current = BacklogItem(
+        id=BacklogItem.new_id(),
+        ts=time.time(),
+        title="Continue current run",
+        objective="Continue the current run.",
+        status="pending",
+        plan_id="plan-2",
+        plan_version=2,
+        node_key="continue-current",
+    )
+    supervisor.memory.backlog.add_many([trigger, active_current])
+
+    outcome = supervisor._plan_next_work(
+        revision_request={
+            "item_id": trigger.id,
+            "expected_plan_id": "plan-2",
+            "expected_plan_version": 2,
+            "review_reason": "old evidence must not revise the current plan",
+        }
+    )
+
+    assert outcome == PLAN_ERROR
+    assert backend.planner_calls == 0
+    stored = {item.id: item for item in supervisor.memory.backlog.all()}
+    assert stored[active_current.id].status == "pending"
+    rejected = next(
+        event for event in sink.events
+        if event.get("type") == "life.plan.revision.rejected"
+    )
+    assert rejected["reason"] == "plan revision conflict: active revision changed"
+
+
 def test_unversioned_item_replan_degrades_to_planning_not_a_dead_end(
     tmp_path: Path,
     monkeypatch,
@@ -1054,5 +1415,6 @@ def test_unversioned_item_replan_degrades_to_planning_not_a_dead_end(
         for event in sink.events
         if event.get("type") == "life.plan.revision.rejected"
     ]
-    assert rejected, "the degradation must stay on the record"
-    assert "planning fresh work instead" in rejected[0]["reason"]
+    assert rejected == [], (
+        "an unversioned item has no versioned plan revision to reject"
+    )

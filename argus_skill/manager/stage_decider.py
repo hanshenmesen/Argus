@@ -339,6 +339,7 @@ def _review_certifies_completion(
     mission_scope: str = "",
     research_target_level: str | None = None,
     checklist_contract: Any | None = None,
+    research_result_scope: str = "",
 ) -> str:
     """Empty when this verdict may close the project; a reason otherwise.
 
@@ -353,10 +354,16 @@ def _review_certifies_completion(
     right: the protection they asserted was real, it just was not where anyone
     thought it was. The target is now checked on purpose.
     """
-    _ = (vertical, mission_scope, checklist_contract)
+    _ = (mission_scope, checklist_contract)
     status = str(getattr(review, "status", "") or "").strip().lower()
     if status != "done":
         return "review_not_done"
+    if str(vertical or "").strip().lower() == "research":
+        # A paper's independent final review is the certification. The
+        # structured grades the Reviewer attaches summarize that verdict; they
+        # are not a second, mechanical judge of it. Formal verticals (math)
+        # keep the grade check below because their evidence is machine-checked.
+        return ""
     if research_target_level:
         from ..core.research_contract import research_completion_issue
 
@@ -370,6 +377,7 @@ def _review_certifies_completion(
         issue = research_completion_issue(
             getattr(review, "research_result", None),
             research_target_level=research_target_level,
+            scope=research_result_scope,
         )
         if issue:
             return issue
@@ -421,6 +429,11 @@ def final_stage_completion_decision(
         mission_scope=mission_scope,
         research_target_level=research_target_level,
         checklist_contract=checklist_contract,
+        research_result_scope=(
+            "idea_only"
+            if allow_early_completion and cur == "idea" and vertical == "research"
+            else ""
+        ),
     )
     if missing:
         return None
@@ -481,7 +494,7 @@ def final_stage_completion_blockers(
             f"{_STAGE_POSITION_BLOCKER} ({order[-1]!r}); this "
             f"project is at {cur!r}. Advance through the remaining stages "
             f"({', '.join(order[order.index(cur) + 1:])}) instead — each one "
-            "runs its own completion gate on the way past"
+            "has its own completion bar on the way past"
         )
     blocker = str(completion_blocker or "").strip()
     if blocker:
@@ -493,9 +506,8 @@ def final_stage_completion_blockers(
     ):
         blockers.append(
             f"a mission scoped {mission_scope or '(unset)'!r} cannot close a "
-            f"{vertical or 'this'!r} project: its completion gate is "
-            "'certified', so only a 'final_submission' mission carries the "
-            "authority to end it"
+            f"{vertical or 'this'!r} project: its completion is certified, "
+            "so only a 'final_submission' mission carries the authority to end it"
         )
     missing = str(
         _review_certifies_completion(
@@ -504,6 +516,11 @@ def final_stage_completion_blockers(
             mission_scope=mission_scope,
             research_target_level=research_target_level,
             checklist_contract=checklist_contract,
+            research_result_scope=(
+                "idea_only"
+                if allow_early_completion and cur == "idea" and vertical == "research"
+                else ""
+            ),
         )
         or ""
     ).strip()

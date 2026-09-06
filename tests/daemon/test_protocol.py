@@ -64,6 +64,81 @@ def test_mission_width_round_trips_and_supports_zero_one_or_many(
         assert config_from_payload(config_payload(config)).mission_width == width
 
 
+def test_family_failure_breaker_defaults_track_supervisor_config(
+    tmp_path: Path,
+) -> None:
+    from argus_skill.life.supervisor._config import LifeSupervisorConfig
+
+    config = LifeWorkerConfig(life_dir=tmp_path, backend="memory")
+
+    assert (
+        config.subagent_family_failure_streak_limit
+        == LifeSupervisorConfig.subagent_family_failure_streak_limit
+    )
+    assert (
+        config.subagent_family_failure_window_hours
+        == LifeSupervisorConfig.subagent_family_failure_window_hours
+    )
+
+
+def test_family_failure_breaker_explicit_zero_survives_round_trip(
+    tmp_path: Path,
+) -> None:
+    # 0 is the documented "breaker off" value; ``or``-style fallbacks used to
+    # revert it to the default after a payload round trip.
+    config = LifeWorkerConfig(
+        life_dir=tmp_path,
+        backend="memory",
+        subagent_family_failure_streak_limit=0,
+        subagent_family_failure_window_hours=0.0,
+    )
+
+    restored = config_from_payload(config_payload(config))
+
+    assert restored.subagent_family_failure_streak_limit == 0
+    assert restored.subagent_family_failure_window_hours == 0.0
+
+
+def test_family_failure_breaker_invalid_payload_values_fall_back_to_default(
+    tmp_path: Path,
+) -> None:
+    # The daemon recovery path deserializes handoff payloads it did not write;
+    # a non-numeric field must fall back to the factory default, not raise and
+    # keep the daemon from booting.
+    from argus_skill.life.supervisor._config import LifeSupervisorConfig
+
+    payload = config_payload(LifeWorkerConfig(life_dir=tmp_path, backend="memory"))
+    payload["subagent_family_failure_streak_limit"] = ""
+    payload["subagent_family_failure_window_hours"] = "abc"
+
+    restored = config_from_payload(payload)
+
+    assert restored.subagent_family_failure_streak_limit == 3
+    assert (
+        restored.subagent_family_failure_streak_limit
+        == LifeSupervisorConfig.subagent_family_failure_streak_limit
+    )
+    assert (
+        restored.subagent_family_failure_window_hours
+        == LifeSupervisorConfig.subagent_family_failure_window_hours
+    )
+
+
+def test_continuous_objective_file_round_trips(tmp_path: Path) -> None:
+    objective = tmp_path / "OBJECTIVE.md"
+    config = LifeWorkerConfig(
+        life_dir=tmp_path,
+        backend="memory",
+        continuous=True,
+        continuous_objective="keep exploring",
+        continuous_objective_file=objective,
+    )
+
+    restored = config_from_payload(config_payload(config))
+
+    assert restored.continuous_objective_file == objective
+
+
 def test_daemon_status_reports_copilot_when_codex_is_missing(
     tmp_path: Path,
     monkeypatch,
@@ -242,7 +317,7 @@ def test_manifest_drift_is_incompatible_when_strict_release_gate_is_on(
     )
 
 
-def test_clean_self_managed_canary_may_differ_from_webapi_release(
+def test_clean_handoff_candidate_may_differ_from_webapi_release(
     tmp_path: Path,
 ) -> None:
     status = DaemonStatus(

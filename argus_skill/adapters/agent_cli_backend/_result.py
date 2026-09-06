@@ -16,22 +16,16 @@ from typing import Any
 
 from ...core.models import RunnerResult
 from ...core.role_decision import extract_role_decisions
+from ...core.runner_errors import is_model_catalog_startup_error
 from ...core.stop_kinds import (
     StopKind,
     normalize_stop_kind,
     stop_kind_from_external_interrupt,
 )
-from ...core.token_usage import TokenUsage, extract_token_usage, sum_token_counts
+from ...core.token_usage import TokenUsage, extract_token_usage
 from ...provider_integrations.copilot_usage import CopilotCallUsage
 
 log = logging.getLogger(__name__)
-
-
-def _sum_token_counts(
-    events: list[dict[str, Any]] | None,
-) -> tuple[int, int, int, int]:
-    """Backward-compatible adapter export for existing callers/tests."""
-    return sum_token_counts(events)
 
 
 _AUTH_FAILURE_PATTERNS: tuple[str, ...] = (
@@ -166,23 +160,6 @@ def _coerce_int(value: Any) -> int:
         except ValueError:
             return 0
     return 0
-
-
-def _sum_copilot_premium_requests(events: list[dict[str, Any]] | None) -> float:
-    """Best-effort copilot premium-request total from its JSON event stream.
-
-    EN: The copilot CLI ends each turn with a ``result`` event carrying
-    ``usage.premiumRequests`` — a SESSION-CUMULATIVE running total (turn 1: 7.5,
-    after a resumed turn: 15, …), NOT a per-turn delta. We return the LAST such
-    total seen; the backend adapter de-cumulates it into this call's delta
-    per-thread (mirroring how codex token totals are handled). codex/claude
-    emit no such field → 0.0.
-    中文：copilot CLI 每轮以 ``result`` 事件收尾，带 ``usage.premiumRequests``——这是
-    「会话累计」总数（第 1 轮 7.5，续接后 15…），非单轮增量。这里取最后一次的累计值；
-    适配层再按线程把它去累计成本次调用的增量（与 codex token 累计处理一致）。
-    codex/claude 无此字段 → 0.0。
-    """
-    return _extract_copilot_premium_requests(events)[0]
 
 
 def _extract_copilot_premium_requests(
@@ -392,6 +369,10 @@ def translate_result(
         stderr_diagnostic = "\n".join(
             map(str, getattr(cli_result, "stderr_lines", None) or [])
         ).strip()
+        if is_model_catalog_startup_error(stderr_diagnostic):
+            # CLI startup can provide only a generic terminal receipt while
+            # stderr explains that model discovery failed before any turn.
+            fatal_error = stderr_diagnostic
         if stderr_diagnostic and stderr_diagnostic not in failure_diagnostic:
             failure_diagnostic = "\n".join(
                 part for part in (failure_diagnostic, stderr_diagnostic) if part
@@ -399,10 +380,7 @@ def translate_result(
     return RunnerResult(
         exit_code=cli_result.exit_code,
         agent_messages=list(cli_result.agent_messages or []),
-        role_decisions=extract_role_decisions([
-            *(cli_result.agent_messages or []),
-            *(cli_result.stdout_lines or []),
-        ]),
+        role_decisions=extract_role_decisions(cli_result.agent_messages or []),
         stdout_lines=list(cli_result.stdout_lines or []),
         stderr_lines=list(cli_result.stderr_lines or []),
         thread_id=cli_result.thread_id or resume_thread_id,

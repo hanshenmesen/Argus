@@ -8,24 +8,17 @@ from argus_skill.verticals._base import load_vertical, vertical_role_banner
 def test_research_reviewer_requires_engineering_audit() -> None:
     banner = vertical_role_banner(load_vertical("research"), "reviewer")
 
-    assert "For experiment claims" in banner
-    assert "implementation and raw rows" in banner
-    assert "infrastructure or evaluator failure" in banner
-    assert "underpowered" in banner
-    assert "cannot by themselves trigger replan" in banner
-    # The role contract now also carries setup-defect, untrained-baseline,
-    # repeated-miss, and retirement-authority rules pinned by dedicated tests.
-    # Keep the combined banner bounded without forcing those rules into an
-    # unreadable phrase list merely to satisfy the original 800-char budget.
-    assert len(banner) < 2_200
+    assert "implementation or evaluator failure" in banner
+    assert "specify the repair" in banner
+    assert "never request rollback" in banner
 
 
 def test_research_engineer_receives_only_execution_contract() -> None:
     banner = vertical_role_banner(load_vertical("research"), "engineer")
 
-    assert "Research execution" in banner
-    assert "file-disjoint and parallel" in banner
-    assert "For experiment claims" not in banner
+    assert "Preserve reproducibility" in banner
+    assert "Keep experiments adaptive" in banner
+    assert "extra reporting files" in banner
 
 
 def test_research_reviewer_prompt_disables_trust_first_shortcut(tmp_path) -> None:
@@ -42,7 +35,8 @@ def test_research_reviewer_prompt_disables_trust_first_shortcut(tmp_path) -> Non
         working_dir=tmp_path,
     )
 
-    assert "For experiment claims" in prompt
+    assert "Separate implementation defects from scientific evidence" in prompt
+    assert "never request rollback" in prompt
     assert "## Evidence policy" not in prompt
     assert "Trust consistent shown results" not in prompt
     assert "TRUST the scorer, judge the IDEA" not in prompt

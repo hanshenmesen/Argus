@@ -18,6 +18,7 @@ _BACKEND_LABEL = {
     "codex": "Codex",
     "claude": "Claude Code",
     "copilot": "Copilot",
+    "cursor": "Cursor CLI",
     "opencode": "OpenCode",
     "pi": "Pi",
     "grok": "Grok Build",
@@ -71,8 +72,8 @@ _ROLE_DESC = {
 @dataclass(frozen=True)
 class RoleConfig:
     role: str
-    backend: str  # codex / claude / copilot / opencode / pi / grok / qoder / dsh / memory
-    backend_label: str  # Codex / Claude Code / Copilot / OpenCode / Pi / Grok
+    backend: str  # codex / claude / copilot / cursor / opencode / pi / grok / qoder / dsh / memory
+    backend_label: str  # Codex / Claude Code / Copilot / Cursor CLI / OpenCode / Pi / Grok
     model: str
     effort: str | None  # None → not a reasoning model (effort N/A)
     desc: str
@@ -93,7 +94,12 @@ def _normalize_backend(raw: str) -> str:
 def _resolve_backend(role: str, env: Mapping[str, str]) -> str:
     from .knobs import resolve_role_backend
 
-    requested = resolve_role_backend(role, env=env)
+    # default="codex": read-only display resolver. `/roles` and the cockpit
+    # role panel must still render on a host where nothing is configured, and
+    # codex is what the execution paths that CAN assume a backend also assume,
+    # so the panel keeps matching what a run would really do. Provenance for
+    # the daemon's own roles is carried by life.<role>.backend_resolved.
+    requested = resolve_role_backend(role, env=env, default="codex")
     normalized = _normalize_backend(requested)
     if normalized == "memory":
         return normalized

@@ -11,11 +11,16 @@ settlement, dynamic-plan stage guard, final status + journal) lives in
 
 from __future__ import annotations
 
+import json
 import logging
+import shlex
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
+from ...agent_cli._process_control import windows_hidden_subprocess_kwargs
 from ...core.event_catalog import EventType
 from ...core.stop_kinds import normalize_stop_kind, pause_status_for_stop_kind
 from ...core.usage import UsageLedger, UsageRecord
@@ -25,6 +30,72 @@ from ._cost import _CostTrackingSink
 from ._mission_execution_helpers import _MissionRunState
 
 log = logging.getLogger(__name__)
+
+
+def _run_hidden(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """Run a non-interactive maintenance command without a Windows console."""
+    for key, value in windows_hidden_subprocess_kwargs().items():
+        kwargs.setdefault(key, value)
+    return subprocess.run(*args, **kwargs)
+
+
+def _maintenance_sidecar_path(
+    life_root: Path | str, item_id: str, *, fallback_root: Path | str | None = None,
+) -> Path:
+    sidecar = Path(life_root) / "maintenance" / "pending" / f"{item_id}.json"
+    if not sidecar.is_file() and fallback_root is not None:
+        legacy = Path(fallback_root) / "maintenance" / "pending" / f"{item_id}.json"
+        if legacy.is_file():
+            return legacy
+    return sidecar
+
+
+def _remove_clean_maintenance_worktree(repository: Path, worktree: Path) -> None:
+    """Remove an authoring worktree only when all local evidence is committed."""
+    if worktree.exists():
+        # Git can remove ignored logs even without --force. Preserve those
+        # alongside tracked changes and untracked authoring evidence.
+        status = _run_hidden(
+            ["git", "status", "--porcelain", "--untracked-files=all", "--ignored"],
+            cwd=worktree,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if status.returncode or status.stdout.strip():
+            raise RuntimeError(
+                "maintenance authoring worktree retained: "
+                "uncommitted/ignored files exist or cleanliness could not be verified"
+            )
+        result = _run_hidden(
+            ["git", "worktree", "remove", str(worktree)],
+            cwd=repository,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            detail = (result.stderr or result.stdout or "git refused removal").strip()
+            raise RuntimeError(f"maintenance authoring worktree retained: {detail}")
+
+
+def dispose_maintenance_worktree(
+    life_root: Path | str,
+    item_id: str,
+    *,
+    keep_sidecar: bool = False,
+) -> None:
+    """Remove the authoring worktree recorded for one maintenance mission."""
+    sidecar = _maintenance_sidecar_path(life_root, item_id)
+    try:
+        metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    repository = Path(metadata["repository"]).expanduser().resolve(strict=True)
+    worktree = Path(metadata["worktree"]).expanduser().resolve()
+    _remove_clean_maintenance_worktree(repository, worktree)
+    if not keep_sidecar:
+        sidecar.unlink(missing_ok=True)
 
 
 class MissionExecutionRuntimeMixin:
@@ -40,6 +111,31 @@ class MissionExecutionRuntimeMixin:
         except TypeError:
             # Compatibility with narrow host-provided memory views.
             prelude = self.memory.render_prelude()
+        from ...core.operator_context import build_operator_context_block
+
+        operator_context, _revision = build_operator_context_block(
+            "engineer",
+            self.memory.root,
+            mission_id=item.id,
+            consume_once=False,
+        )
+        if operator_context:
+            # Live facts belong at the tail for provider prefix caching and
+            # model recency; role/task policy above remains byte-stable.
+            prelude = (
+                prelude + "\n\n---\n\n" + operator_context
+                if prelude
+                else operator_context
+            )
+        from ..research_plan import render_research_plan_for_mission
+
+        research_plan = render_research_plan_for_mission(self.memory.root)
+        if research_plan:
+            prelude = (
+                research_plan + "\n\n---\n\n" + prelude
+                if prelude
+                else research_plan
+            )
         item_metadata = self._render_backlog_item_metadata(item)
         if item_metadata:
             prelude = (
@@ -55,7 +151,88 @@ class MissionExecutionRuntimeMixin:
         requested = str(getattr(item, "execution_workdir", "") or "").strip()
         tags = {str(tag or "").strip().lower() for tag in item.tags}
         current = self._project_workdir().expanduser().resolve(strict=True)
-        if not requested or "framework_maintenance" in tags:
+        if "framework_maintenance" in tags:
+            from ...core.runtime_identity import source_root
+
+            repository = source_root().expanduser().resolve(strict=True)
+            maintenance_root = Path(self.memory.root) / "maintenance"
+            worktree = maintenance_root / "worktrees" / item.id
+            sidecar = _maintenance_sidecar_path(self.memory.root, item.id)
+            if sidecar.is_file():
+                metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+                recorded_repository = Path(metadata["repository"]).expanduser().resolve(
+                    strict=True
+                )
+                recorded_worktree = Path(metadata["worktree"]).expanduser().resolve()
+                requested_worktree = (
+                    Path(requested).expanduser().resolve() if requested else recorded_worktree
+                )
+                if (
+                    recorded_repository != repository
+                    or recorded_worktree != worktree.resolve()
+                    or requested_worktree != recorded_worktree
+                ):
+                    raise ValueError("framework maintenance worktree record is inconsistent")
+                if recorded_worktree.is_dir():
+                    self.memory.backlog.update(
+                        item.id,
+                        execution_workdir=str(recorded_worktree),
+                    )
+                    item.execution_workdir = str(recorded_worktree)
+                    return recorded_worktree
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            _run_hidden(
+                ["git", "fetch", "origin", "main"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            public_base = _run_hidden(
+                ["git", "rev-parse", "refs/remotes/origin/main"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            try:
+                _run_hidden(
+                    [
+                        "git", "worktree", "add", "--detach",
+                        str(worktree), public_base,
+                    ],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                pending = maintenance_root / "pending"
+                pending.mkdir(parents=True, exist_ok=True)
+                (pending / f"{item.id}.json").write_text(
+                    json.dumps({
+                        "repository": str(repository),
+                        "public_base": public_base,
+                        "worktree": str(worktree),
+                    }, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            except (OSError, subprocess.CalledProcessError):
+                try:
+                    _remove_clean_maintenance_worktree(repository, worktree)
+                except (OSError, RuntimeError):
+                    log.warning(
+                        "maintenance creation rollback retained worktree %s",
+                        worktree,
+                        exc_info=True,
+                    )
+                raise
+            self.memory.backlog.update(
+                item.id,
+                execution_workdir=str(worktree),
+            )
+            item.execution_workdir = str(worktree)
+            return worktree
+        if not requested:
             return current
         configured_reader = getattr(self, "_configured_worktree", None)
         base = configured_reader() if callable(configured_reader) else current
@@ -71,6 +248,92 @@ class MissionExecutionRuntimeMixin:
         if adopted != current:
             self._emit_status(f"campaign workdir adopted: {adopted}")
         return adopted
+
+    def _freeze_reviewed_maintenance_change(self, state: _MissionRunState) -> str:
+        item = state.item
+        sidecar = _maintenance_sidecar_path(self.memory.root, item.id)
+        metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        repository = Path(metadata["repository"]).expanduser().resolve(strict=True)
+        worktree = Path(metadata["worktree"]).expanduser().resolve(strict=True)
+        if worktree != Path(state.execution_workdir).resolve(strict=True):
+            raise ValueError("maintenance worktree does not match its runtime record")
+
+        runtime_dir = worktree / ".argus-self-maintenance-runtime"
+        if runtime_dir.exists():
+            shutil.rmtree(runtime_dir)
+
+        if _run_hidden(
+            ["git", "status", "--porcelain"],
+            cwd=worktree,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip():
+            _run_hidden(
+                ["git", "add", "--all"],
+                cwd=worktree,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            _run_hidden(
+                [
+                    "git",
+                    "-c", "user.name=Argus Runtime",
+                    "-c", "user.email=argus-runtime@localhost",
+                    "commit", "-m", "Reviewed maintenance change",
+                ],
+                cwd=worktree,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        candidate = _run_hidden(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        acceptance_command = tuple(shlex.split(item.acceptance_check))
+        if not acceptance_command:
+            raise ValueError("maintenance mission requires an executable acceptance command")
+
+        from ...maintenance.deploy_boundary import (
+            ReviewedChange,
+            deployment_input_digest,
+        )
+
+        change = ReviewedChange(
+            repository=repository,
+            public_base=str(metadata["public_base"]),
+            reviewed_candidate=candidate,
+            reviewer_verdict="done",
+            acceptance_command=acceptance_command,
+            evidence_refs=tuple(
+                json.dumps(ref, sort_keys=True, separators=(",", ":"))
+                for ref in item.context_refs
+            ),
+            mission_id=item.id,
+            receipt_dir=Path(self.memory.root) / "maintenance" / "receipts",
+        )
+        input_digest = deployment_input_digest(change)
+        metadata.update({
+            "reviewed_candidate": change.reviewed_candidate,
+            "reviewer_verdict": change.reviewer_verdict,
+            "acceptance_command": list(change.acceptance_command),
+            "evidence_refs": list(change.evidence_refs),
+            "mission_id": change.mission_id,
+            "receipt_dir": str(change.receipt_dir),
+            "origin_remote": change.origin_remote,
+            "private_remote": change.private_remote,
+            "input_digest": input_digest,
+        })
+        sidecar.write_text(
+            json.dumps(metadata, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return input_digest
 
     def _mission_vertical_root(
         self,
@@ -131,6 +394,27 @@ class MissionExecutionRuntimeMixin:
         state.usage_attempt_id = f"{item.id}:attempt:{max(1, int(item.attempt or 1))}"
         self._missions_started += 1
         state.item_scope = self._planner_scope_from_item(item)
+        if item.plan_id and item.plan_version is not None:
+            try:
+                active_item_ids = [
+                    row.id
+                    for row in self.memory.backlog.active()
+                    if row.plan_id == item.plan_id
+                    and row.plan_version == item.plan_version
+                    and row.status
+                    not in {"done", "failed", "aborted", "skipped", "superseded"}
+                ]
+            except Exception:  # noqa: BLE001 - revision conflicts fail closed later
+                log.exception("life supervisor: failed to capture plan revision witness")
+                active_item_ids = []
+            if item.id in active_item_ids:
+                state.plan_revision_witness = {
+                    "plan_id": item.plan_id,
+                    "plan_version": item.plan_version,
+                    "source_item_id": item.id,
+                    "active_item_ids": active_item_ids,
+                    "captured_at": time.time(),
+                }
 
         self._emit({
             "type": EventType.LIFE_MISSION_STARTED,
@@ -174,7 +458,6 @@ class MissionExecutionRuntimeMixin:
                 mission_id=item.id,
                 stage=state.pipeline_stage_at_start,
                 scope=state.item_scope,
-                work_kind=item.work_kind,
                 objective=item.objective,
                 acceptance_check=getattr(item, "acceptance_check", ""),
                 plan_hypothesis=getattr(item, "plan_hypothesis", ""),
@@ -443,10 +726,6 @@ class MissionExecutionRuntimeMixin:
                     )
                 if "vertical_override" in params or _accepts_kw:
                     execute_kwargs["vertical_override"] = execution_vertical
-                if "work_kind" in params or _accepts_kw:
-                    execute_kwargs["work_kind"] = str(
-                        getattr(item, "work_kind", "") or ""
-                    ).strip()
                 if state.repair_capability is not None:
                     if "max_rounds_override" in params or _accepts_kw:
                         execute_kwargs["max_rounds_override"] = 1
@@ -473,9 +752,10 @@ class MissionExecutionRuntimeMixin:
                     str(state.context_packet_path) if state.context_packet_path else ""
                 )
                 execute_kwargs["vertical_override"] = execution_vertical
-                execute_kwargs["work_kind"] = str(
-                    getattr(item, "work_kind", "") or ""
-                ).strip()
+                execute_kwargs["preplanned"] = any(
+                    str(tag).strip().lower() == "planner"
+                    for tag in getattr(item, "tags", [])
+                )
                 if state.repair_capability is not None:
                     execute_kwargs["max_rounds_override"] = 1
                     execute_kwargs["workflow_mode_override"] = "direct"
@@ -561,9 +841,10 @@ class MissionExecutionRuntimeMixin:
     def _derive_basic_outcome_fields(self, state: _MissionRunState) -> None:
         """Fill in success/status/stop_kind and settle mission-level bookkeeping.
 
-        This covers skill evolution, the legacy usage-ledger fallback append,
-        and the ``auth_failure`` advisory event — all independent of whatever
-        happens next (pause / repair settlement / stage transitions).
+        This covers the legacy usage-ledger fallback append and the
+        ``auth_failure`` advisory event. Skill evolution waits for final
+        settlement because repair rejection or a Manager HOLD may still turn a
+        locally successful run into a failed mission.
         """
         outcome = state.outcome
         item = state.item
@@ -574,17 +855,6 @@ class MissionExecutionRuntimeMixin:
         state.stop_kind = normalize_stop_kind(getattr(outcome, "stop_kind", None))
         if state.status == "budget_exhausted" and state.stop_kind is None:
             state.stop_kind = "budget_exhausted"
-        self._evolve_runtime_skills_after_mission(
-            success=state.success,
-            usage_mission_id=state.usage_attempt_id,
-            mission_objective=str(
-                item.original_objective or item.objective or item.title or ""
-            ),
-            mission_result=(
-                f"status={state.status}; stop_kind={state.stop_kind or 'none'}; "
-                f"reason={state.stop_reason or 'none'}"
-            ),
-        )
         usage_summary = state.cost_sink.usage_summary()
         state.usage_summary = usage_summary
         state.usd = usage_summary.cost_usd
@@ -637,11 +907,9 @@ class MissionExecutionRuntimeMixin:
                 ),
             })
 
-        # The post-mission critic/polish iteration loop was removed (the L1
-        # engineer works, the L2 reviewer verifies — no separate critic agent).
-        # The ``iteration`` journal/event keys below are kept EMPTY only for
-        # schema back-compat. / 事后 critic/迭代循环已移除；下方 journal/event 的
-        # ``iteration`` 字段保留为空，仅为 schema 向后兼容。
+        # There is no post-mission Critic call: the L1 Engineer works and the L2
+        # Reviewer verifies. A vertical may turn a trusted charter shortfall
+        # from that verdict into another bounded cycle during settlement.
 
     def _maybe_pause_for_recoverable_stop(
         self, state: _MissionRunState,
@@ -649,6 +917,93 @@ class MissionExecutionRuntimeMixin:
         """Return a pause result dict, or ``None`` to continue the lifecycle."""
         outcome = state.outcome
         item = state.item
+        if state.status == "paused_external_work":
+            from ...engineer.external_work import (
+                inspect_external_work,
+                parse_external_wait_request,
+            )
+
+            wait_request = parse_external_wait_request(
+                str(
+                    getattr(outcome, "final_message", "")
+                    or getattr(outcome, "summary", "")
+                    or ""
+                )
+            )
+            if wait_request is None:
+                state.status = "error"
+                state.stop_reason = "external-work pause lacks a structured wait request"
+                return None
+            wait_kind, work_id = wait_request
+            workdir = Path(state.execution_workdir)
+            external_work = inspect_external_work(workdir, work_id)
+            if external_work is None or not external_work.waitable:
+                self.memory.backlog.update(
+                    item.id,
+                    status="pending",
+                    started_ts=None,
+                    running_owner="",
+                    last_error="external work changed before pause settlement",
+                )
+                return {
+                    "success": False,
+                    "status": "external_work_changed",
+                    "item_id": item.id,
+                    "external_wait": {
+                        "kind": wait_kind,
+                        "work_id": work_id,
+                        "workdir": str(workdir),
+                    },
+                }
+            pause_outcome = mission_outcome_dimensions(
+                status=state.status,
+                success=False,
+                review_status="",
+                stop_kind=None,
+                resumable=True,
+            )
+            pause_outcome["external_wait"] = {
+                "kind": wait_kind,
+                "work_id": work_id,
+                "workdir": str(workdir),
+            }
+            self.memory.backlog.update(
+                item.id,
+                status=state.status,
+                started_ts=None,
+                finished_ts=time.time(),
+                running_owner="",
+                last_error=state.stop_reason,
+                outcome=pause_outcome,
+            )
+            self._emit({
+                "type": EventType.LIFE_MISSION_COMPLETED,
+                "item_id": item.id,
+                "success": False,
+                "status": state.status,
+                "outcome_class": mission_outcome_class(
+                    status=state.status,
+                    success=False,
+                ),
+                "outcome": pause_outcome,
+                "stop_kind": None,
+                "recoverable": True,
+                "external_wait": pause_outcome["external_wait"],
+                "cost_usd": state.usd,
+                "known_cost_usd": state.known_usd,
+                "pricing_status": state.usage_summary.pricing_status,
+                "spent_usd": state.known_usd,
+            })
+            return {
+                "success": False,
+                "status": state.status,
+                "item_id": item.id,
+                "recoverable": True,
+                "external_wait": pause_outcome["external_wait"],
+                "cost_usd": state.usd,
+                "known_cost_usd": state.known_usd,
+                "pricing_status": state.usage_summary.pricing_status,
+            }
         pause_status = pause_status_for_stop_kind(state.stop_kind)
         if state.status == "budget_exhausted":
             state.status = "paused_budget"
@@ -710,4 +1065,4 @@ class MissionExecutionRuntimeMixin:
         }
 
 
-__all__ = ["MissionExecutionRuntimeMixin"]
+__all__ = ["MissionExecutionRuntimeMixin", "dispose_maintenance_worktree"]

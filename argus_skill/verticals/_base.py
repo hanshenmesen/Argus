@@ -13,7 +13,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import TypeAlias
 
-from ..core.vertical_contract import VerticalContract, vertical_contract
+from ..core.vertical_contract import (
+    IterationAssessment,
+    VerticalContract,
+    vertical_contract,
+)
 from ._data_domain import DataDomain, load_data_domain
 
 log = logging.getLogger(__name__)
@@ -146,6 +150,19 @@ def vertical_search_altitude(mod: VerticalDefinition, project_root: object) -> s
     return _contract(mod).altitude(project_root)
 
 
+def vertical_import_legacy_state(
+    mod: VerticalDefinition,
+    *,
+    source_root: Path,
+    state_root: Path,
+) -> None:
+    """Let the vertical carry over its own pre-isolation state artifacts."""
+    _contract(mod).import_legacy_state(
+        source_root=source_root,
+        state_root=state_root,
+    )
+
+
 def vertical_prepare_mission(
     mod: VerticalDefinition,
     *,
@@ -237,6 +254,27 @@ def vertical_stage_completion_issues(
         stage,
         project_root,
         state_root=state_root,
+    )
+
+
+def vertical_iteration_assessment(
+    mod: VerticalDefinition,
+    *,
+    stage: str,
+    scope: str,
+    project_root: Path,
+    state_root: Path,
+    mission: object,
+    outcome: object,
+) -> IterationAssessment | None:
+    """Route a would-be terminal result through the active vertical."""
+    return _contract(mod).assess_iteration(
+        stage=stage,
+        scope=scope,
+        project_root=project_root,
+        state_root=state_root,
+        mission=mission,
+        outcome=outcome,
     )
 
 

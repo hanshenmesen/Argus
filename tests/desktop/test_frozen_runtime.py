@@ -7,24 +7,25 @@ from pathlib import Path
 
 import pytest
 
-from argus_skill.domains import BUILTIN_DOMAINS, load_domain
-from argus_skill.skills.vertical_select import VERTICALS
-from argus_skill.verticals._base import load_vertical
-from desktop.backend_entry import (
+from argus_skill.desktop_backend_entry import (
     _install_windows_signal_zero_guard,
     _python_compat_entrypoint,
     verify_runtime_providers,
 )
+from argus_skill.domains import BUILTIN_DOMAINS, load_domain
+from argus_skill.skills.vertical_select import VERTICALS
+from argus_skill.verticals._base import load_vertical
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC_PATH = ROOT / "desktop" / "argus_backend.spec"
-TEST_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "tests.yml"
+SPEC_PATH = ROOT / "desktop-tauri" / "argus_backend.spec"
 
 
 def test_desktop_multicommand_test_step_fails_on_first_error() -> None:
-    workflow = TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(
+        encoding="utf-8"
+    )
     step = workflow.split("- name: Lint and test desktop sources", 1)[1].split(
-        "- name: Build frozen backend and Electron bundles", 1
+        "- name: Build frozen backend and unsigned Tauri package layout", 1
     )[0]
 
     assert "shell: bash" in step
@@ -61,7 +62,7 @@ def _execute_spec_collection(tree: ast.Module) -> tuple[dict, list[tuple[str, st
         return [name for name in candidates if filter(name)]
 
     namespace = {
-        "SPECPATH": str(ROOT / "desktop"),
+        "SPECPATH": str(ROOT / "desktop-tauri"),
         "collect_data_files": lambda package, **kwargs: [
             (f"{package}-python-sources", str(bool(kwargs.get("include_py_files"))))
         ],
@@ -137,7 +138,7 @@ def test_frozen_python_compat_runs_scripts_with_python_argv_semantics(
 def test_frozen_python_compat_dispatches_daemon_spawn_helper(monkeypatch) -> None:
     calls: list[tuple[str, str, bool]] = []
     monkeypatch.setattr(
-        "desktop.backend_entry.runpy.run_module",
+        "argus_skill.desktop_backend_entry.runpy.run_module",
         lambda module, *, run_name, alter_sys: calls.append(
             (module, run_name, alter_sys)
         ),

@@ -884,7 +884,7 @@ def _first_error_line(result: dict[str, Any]) -> str:
 
 def _display(path: Path, project_root: Path) -> str:
     try:
-        return str(path.resolve().relative_to(project_root.resolve()))
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
     except (ValueError, OSError):
         return str(path)
 
@@ -1067,7 +1067,7 @@ def verify_lean_source(
     *,
     statement_fidelity: Path | str,
     artifact_dir: Path | str | None = None,
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float | None = None,
     lean_bin: str | None = None,
     lake_bin: str | None = None,
     use_lake: bool | None = None,
@@ -1240,7 +1240,10 @@ def _add_compile_arguments(parser: argparse.ArgumentParser) -> None:
         default=Path("."),
         help="the project whose state --claim writes to, and the root artifact paths are recorded against",
     )
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--timeout", type=float, default=None,
+        help="explicit compile timeout; omitted waits for Lean to finish",
+    )
     parser.add_argument("--lean-bin")
     parser.add_argument("--lake-bin")
     parser.add_argument(
@@ -1290,7 +1293,7 @@ def main(argv: list[str] | None = None) -> int:
                 lake_bin=args.lake_bin,
                 use_lake=args.lake,
             )
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
             return 2
         payload = dict(result)
@@ -1333,7 +1336,7 @@ def main(argv: list[str] | None = None) -> int:
                 lake_bin=args.lake_bin,
                 use_lake=args.lake,
             )
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
             return 2
         print(json.dumps(started, ensure_ascii=False, indent=2))
@@ -1344,7 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             payload = reclaim_lean_run(args.handle)
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
             return 2
         print(json.dumps(payload, ensure_ascii=False, indent=2))

@@ -25,6 +25,7 @@ from argus_skill.tools.image_api import (
     _require_route,
 )
 
+from ...core.manuscript_snapshot import bind_manuscript_snapshot, manuscript_sha256
 from ._review_contract_constants import (
     LAYOUT_REVIEW_GENERATED_BY,
     LAYOUT_REVIEW_HISTORY_PATH,
@@ -42,10 +43,8 @@ PAPER_MAIN_LOG_PATH = Path("paper/main.log")
 LAYOUT_REVIEW_JSON_PATH = Path("paper/LAYOUT_REVIEW.json")
 LAYOUT_REVIEW_MD_PATH = Path("paper/LAYOUT_REVIEW.md")
 LAYOUT_REVIEW_PAGE_DIR = Path("paper/layout_review/pages")
-MIN_LAYOUT_SCORE = 3.5
-MAX_DEFAULT_PAGES = 32
 DEFAULT_DPI = 120
-DEFAULT_TIMEOUT_SECONDS = 500.0
+DEFAULT_TIMEOUT_SECONDS: float | None = None
 MAX_RESEARCH_MD_OVERFULL_HBOX_PT = 5.0
 LAYOUT_HEADING_LINE_NUMBER_PREFIX = r"(?:\d{1,5}\s+)?"
 LAYOUT_TOP_LEVEL_NUMBER_PREFIX = r"(?:(?:\d{1,5}\.?)\s+){0,2}"
@@ -76,13 +75,6 @@ ALLOWED_DIRECTIVE_ACTIONS = {
     "fix_reference_boundary",
 }
 
-MAX_BODY_FIGURES = 5
-# Full-width (``figure*``) body floats allowed on a two-column venue. Two is the
-# common well-composed maximum: a teaser (Figure 1) + a main pipeline/overview.
-# Single-column venues (``venue.two_column`` false) have no ``figure*`` notion,
-# so the cap does not apply to them.
-MAX_BODY_WIDE_FIGURES = 2
-
 # Figures whose ROLE is an overview/teaser/pipeline should span both columns
 # (``figure*``) on a two-column venue; when one is placed in a single-column
 # ``figure`` it reads as cramped. Matched against the graphic filename and the
@@ -100,10 +92,10 @@ def generate_layout_review(
     project_root: Path,
     *,
     review_mode: str = "vision",
-    threshold: float = MIN_LAYOUT_SCORE,
-    max_pages: int = MAX_DEFAULT_PAGES,
+    threshold: float = 3.5,
+    max_pages: int | None = None,
     dpi: int = DEFAULT_DPI,
-    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
     iteration: int | None = None,
     write: bool = True,
     env: Mapping[str, str] | None = None,
@@ -112,8 +104,8 @@ def generate_layout_review(
     """Review the compiled paper layout and optionally persist review artifacts."""
 
     root = Path(project_root)
+    reviewed_manuscript_sha = manuscript_sha256(root)
     profile = venue or resolve_venue_profile(root)
-    threshold = max(float(threshold), MIN_LAYOUT_SCORE)
     iteration = iteration or _next_iteration(root)
     issues: list[dict[str, Any]] = []
     pdf_path = root / PAPER_MAIN_PDF_PATH
@@ -249,6 +241,12 @@ def generate_layout_review(
     }
     if vision_review is not None:
         result["vision_review"] = vision_review
+    bind_manuscript_snapshot(
+        result,
+        root,
+        recorded_at=result["created_at"],
+        sha256=reviewed_manuscript_sha,
+    )
 
     if write:
         _write_json(root / LAYOUT_REVIEW_JSON_PATH, result)
@@ -261,9 +259,9 @@ def _render_pdf_pages(
     root: Path,
     pdf_path: Path,
     *,
-    max_pages: int,
+    max_pages: int | None,
     dpi: int,
-    timeout: float,
+    timeout: float | None,
 ) -> list[dict[str, Any]]:
     output_dir = root / LAYOUT_REVIEW_PAGE_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -316,28 +314,21 @@ def _render_pdf_pages_with_pdftoppm(
     output_dir: Path,
     pdf_path: Path,
     *,
-    max_pages: int,
+    max_pages: int | None,
     dpi: int,
-    timeout: float,
+    timeout: float | None,
 ) -> None:
     pdftoppm = shutil.which("pdftoppm")
     if pdftoppm is None:
         raise LayoutReviewError("pdftoppm is not installed")
 
     _clear_rendered_pages(output_dir)
+    command = [pdftoppm, "-png", "-r", str(int(dpi))]
+    if max_pages is not None:
+        command.extend(["-f", "1", "-l", str(max(1, int(max_pages)))])
+    command.extend([str(pdf_path), str(output_dir / "page")])
     completed = subprocess.run(
-        [
-            pdftoppm,
-            "-png",
-            "-r",
-            str(int(dpi)),
-            "-f",
-            "1",
-            "-l",
-            str(max(1, int(max_pages))),
-            str(pdf_path),
-            str(output_dir / "page"),
-        ],
+        command,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -352,28 +343,30 @@ def _render_pdf_pages_with_mutool(
     output_dir: Path,
     pdf_path: Path,
     *,
-    max_pages: int,
+    max_pages: int | None,
     dpi: int,
-    timeout: float,
+    timeout: float | None,
 ) -> None:
     mutool = shutil.which("mutool")
     if mutool is None:
         raise LayoutReviewError("mutool is not installed")
 
     _clear_rendered_pages(output_dir)
+    command = [
+        mutool,
+        "draw",
+        "-r",
+        str(int(dpi)),
+        "-F",
+        "png",
+        "-o",
+        str(output_dir / "page-%02d.png"),
+        str(pdf_path),
+    ]
+    if max_pages is not None:
+        command.append(f"1-{max(1, int(max_pages))}")
     completed = subprocess.run(
-        [
-            mutool,
-            "draw",
-            "-r",
-            str(int(dpi)),
-            "-F",
-            "png",
-            "-o",
-            str(output_dir / "page-%02d.png"),
-            str(pdf_path),
-            f"1-{max(1, int(max_pages))}",
-        ],
+        command,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -531,7 +524,7 @@ def _paeth(left: int, up: int, up_left: int) -> int:
     return up_left
 
 
-def _extract_pdf_layout_text(pdf_path: Path, *, timeout: float) -> str:
+def _extract_pdf_layout_text(pdf_path: Path, *, timeout: float | None) -> str:
     pdftotext = shutil.which("pdftotext")
     if pdftotext is None:
         return ""
@@ -573,7 +566,6 @@ def _deterministic_assessment(
                     f"research.md requires no Overfull \\hbox > "
                     f"{MAX_RESEARCH_MD_OVERFULL_HBOX_PT:g}pt"
                 ),
-                hard_gate=True,
                 action="fix_overfull_box",
             )
         )
@@ -585,7 +577,6 @@ def _deterministic_assessment(
                 "appendix_before_references",
                 "major",
                 "references appear after appendix material",
-                hard_gate=True,
                 action="fix_bibliography_appendix_order",
             )
         )
@@ -601,45 +592,18 @@ def _deterministic_assessment(
                     f"mostly blank or push Conclusion to page {venue.conclusion_max_page + 1}; rebalance body content and "
                     "floats instead of forcing the section break"
                 ),
-                hard_gate=True,
                 action="rebalance_columns",
                 target="pre-Conclusion page break",
             )
         )
 
     body_tex = tex_text.split(r"\appendix", 1)[0]
-    body_figures = len(re.findall(r"\\begin\s*\{\s*figure\s*\}", body_tex))
-    if body_figures > MAX_BODY_FIGURES:
-        penalty += 0.8
-        issues.append(
-            _issue(
-                "too_many_body_figures",
-                "major",
-                (
-                    f"body contains {body_figures} figure environments; research.md limits "
-                    f"body figures to {MAX_BODY_FIGURES}"
-                ),
-                hard_gate=True,
-                action="move_float",
-            )
-        )
 
-    body_wide_figures = len(re.findall(r"\\begin\s*\{\s*figure\*\s*\}", body_tex))
-    if venue.two_column and body_wide_figures > MAX_BODY_WIDE_FIGURES:
-        penalty += 0.8
-        issues.append(
-            _issue(
-                "too_many_wide_figures",
-                "major",
-                (
-                    f"body contains {body_wide_figures} figure* environments; allow at most "
-                    f"{MAX_BODY_WIDE_FIGURES} full-width body figures (e.g. a teaser + a main "
-                    "pipeline); move the rest to single-column figures"
-                ),
-                hard_gate=True,
-                action="move_float",
-            )
-        )
+    # A sixth figure used to be a hard gate: six body figures failed the layout
+    # review outright, while accepted work in these areas carries between four
+    # and twenty-six. Whether a figure earns its space is what the argument
+    # needs it to show, which is the reviewing Agent's to judge and was never a
+    # number the host could hold.
 
     # Advisory (two-column venues only): a teaser/pipeline/overview graphic in a
     # single-column ``figure`` should usually span both columns via ``figure*``.
@@ -697,8 +661,8 @@ def _deterministic_assessment(
     ):
         # Advisory, not a gate. The venue page count is a *limit*, not a quota:
         # a complete, well-argued paper that ends early is not deficient for
-        # ending early. This used to carry hard_gate=True, which rejected short
-        # papers on arithmetic and pushed authors to pad the body. Reviewers
+        # ending early. Earlier harness scoring rejected short papers on
+        # arithmetic and pushed authors to pad the body. Reviewers
         # should block only when a page count that low means something material
         # is actually missing — which they judge by reading the paper, not from
         # this signal.
@@ -735,7 +699,6 @@ def _deterministic_assessment(
                     "body material to the appendix or tighten prose without deleting evidence"
                 ),
                 page=conclusion_page,
-                hard_gate=True,
                 action="trim_or_move_content",
                 target=f"page {conclusion_page} late Conclusion",
             )
@@ -760,28 +723,17 @@ def _deterministic_assessment(
         if not venue.has_fixed_page_budget
         else references_page is None or references_page >= venue.references_min_page
     )
-    # NOTE: the dict keys ``conclusion_by_page_8`` / ``references_on_or_after_page_9``
-    # are read by name downstream (advisory/whitespace helpers); their names are
-    # kept stable for compatibility, but the VALUES are now venue-relative
-    # (page 8/9 for EMNLP, 7/8 for AAAI).
     page_flow_contract = {
         "page_count": len(layout_pages),
         "conclusion_page": conclusion_page,
         "references_page": references_page,
         "appendix_page": appendix_page,
-        "conclusion_by_page_8": conclusion_within_budget,
-        "references_on_or_after_page_9": references_after_body,
+        "conclusion_within_budget": conclusion_within_budget,
+        "references_after_body": references_after_body,
         "post_body_pages_uncapped": True,
+        "fixed_page_budget_enforced": venue.has_fixed_page_budget,
+        "main_text_word_limit": venue.main_text_word_limit,
     }
-    # Keep the historical EMNLP deterministic payload byte-compatible. New
-    # venue metadata is needed only by non-EMNLP prompts.
-    if venue.key != "EMNLP":
-        page_flow_contract.update(
-            {
-                "fixed_page_budget_enforced": venue.has_fixed_page_budget,
-                "main_text_word_limit": venue.main_text_word_limit,
-            }
-        )
     if references_page is not None:
         reference_page_text = layout_pages[references_page - 1]
         has_conclusion_on_reference_page = bool(
@@ -792,8 +744,8 @@ def _deterministic_assessment(
             end_matter_pattern and re.search(end_matter_pattern, reference_page_text)
         )
         formal_boundary_passes = bool(
-            page_flow_contract["conclusion_by_page_8"]
-            and page_flow_contract["references_on_or_after_page_9"]
+            page_flow_contract["conclusion_within_budget"]
+            and page_flow_contract["references_after_body"]
         )
         if (
             venue.has_fixed_page_budget
@@ -818,7 +770,6 @@ def _deterministic_assessment(
                         )
                     ),
                     page=references_page,
-                    hard_gate=True,
                     action="fix_reference_boundary",
                     target=f"page {references_page} References boundary",
                 )
@@ -839,7 +790,6 @@ def _deterministic_assessment(
                         "expand from verified evidence instead of padding"
                     ),
                     page=references_page,
-                    hard_gate=True,
                     action="expand_evidence_content",
                     target=f"page {references_page} early References",
                 )
@@ -859,7 +809,6 @@ def _deterministic_assessment(
                     f"content until References naturally start on page {venue.references_min_page} or later"
                 ),
                 page=references_page,
-                hard_gate=True,
                 action="expand_evidence_content",
                 target="pre-References page break",
             )
@@ -875,7 +824,6 @@ def _deterministic_assessment(
                     "major",
                     f"page {stat['page']} contains {stat['table_captions']} table captions",
                     page=stat["page"],
-                    hard_gate=True,
                     action="split_table",
                 )
             )
@@ -887,7 +835,6 @@ def _deterministic_assessment(
                     "major",
                     f"page {stat['page']} contains {stat['table_captions']} table captions",
                     page=stat["page"],
-                    hard_gate=True,
                     action="move_float",
                 )
             )
@@ -899,7 +846,6 @@ def _deterministic_assessment(
                     "major",
                     f"page {stat['page']} contains {stat['float_captions']} figure/table captions",
                     page=stat["page"],
-                    hard_gate=True,
                     action="move_float",
                 )
             )
@@ -911,7 +857,6 @@ def _deterministic_assessment(
                     "major",
                     f"page {stat['page']} is dominated by captions/floats rather than readable prose",
                     page=stat["page"],
-                    hard_gate=True,
                     action="move_float",
                 )
             )
@@ -932,7 +877,10 @@ def _deterministic_assessment(
         "float_balance": max(1.0, 5.0 - sum(1.0 for issue in issues if "float" in issue["code"])),
         "table_readability": max(1.0, 5.0 - sum(0.8 for issue in issues if "table" in issue["code"])),
         "typography": max(1.0, 5.0 - sum(0.6 for issue in issues if issue["code"] in {"tiny_table_or_caption_font", "severe_overfull_hbox"})),
-        "page_flow": max(1.0, 5.0 - sum(0.8 for issue in issues if issue.get("hard_gate"))),
+        "page_flow": max(
+            1.0,
+            5.0 - sum(0.8 for issue in issues if issue.get("severity") == "blocking"),
+        ),
     }
     return {
         "score_1_to_5": round(score, 2),
@@ -991,7 +939,7 @@ def _run_vision_review(
     deterministic: dict[str, Any],
     threshold: float,
     env: Mapping[str, str] | None,
-    timeout: float,
+    timeout: float | None,
     venue: VenueProfile,
 ) -> dict[str, Any]:
     route = _require_route("image_review", env)
@@ -1028,7 +976,7 @@ def _run_vision_review(
         raw_text = _parse_chat_text(data)
     if not raw_text:
         raise LayoutReviewError("vision model returned no text")
-    parsed = _parse_json_object_from_text(raw_text)
+    parsed = _parse_review_text(raw_text)
     parsed["raw_review_text"] = raw_text
     parsed["model"] = route.model
     parsed["endpoint"] = endpoint
@@ -1045,43 +993,9 @@ def _run_vision_review(
     return parsed
 
 
-def _venue_neutral_signals(deterministic: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of the deterministic signals with the kept-name page-flow
-    booleans renamed to venue-neutral keys.
-
-    ``page_flow_contract`` keeps the historical EMNLP-literal key names
-    ``conclusion_by_page_8`` / ``references_on_or_after_page_9`` (internal
-    readers depend on them), but for a non-EMNLP venue those names are
-    misleading when serialized into the vision-model hint (e.g. a page-8 AAAI
-    references paper would read ``references_on_or_after_page_9: true``). This
-    renames them only in the copy fed to the prompt, so the model sees a hint
-    consistent with the venue page numbers in the prose.
-    """
-    import copy
-
-    det = copy.deepcopy(deterministic)
-    pfc = det.get("page_flow_contract") if isinstance(det, dict) else None
-    if isinstance(pfc, dict):
-        if "conclusion_by_page_8" in pfc:
-            pfc["conclusion_within_budget"] = pfc.pop("conclusion_by_page_8")
-        if "references_on_or_after_page_9" in pfc:
-            pfc["references_after_body"] = pfc.pop("references_on_or_after_page_9")
-    return det
-
-
 def _vision_prompt(
     *, deterministic: dict[str, Any], threshold: float, venue: VenueProfile
 ) -> str:
-    allowed_actions = ", ".join(sorted(ALLOWED_DIRECTIVE_ACTIONS))
-    if venue.key == "EMNLP":
-        # EMNLP keeps a venue-specific literal; policy changes intentionally
-        # invalidate the persisted prompt/input hashes.
-        return _vision_prompt_emnlp_literal(
-            deterministic=deterministic, threshold=threshold
-        )
-    # Non-EMNLP: feed the model venue-neutral page-flow key names so the hint
-    # is not self-contradictory with the venue page numbers in the prose.
-    deterministic = _venue_neutral_signals(deterministic)
     vn = venue.display_name
     if not venue.has_fixed_page_budget:
         word_limit = (
@@ -1108,18 +1022,14 @@ def _vision_prompt(
             "cause, concrete source edits, visual goal, and verification steps. Do not ask the "
             "author to pad the manuscript to resemble an exemplar or to move References to an "
             "arbitrary page.\n\n"
-            "Return strict JSON only with score_1_to_5, criteria_scores, blocking_issues, "
-            "major_issues, revision_directives, and pass_or_revise. Issue objects must include "
-            "issue, page, target, visual_evidence, action, and guidance; guidance must include "
-            "root_cause, source_targets, specific_edits, visual_goal, and verification. "
-            f"Allowed action values: {allowed_actions}. A score below {threshold:g} or any "
-            "major visual defect means revise.\n\n"
+            "Write a prose review, not JSON. Order material findings by severity. For each "
+            "finding give the page or visual target, the evidence visible in the rendering, "
+            "and a concrete source-level fix with a verification step. If there is no material "
+            "defect, say so plainly. This review is advisory to the agent checklist.\n\n"
             f"Deterministic layout signals:\n"
             f"{json.dumps(deterministic, ensure_ascii=False)[:6000]}"
         )
     cmax = venue.conclusion_max_page         # Conclusion must land by this page
-    cmin = venue.conclusion_underfill_page   # before this => underfilled body
-    rmin = venue.references_min_page          # References on/after this page
     bpl = venue.body_page_limit
     end_matter = venue.end_matter_prose()
     review_lines = venue.review_linenumber_prose()
@@ -1135,17 +1045,16 @@ def _vision_prompt(
         "unreadable fonts, awkward two-column imbalance, captions detached from content, weak page "
         "flow, square or low-quality figures, non-human code-like labels, snake_case labels, heavy "
         f"gradients, photorealism, or visuals that look like debug artifacts rather than {vn} paper "
-        "figures. A pre-body-boundary page with only a couple of small tables and a large empty area "
-        "is a hard visual failure even if LaTeX compiles. Final References/Appendix pages are "
-        f"post-body pages: when Conclusion is by page {cmax} and References/Appendix start on page {rmin} or "
-        "later, natural trailing whitespace on the last appendix/reference page is advisory unless "
-        "there is a separate readability defect such as overlap, detached captions, missing required "
-        f"content, or unreadably tiny tables. {review_lines} "
+        "figures. A body page with only a couple of small tables and a large empty area usually "
+        "signals poor float placement; the fix is to move, merge, or resize floats, never to pad "
+        "the prose. Final References/Appendix pages are post-body pages: natural trailing "
+        "whitespace on the last appendix/reference page is advisory unless there is a separate "
+        "readability defect such as overlap, detached captions, missing required content, or "
+        f"unreadably tiny tables. {review_lines} "
         "Penalize only nonstandard duplicate line-number overlays, margin counters "
         "unrelated to review mode, or post-processing artifacts. Do not turn a small amount of "
-        "post-body whitespace into repeated revision churn when the formal page contract already "
-        f"passes: conclusion by page {cmax}, {end_matter}, and References/Appendix "
-        f"on page {rmin} or later.\n\n"
+        "post-body whitespace into repeated revision churn when the Conclusion lands by page "
+        f"{cmax} and {end_matter} is in place.\n\n"
         "Make the feedback concrete for the next engineer/tool call: every blocking or major issue "
         "must name the page number when visible, the visual target (for example: page 6 lower half, "
         "Table 3, Figure 1 labels, references page), the visual evidence you saw, and the specific "
@@ -1154,165 +1063,55 @@ def _vision_prompt(
         "cosmetic page-break shuffling when the real defect is weak prose/float integration. "
         "Figure repair policy: judge visible clarity and aesthetics, not provenance. "
         "Pass a readable, coherent, factually correct, good-looking-enough figure. "
+        "Wrong, reversed, missing, or unsupported arrows; connector penetration through "
+        "node fills or unrelated labels; overlapping nodes or text; clipped elements; "
+        "inconsistent shape semantics; and unreadable final-size typography are concrete "
+        "submission defects, not cosmetic preferences. "
         "Recommend at most one targeted aesthetic repair; a second regeneration needs "
         "a concrete remaining defect such as unreadable text, wrong content, broken "
         "rendering, or severe mismatch. Optional renderer metadata may help locate source. "
         f"Never repair the {bpl}-page body boundary by inserting `\\clearpage`, `\\newpage`, "
         f"`\\pagebreak`, or `\\FloatBarrier` immediately before Conclusion; that can leave page {cmax} "
         f"mostly blank and then push Conclusion to page {cmax + 1} after minor float changes. Use section "
-        "ordering, prose tightening/expansion, and float placement instead.\n\n"
+        "ordering, prose tightening, and float placement instead.\n\n"
         "Complete improvement guidance is mandatory, not optional. For every blocking or major issue, "
         "provide enough repair guidance that an engineer can act without re-interpreting the screenshot: "
         "root_cause, source_targets (LaTeX/generator/table/figure files or section names to edit), "
         "specific_edits (ordered concrete edits, not vague advice), visual_goal, and verification "
         "steps after recompilation. The guidance must say whether to delete filler, merge/split/move "
-        "specific floats, rewrite nearby prose, regenerate a figure, or change table styling. If the "
-        "page is ugly because the paper is underfilled or padded with audit-like content, say exactly "
-        "which body section should be expanded with source-backed narrative and which low-value "
-        "artifact/table should move to appendix or be deleted. Valid expansion targets include "
-        "literature-grounded Introduction/Related Work framing, benchmark or Method detail, and "
-        "evidence-backed Results/Analysis/Ablation material; generic motivation is filler. For any "
-        "single table cluster, choose one dominant repair action: merge low-density redundant tables "
-        "or split an unreadably dense table, but do not issue contradictory merge and split directives "
-        "for the same appendix/table target in the same review.\n\n"
-        "Reference boundary guidance: if References or Bibliography starts on the same rendered page as "
-        "Conclusion or post-conclusion body end matter, do not automatically call "
-        "the body overlong and do not ask for generic section shortening. Determine the direction from "
-        f"the page: if the body is visibly underfilled, References start before page {rmin}, "
-        f"or Appendix material starts before page {rmin}, "
-        "require source-backed body expansion, a meaningful late visual anchor, or a clean "
-        f"reference/appendix-page break after the body; if body content actually runs past page {cmax}, then require trimming. "
-        "A manual `\\clearpage`, `\\newpage`, `\\pagebreak`, or `\\FloatBarrier` immediately before "
-        f"References is not an acceptable fix while the Conclusion starts before page {cmin} or References "
-        f"still start before page {rmin}; remove that break and fix content/page flow first. "
-        "Shortening an underfilled body makes the early-References defect worse. Do not require "
-        f"References to begin exactly on page {rmin}: page {rmin + 1} or later is acceptable when the body and "
-        f"body-adjacent end matter occupy page {rmin} naturally, and the total page count after the body "
-        f"is uncapped. Treat page-{rmin} whitespace after end matter as at most a minor style note "
-        f"unless it reflects a forced break, Conclusion after page {cmax}, or References/Appendix before "
-        f"page {rmin}.\n\n"
+        "specific floats, rewrite nearby prose, regenerate a figure, or change table styling. The "
+        "page budget is a ceiling, not a quota: never ask the author to pad or lengthen the paper "
+        "to fill pages. If a page looks bad because low-value audit-style material crowds the body, "
+        "recommend moving it to the appendix or deleting it; flag missing content only when a "
+        "reader genuinely needs it to follow the argument, and name exactly what is missing. For "
+        "any single table cluster, choose one dominant repair action: merge low-density redundant "
+        "tables or split an unreadably dense table, but do not issue contradictory merge and split "
+        "directives for the same appendix/table target in the same review.\n\n"
+        "Reference boundary guidance: if References or Bibliography starts on the same rendered page "
+        "as Conclusion or post-conclusion body end matter, do not automatically call the body "
+        "overlong and do not ask for generic section shortening. If body content actually runs past "
+        f"page {cmax}, require trimming or moving material to the appendix. An early References page "
+        "by itself is not a defect and is never a reason to demand body expansion or filler. A "
+        "manual `\\clearpage`, `\\newpage`, `\\pagebreak`, or `\\FloatBarrier` inserted immediately "
+        "before References solely to move it to a later page is a layout hack: remove the break and "
+        "let the page flow fall naturally. Do not require References to begin on any particular "
+        "page; the total page count after the body is uncapped. Treat trailing whitespace after end "
+        "matter as at most a minor style note unless it reflects a forced break or a Conclusion "
+        f"after page {cmax}.\n\n"
         f"Submission contract to enforce: conclusion by page {cmax}, {end_matter}, "
-        f"References before Appendix, References/Appendix on page {rmin} or later with no total-page cap, "
-        f"no Overfull hbox above 5pt, <=5 body figures, at most {MAX_BODY_WIDE_FIGURES} "
+        "References before Appendix with no total-page cap after the body, "
+        "no Overfull hbox above 5pt, a figure count and width that follow what the "
+        "argument has to show rather than a quota, "
         "full-width figure*, meaningful figure/table anchors across the middle body when they improve readability, table "
         "captions with numerical headlines, readable research-style tables, adaptive/landscape "
         "conceptual figures rather than cramped squares, and no weird fonts, tiny labels, heavy "
         "gradients, photorealism, or code-like labels in paper-facing visuals.\n\n"
-        "Return strict JSON only, no markdown. Use this schema: score_1_to_5 (number), "
-        "criteria_scores object with typography/table_readability/float_balance/page_flow/"
-        "figure_quality/submission_standardness, blocking_issues list, major_issues list, "
-        "revision_directives list, and pass_or_revise as pass or revise. Each blocking_issues and "
-        "major_issues item must be an object with issue, page, target, visual_evidence, action, and "
-        "guidance. The guidance object must include root_cause, source_targets, specific_edits, "
-        "visual_goal, and verification. Each revision_directives item must have action, target, "
-        "rationale, expected_effect, and implementation_guidance with the same concrete fields. "
-        f"Allowed action values: {allowed_actions}. A score below {threshold:g} or any major "
-        "visual defect means revise.\n\n"
+        "Write a prose review, not JSON. Order material findings by severity. For every finding, "
+        "name the page or target, cite the visible evidence, and suggest a concrete source-level "
+        "fix plus a verification step. If no material defect remains, say so plainly. The review "
+        "is advisory to the agent checklist.\n\n"
         f"Deterministic layout signals:\n{json.dumps(deterministic, ensure_ascii=False)[:6000]}"
     )
-
-
-def _vision_prompt_emnlp_literal(
-    *, deterministic: dict[str, Any], threshold: float
-) -> str:
-    """Build the EMNLP-specific visual-review prompt."""
-    allowed_actions = ", ".join(sorted(ALLOWED_DIRECTIVE_ACTIONS))
-    return (
-        "Role: You are an independent visual reviewer for an EMNLP 2026 paper that is being "
-        "prepared for submission. Your job is to judge the rendered PDF screenshots as a polished, "
-        "standard two-column conference paper: visual beauty, professional layout, readability, "
-        "and compliance with EMNLP/ACL paper norms. Do not act as the author and do not excuse "
-        "ugly artifacts; be as strict as a proceedings layout reviewer.\n\n"
-        "Review task: inspect the screenshots page by page, using the deterministic signals below "
-        "as concrete hints. Penalize any page that looks non-submission-ready: large blank lower-page "
-        "regions before the body boundary, float-dump pages, cramped or plain audit-style tables, table/body overlap, tiny "
-        "unreadable fonts, awkward two-column imbalance, captions detached from content, weak page "
-        "flow, square or low-quality figures, non-human code-like labels, snake_case labels, heavy "
-        "gradients, photorealism, or visuals that look like debug artifacts rather than EMNLP paper "
-        "figures. A pre-body-boundary page with only a couple of small tables and a large empty area "
-        "is a hard visual failure even if LaTeX compiles. Final References/Appendix pages are "
-        "post-body pages: when Conclusion is by page 8 and References/Appendix start on page 9 or "
-        "later, natural trailing whitespace on the last appendix/reference page is advisory unless "
-        "there is a separate readability defect such as overlap, detached captions, missing required "
-        "content, or unreadably tiny tables. Official ACL/EMNLP anonymous review-mode line numbers from "
-        "`\\usepackage[review]{acl}` are acceptable submission artifacts and must not be treated as "
-        "debug gutters. Penalize only nonstandard duplicate line-number overlays, margin counters "
-        "unrelated to ACL review mode, or post-processing artifacts. Do not turn a small amount of "
-        "post-body whitespace into repeated revision churn when the formal page contract already "
-        "passes: conclusion by page 8, Limitations/Ethics after conclusion, and References/Appendix "
-        "on page 9 or later.\n\n"
-        "Make the feedback concrete for the next engineer/tool call: every blocking or major issue "
-        "must name the page number when visible, the visual target (for example: page 6 lower half, "
-        "Table 3, Figure 1 labels, references page), the visual evidence you saw, and the specific "
-        "source-level action needed. Prefer fixes that rewrite/rebalance manuscript flow, merge or "
-        "remove low-value floats, split unreadable tables, or regenerate poor figures; do not suggest "
-        "cosmetic page-break shuffling when the real defect is weak prose/float integration. "
-        "Figure repair policy: judge visible clarity and aesthetics, not provenance. "
-        "Pass a readable, coherent, factually correct, good-looking-enough figure. "
-        "Recommend at most one targeted aesthetic repair; a second regeneration needs "
-        "a concrete remaining defect such as unreadable text, wrong content, broken "
-        "rendering, or severe mismatch. Optional renderer metadata may help locate source. "
-        "Never repair the eight-page body boundary by inserting `\\clearpage`, `\\newpage`, "
-        "`\\pagebreak`, or `\\FloatBarrier` immediately before Conclusion; that can leave page 8 "
-        "mostly blank and then push Conclusion to page 9 after minor float changes. Use section "
-        "ordering, prose tightening/expansion, and float placement instead.\n\n"
-        "Complete improvement guidance is mandatory, not optional. For every blocking or major issue, "
-        "provide enough repair guidance that an engineer can act without re-interpreting the screenshot: "
-        "root_cause, source_targets (LaTeX/generator/table/figure files or section names to edit), "
-        "specific_edits (ordered concrete edits, not vague advice), visual_goal, and verification "
-        "steps after recompilation. The guidance must say whether to delete filler, merge/split/move "
-        "specific floats, rewrite nearby prose, regenerate a figure, or change table styling. If the "
-        "page is ugly because the paper is underfilled or padded with audit-like content, say exactly "
-        "which body section should be expanded with source-backed narrative and which low-value "
-        "artifact/table should move to appendix or be deleted. Valid expansion targets include "
-        "literature-grounded Introduction/Related Work framing, benchmark or Method detail, and "
-        "evidence-backed Results/Analysis/Ablation material; generic motivation is filler. For any "
-        "single table cluster, choose one dominant repair action: merge low-density redundant tables "
-        "or split an unreadably dense table, but do not issue contradictory merge and split directives "
-        "for the same appendix/table target in the same review.\n\n"
-        "Reference boundary guidance: if References or Bibliography starts on the same rendered page as "
-        "Conclusion, Limitations, Ethics, or release/reproducibility body text, do not automatically call "
-        "the body overlong and do not ask for generic section shortening. Determine the direction from "
-        "the page: if the body is visibly underfilled, References start before page 9, "
-        "or Appendix material starts before page 9, "
-        "require source-backed body expansion, a meaningful late visual anchor, or a clean "
-        "reference/appendix-page break after the body; if body content actually runs past page 8, then require trimming. "
-        "A manual `\\clearpage`, `\\newpage`, `\\pagebreak`, or `\\FloatBarrier` immediately before "
-        "References is not an acceptable fix while the Conclusion starts before page 7 or References "
-        "still start before page 9; remove that break and fix content/page flow first. "
-        "Shortening an underfilled body makes the early-References defect worse. Do not require "
-        "References to begin exactly on page 9: page 10 or later is acceptable when the body and "
-        "body-adjacent end matter occupy page 9 naturally, and the total page count after the body "
-        "is uncapped. Treat page-9 whitespace after Limitations/Ethics as at most a minor style note "
-        "unless it reflects a forced break, Conclusion after page 8, or References/Appendix before "
-        "page 9.\n\n"
-        "Submission contract to enforce: conclusion by page 8, Limitations/Ethics after conclusion, "
-        "References before Appendix, References/Appendix on page 9 or later with no total-page cap, "
-        f"no Overfull hbox above 5pt, <=5 body figures, at most {MAX_BODY_WIDE_FIGURES} "
-        "full-width figure*, meaningful figure/table anchors across the middle body when they improve readability, table "
-        "captions with numerical headlines, readable research-style tables, adaptive/landscape "
-        "conceptual figures rather than cramped squares, and no weird fonts, tiny labels, heavy "
-        "gradients, photorealism, or code-like labels in paper-facing visuals.\n\n"
-        "Return strict JSON only, no markdown. Use this schema: score_1_to_5 (number), "
-        "criteria_scores object with typography/table_readability/float_balance/page_flow/"
-        "figure_quality/submission_standardness, blocking_issues list, major_issues list, "
-        "revision_directives list, and pass_or_revise as pass or revise. Each blocking_issues and "
-        "major_issues item must be an object with issue, page, target, visual_evidence, action, and "
-        "guidance. The guidance object must include root_cause, source_targets, specific_edits, "
-        "visual_goal, and verification. Each revision_directives item must have action, target, "
-        "rationale, expected_effect, and implementation_guidance with the same concrete fields. "
-        f"Allowed action values: {allowed_actions}. A score below {threshold:g} or any major "
-        "visual defect means revise.\n\n"
-        f"Deterministic layout signals:\n{json.dumps(deterministic, ensure_ascii=False)[:6000]}"
-    )
-
-
-
-
-
-
-
-
 
 
 def _issue(
@@ -1321,7 +1120,6 @@ def _issue(
     message: str,
     *,
     page: int | None = None,
-    hard_gate: bool = False,
     action: str = "rebalance_columns",
     target: str | None = None,
 ) -> dict[str, Any]:
@@ -1333,8 +1131,6 @@ def _issue(
     }
     if page is not None:
         issue["page"] = page
-    if hard_gate:
-        issue["hard_gate"] = True
     if target:
         issue["target"] = target
     return issue
@@ -1407,24 +1203,14 @@ def _forced_break_before_references(tex_text: str) -> bool:
     )
 
 
-def _parse_json_object_from_text(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
-        stripped = re.sub(r"\s*```$", "", stripped)
-    try:
-        value = json.loads(stripped)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", stripped, re.S)
-        if match is None:
-            raise LayoutReviewError("vision review did not contain a JSON object")
-        try:
-            value = json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise LayoutReviewError(f"vision review JSON was invalid: {exc.msg}") from exc
-    if not isinstance(value, dict):
-        raise LayoutReviewError("vision review JSON must be an object")
-    return value
+def _parse_review_text(text: str) -> dict[str, Any]:
+    """Preserve an ordinary review; accept volunteered legacy JSON without requiring it."""
+    from ...core.role_reply import legacy_json_object
+
+    legacy = legacy_json_object(text)
+    parsed = dict(legacy) if legacy is not None else {}
+    parsed["review_text"] = text
+    return parsed
 
 
 def _layout_review_markdown(result: dict[str, Any]) -> str:
@@ -1452,6 +1238,9 @@ def _layout_review_markdown(result: dict[str, Any]) -> str:
             page = f" page {issue['page']}:" if "page" in issue else ""
             lines.append(f"- `{issue.get('severity', 'unknown')}`{page} {issue.get('message', '')}")
         lines.append("")
+    review = result.get("vision_review")
+    if isinstance(review, dict) and str(review.get("review_text") or "").strip():
+        lines.extend(["## Advisory visual review", "", str(review["review_text"]), ""])
     return "\n".join(lines)
 
 
@@ -1514,8 +1303,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--review-mode", choices=("vision", "heuristic"), default="vision")
-    parser.add_argument("--threshold", type=float, default=MIN_LAYOUT_SCORE)
-    parser.add_argument("--max-pages", type=int, default=MAX_DEFAULT_PAGES)
+    parser.add_argument("--threshold", type=float, default=3.5)
+    parser.add_argument(
+        "--max-pages", type=int, default=None,
+        help="explicit page ceiling; omitted reviews the complete PDF",
+    )
     parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--iteration", type=int)

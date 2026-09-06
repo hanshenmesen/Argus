@@ -8,7 +8,7 @@ from argus_skill.release_tools import build_release
 ROOT = Path(__file__).parents[2]
 
 
-def test_wheel_smoke_imports_the_install_outside_the_checkout() -> None:
+def test_wheel_smoke_imports_the_install_in_isolated_mode() -> None:
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
         encoding="utf-8"
     )
@@ -16,8 +16,8 @@ def test_wheel_smoke_imports_the_install_outside_the_checkout() -> None:
         "- uses: actions/upload-artifact", 1
     )[0]
 
-    assert "cd /tmp/argus-wheel-smoke-cwd" in smoke
-    assert smoke.index("cd /tmp/argus-wheel-smoke-cwd") < smoke.index(
+    assert "/bin/python -I - <<'PY'" in smoke
+    assert smoke.index("/bin/python -I - <<'PY'") < smoke.index(
         "import argus_skill"
     )
 

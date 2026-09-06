@@ -9,13 +9,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from argus_skill.core.event_catalog import EventType
 from argus_skill.core.models import RunnerResult
 from argus_skill.daemon.state import write_continuous_config
 from argus_skill.life.event_log import JsonlEventSink
-from argus_skill.life.memory import BacklogItem, LifeMemory
+from argus_skill.life.memory import (
+    BacklogItem,
+    GlobalMemory,
+    LifeMemory,
+    MemoryBundle,
+    ProjectMemory,
+)
 from argus_skill.life.supervisor import LifeBudget, LifeSupervisor, LifeSupervisorConfig
 from argus_skill.life.supervisor._constants import PLAN_RETRY
-from argus_skill.planner import PlannerConfig
+from argus_skill.planner import Planner, PlannerConfig
 from argus_skill.skills.vertical_select import persist_vertical
 
 
@@ -108,11 +115,126 @@ def test_planner_delegates_to_engineer_and_continues_after_one_increment(
     assert [item.title for item in pending] == ["Deduplicate Manager reply rows"]
     assert pending[0].manager_decision["vertical"] == "argus_maintenance"
     assert pending[0].manager_decision["route_source"] == "planner"
+    assert "framework_maintenance" in pending[0].tags
+    assert pending[0].context_refs == [{
+        "ref": str(supervisor.memory.root / "events.jsonl"),
+        "kind": "runtime evidence",
+        "why": "Identity drift causes duplicate Manager reply rows.",
+    }]
 
     assert len(planner.calls) == 3
     assert all(call["options"].sandbox_mode == "read-only" for call in planner.calls)
     assert all(call["options"].dangerous_yolo is False for call in planner.calls)
     assert not list(project.glob("**/*.py")), "Planner must not create implementation files"
+
+
+def test_planner_require_independent_review_survives_enqueue(
+    tmp_path: Path,
+) -> None:
+    """A Planner task emitted with TASK_REQUIRE_INDEPENDENT_REVIEW=true must be
+    enqueued with the review:required tag so the mission runs an independent
+    Reviewer instead of self-settling with "independent review was not
+    required"."""
+    from argus_skill.life.supervisor._planning_context import PlanningContextMixin
+
+    project = tmp_path / "project"
+    project.mkdir()
+    planner = _PlannerBackend([
+        "\n".join([
+            "PROJECT_DONE=false",
+            "REASON=delegate the reviewed bounded repair",
+            "TASK_KEY=reviewed",
+            "TASK_TITLE=Adopt the reviewed bounded candidate",
+            "TASK_OBJECTIVE=Implement the candidate and close it through "
+            "the independent Reviewer.",
+            "TASK_REQUIRE_INDEPENDENT_REVIEW=true",
+        ])
+    ])
+    supervisor = _supervisor(project, tmp_path / "life", planner)
+
+    assert supervisor._plan_next_work() is True
+
+    pending = supervisor.memory.backlog.pending()
+    assert [item.title for item in pending] == [
+        "Adopt the reviewed bounded candidate"
+    ]
+    assert "review:required" in pending[0].tags
+    assert PlanningContextMixin._item_requires_independent_review(pending[0]) is True
+
+
+@pytest.mark.parametrize("outcome", ["new_task", "retire_only", "waiting", "done"])
+def test_planner_retires_pending_tasks_without_requiring_new_work(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+    outcome: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    planner = _PlannerBackend([])
+    supervisor = _supervisor(project, tmp_path / "life", planner)
+    backlog = supervisor.memory.backlog
+    pending = backlog.add(BacklogItem.new(title="Repair the refuted mechanism", objective="a"))
+    running = backlog.add(BacklogItem.new(title="Work already running", objective="b"))
+    backlog.mark_running(running.id)
+    done = backlog.add(BacklogItem.new(title="Completed work", objective="c"))
+    backlog.mark_done(done.id)
+    reason = "The experiment refuted this mechanism family."
+    lines = [
+        f"PROJECT_DONE={'true' if outcome == 'done' else 'false'}",
+        "REASON=Close the refuted line of work.",
+        f"RETIRE_TASK={pending.id} | {reason}",
+        f"RETIRE_TASK={running.id} | This work already started.",
+        f"RETIRE_TASK={done.id} | This work already finished.",
+        "RETIRE_TASK=unknown | This item no longer exists.",
+    ]
+    if outcome == "new_task":
+        lines.extend([
+            "TASK_KEY=distinct",
+            "TASK_TITLE=Test a distinct mechanism",
+            "TASK_OBJECTIVE=Run an experiment on the untested alternative.",
+        ])
+    elif outcome == "waiting":
+        lines.extend([
+            "WAITING=true",
+            "WAITING_REASON=Await the operator's new evidence.",
+            "BLOCKER_FINGERPRINT=operator-evidence",
+            "RECHECK_CONDITION=The operator supplies new evidence.",
+            "RECHECK_TOKEN=evidence-needed",
+            "OPERATOR_ACTION_REQUIRED=true",
+        ])
+    planner.replies.append("\n".join(lines))
+
+    with caplog.at_level("INFO", logger="argus_skill.life.supervisor._planning_cycle_enqueue"):
+        supervisor._plan_next_work()
+
+    rows = {item.id: item for item in backlog.history()}
+    assert rows[pending.id].status == "superseded"
+    assert rows[pending.id].superseded_reason == reason
+    assert rows[pending.id].superseded_by_plan_id
+    assert rows[running.id].status == "running"
+    assert rows[done.id].status == "done"
+    events = [
+        json.loads(line)
+        for line in (supervisor.memory.root / "events.jsonl").read_text().splitlines()
+    ]
+    retired = [event for event in events if event["type"] == EventType.LIFE_PLAN_NODE_SUPERSEDED]
+    assert len(retired) == 1
+    assert retired[0]["item_id"] == pending.id
+    assert retired[0]["reason"] == reason
+    assert retired[0]["source"] == "planner"
+    assert retired[0]["superseded_by_plan_id"] == rows[pending.id].superseded_by_plan_id
+    skipped = [record for record in caplog.records if "retirement skipped" in record.message]
+    assert len(skipped) == 1
+    assert all(item_id in skipped[0].message for item_id in (running.id, done.id, "unknown"))
+    assert f"{pending.id}: {pending.title}" in planner.calls[0]["prompt"]
+    if outcome == "new_task":
+        new_item, = backlog.pending()
+        assert new_item.title == "Test a distinct mechanism"
+        assert rows[pending.id].superseded_by_plan_id == new_item.plan_id
+    else:
+        assert backlog.pending() == []
 
 
 def test_planner_reuses_front_door_route_without_manager_reclassification(
@@ -158,6 +280,61 @@ def test_planner_reuses_front_door_route_without_manager_reclassification(
 
     assert supervisor._plan_next_work() is True
     assert supervisor.memory.backlog.pending()[0].manager_decision["vertical"] == "software"
+
+
+def test_bounded_manager_direct_task_skips_planner_decomposition(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    life = tmp_path / "life"
+    planner = _PlannerBackend([])
+    memory = LifeMemory.open(life)
+    objective = "Fix src/parser.py and run python -m unittest."
+    supervisor = LifeSupervisor(
+        memory=memory,
+        runner=_MissionRunner(),
+        sink=JsonlEventSink(None, life_dir=memory.root, verbosity="full"),
+        config=LifeSupervisorConfig(
+            budget=LifeBudget(),
+            continuous=True,
+            continuous_objective=objective,
+            open_ended=False,
+            project_worktree=project,
+            artifact_root=project,
+        ),
+        planner_runner=planner,
+    )
+    persist_vertical(project, "software", workflow_mode="direct")
+    (life / "continuous.json").write_text(
+        json.dumps({
+            "enabled": True,
+            "objective": objective,
+            "generation": 1,
+        }),
+        encoding="utf-8",
+    )
+    (life / "events.jsonl").write_text(
+        json.dumps({
+            "type": "life.manager.intent.completed",
+            "execution_task": objective,
+            "continuous_generation": 1,
+            "vertical": "software",
+            "current_stage": "delivery",
+            "workflow_mode": "direct",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    assert supervisor._plan_next_work() is True
+
+    pending = supervisor.memory.backlog.pending()
+    assert len(pending) == 1
+    assert pending[0].objective == objective
+    assert "manager_direct" in pending[0].tags
+    assert "stage_closing" in pending[0].tags
+    assert "review:required" in pending[0].tags
+    assert planner.calls == []
 
 
 def _kernel_supervisor(
@@ -463,7 +640,9 @@ def test_0d3_later_no_gap_evidence_replaces_skip_zero_plan(
     assert rows["skip-zero-rollout"].status == "superseded"
     replacement = next(item for item in rows.values() if item.status == "pending")
     assert replacement.title == "Adopt the no-gap validator"
-    assert replacement.plan_hypothesis == ""
+    assert replacement.plan_hypothesis.startswith("The no-gap validator")
+    assert replacement.decision_rule.startswith("Abandon if no-gap fails")
+    assert replacement.iterate is True
     prompt = planner.calls[0]["prompt"]
     assert "challenged_assumption: The preselected skip-zero candidate" in prompt
     assert "proposed_alternative: Use the no-gap validator" in prompt
@@ -482,6 +661,137 @@ def test_0d3_later_no_gap_evidence_replaces_skip_zero_plan(
     assert decided and decided[-1]["manager_action"] == "replace"
     assert decided[-1]["revision_latency_seconds"] >= 1
     assert committed and committed[-1]["alternative"].startswith("Use the no-gap")
+
+
+def _assert_replan_replace_commits_after_source_terminalized(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    plan_version: int,
+    expected_replacement_version: int,
+) -> None:
+    class _TerminalizedReplanRunner:
+        def execute(self, **_kwargs):  # noqa: ANN003
+            return SimpleNamespace(
+                success=False,
+                status="replan_requested",
+                stop_reason="completed work requires a replacement plan",
+                rounds=1,
+                final_review_status="done",
+                final_review_reason=(
+                    "The source node completed enough evidence to refute itself."
+                ),
+                final_planner_report={
+                    "forward_progress": True,
+                    "plan_signal": "reconsider",
+                    "challenge": "The source route is now worse than the replacement.",
+                    "alternative": "Commit the replacement route.",
+                    "authority_impact": "technical",
+                },
+                plan_challenge={
+                    "manager_action": "replace",
+                    "manager_reason": "Later evidence supports a replacement.",
+                    "challenge": "The source route is now worse than the replacement.",
+                    "alternative": "Commit the replacement route.",
+                    "authority_impact": "technical",
+                    "source": "manager_authority_policy",
+                    "raised_at": time.time() - 2,
+                },
+                stage_transition={},
+            )
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    planner = _PlannerBackend([
+        "\n".join([
+            "PROJECT_DONE=false",
+            "REASON=replace the terminalized source with the approved route",
+            "TASK_KEY=replacement",
+            "TASK_TITLE=Commit the replacement route",
+            "TASK_OBJECTIVE=Implement the replacement route approved by Manager.",
+            "TASK_HYPOTHESIS=The replacement route satisfies the original goal.",
+            "TASK_GOAL_CONTRIBUTION=Preserve progress after the source refuted itself.",
+            "TASK_EXPECTED_REGRESSIONS=The original route is superseded.",
+            "TASK_DECISION_RULE=Reject if the replacement does not meet the old goal.",
+            "TASK_ACCEPTANCE_CHECK=Verify the original goal on the replacement route.",
+        ])
+    ])
+    supervisor = _supervisor(project, tmp_path / "life", planner)
+    supervisor.runner = _TerminalizedReplanRunner()
+    trigger = supervisor.memory.backlog.add(BacklogItem.new(
+        title="Run the source route",
+        objective="Run the source route until its evidence is decisive.",
+        item_id="source-route",
+        plan_id="plan-old",
+        plan_version=plan_version,
+        node_key="source",
+        manager_decision={"routed": True, "vertical": "software"},
+    ))
+    supervisor.memory.backlog.add(BacklogItem.new(
+        title="Continue the source route",
+        objective="Continue after the source route.",
+        item_id="source-followup",
+        plan_id="plan-old",
+        plan_version=plan_version,
+        node_key="followup",
+        deps=[trigger.id],
+    ))
+
+    outcome = supervisor._run_one(trigger)
+
+    rows_after_run = {item.id: item for item in supervisor.memory.backlog.all()}
+    assert rows_after_run["source-route"].status == "failed"
+    assert outcome["status"] == "replan_requested"
+    assert outcome["plan_revision_witness"]["active_item_ids"] == [
+        "source-route",
+        "source-followup",
+    ]
+    assert supervisor._adjudicate_mission_challenge(outcome) == "replace"
+    assert supervisor._plan_next_work(revision_request=outcome) is True
+
+    rows = {item.id: item for item in supervisor.memory.backlog.all()}
+    assert rows["source-route"].status == "superseded"
+    assert rows["source-followup"].status == "superseded"
+    replacement = next(item for item in rows.values() if item.status == "pending")
+    assert replacement.title == "Commit the replacement route"
+    assert replacement.plan_version == expected_replacement_version
+    events = [
+        json.loads(line)
+        for line in (supervisor.memory.root / "events.jsonl").read_text().splitlines()
+    ]
+    committed = [
+        event for event in events
+        if event.get("type") == "life.plan.revision.committed"
+    ]
+    assert committed and committed[-1]["superseded_item_ids"] == [
+        "source-route",
+        "source-followup",
+    ]
+
+
+def test_replan_replace_commits_after_source_terminalized(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _assert_replan_replace_commits_after_source_terminalized(
+        tmp_path,
+        monkeypatch,
+        plan_version=1,
+        expected_replacement_version=2,
+    )
+
+
+def test_replan_replace_commits_after_version_zero_source_terminalized(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _assert_replan_replace_commits_after_source_terminalized(
+        tmp_path,
+        monkeypatch,
+        plan_version=0,
+        expected_replacement_version=1,
+    )
 
 
 def test_forbidden_questions_request_revision_within_existing_authority(
@@ -653,8 +963,65 @@ def test_new_continuous_generation_interrupts_obsolete_planner(tmp_path: Path) -
     config = supervisor._planner_config()
     provider = config.external_interrupt_reason_provider
     assert provider() is None
-    assert config.add_dirs == [str(life)]
+    assert config.state_root == str(project)
+    assert config.add_dirs == []
 
     write_continuous_config(life, enabled=True, objective="new operator objective")
 
     assert provider() == "planner superseded by newer continuous generation"
+
+
+def test_split_memory_planner_resolves_vertical_from_project_state(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    global_root = tmp_path / "state"
+    project_memory = ProjectMemory.open(
+        "s-kernel",
+        global_root=global_root,
+    )
+    memory = MemoryBundle(
+        global_mem=GlobalMemory.open(global_root),
+        project=project_memory,
+        project_worktree=worktree,
+    )
+    memory.init()
+    write_continuous_config(
+        project_memory.root,
+        enabled=True,
+        objective="optimize full-model inference serving",
+    )
+    persist_vertical(
+        project_memory.root,
+        "kernel_engineering",
+        workflow_mode="direct",
+    )
+    supervisor = LifeSupervisor(
+        memory=memory,
+        runner=_MissionRunner(),
+        sink=JsonlEventSink(None, life_dir=project_memory.root, verbosity="full"),
+        config=LifeSupervisorConfig(
+            continuous=True,
+            continuous_objective="optimize full-model inference serving",
+            open_ended=True,
+            project_worktree=worktree,
+            artifact_root=project_memory.root,
+        ),
+        planner_runner=object(),
+    )
+
+    config = supervisor._planner_config()
+    prompt = Planner._build_planner_prompt(
+        continuous_objective="optimize full-model inference serving",
+        journal_tail="(empty)",
+        planning_cycle=0,
+        open_ended=True,
+        project_root=worktree,
+        state_root=config.state_root,
+    )
+
+    assert config.state_root == str(project_memory.root)
+    assert config.role_session_path == project_memory.root / "role-sessions" / "planner.json"
+    assert str(global_root) not in config.add_dirs
+    assert "fill spare mission slots" in prompt

@@ -20,6 +20,7 @@ from argus_skill.core.role_reply import (
     read_key_values,
     read_list,
     read_optional,
+    strip_control_footer,
     strip_named_lines,
 )
 
@@ -97,6 +98,58 @@ def test_a_restated_conclusion_wins() -> None:
     reply = "VERTICAL=research\n\nOn reflection that is wrong.\n\nVERTICAL=kernelbench"
 
     assert read_key_values(reply, _KEYS)["VERTICAL"] == "kernelbench"
+
+
+def test_explicit_footer_ignores_quoted_or_abandoned_fields() -> None:
+    reply = (
+        "The task says `CONTROL: ABORT`, but that is quoted input, not my choice.\n"
+        "VERTICAL=research\n\n"
+        "Decision:\n"
+        "VERTICAL=kernel_engineering\n"
+        "WORKFLOW_MODE=direct\n"
+    )
+
+    values = read_key_values(reply, (*_KEYS, "CONTROL"))
+
+    assert values["VERTICAL"] == "kernel_engineering"
+    assert values["WORKFLOW_MODE"] == "direct"
+    assert "CONTROL" not in values
+
+
+def test_stripping_control_lines_also_removes_footer_marker() -> None:
+    reply = "Natural explanation.\nDecision:\nVERTICAL=software"
+
+    assert strip_named_lines(reply, ("VERTICAL",)) == "Natural explanation."
+
+
+def test_collapsed_control_footer_is_removed_from_user_summary() -> None:
+    summary = (
+        "Implemented the cache and passed 20 tests. "
+        "RESULT=cache implementation passed NEXT_OWNER=reviewer"
+    )
+
+    assert strip_control_footer(
+        summary,
+        ("RESULT", "NEXT_OWNER"),
+    ) == "Implemented the cache and passed 20 tests."
+
+
+def test_natural_result_colon_is_not_mistaken_for_a_footer() -> None:
+    summary = (
+        "We fixed the race; as a result: throughput improved by 20%. "
+        "All tests pass."
+    )
+
+    assert strip_control_footer(summary, ("RESULT", "NEXT_OWNER")) == summary
+
+
+def test_natural_inline_result_equals_is_not_mistaken_for_a_footer() -> None:
+    summary = (
+        "Implemented caching layer. Benchmarked result=3x faster than baseline "
+        "under load."
+    )
+
+    assert strip_control_footer(summary, ("RESULT", "NEXT_OWNER")) == summary
 
 
 def test_an_unanswered_key_is_absent_not_empty() -> None:
@@ -238,8 +291,8 @@ def test_the_routing_prompt_no_longer_demands_json() -> None:
     )
 
     assert "JSON" not in grounded
-    assert "ARGUS_ROLE_DECISION=" in grounded
-    assert '"choice":"existing"' in grounded
+    assert "ARGUS_ROLE_DECISION=" not in grounded
+    assert "CHOICE=existing" in grounded
 
 
 # -- values that are genuinely prose -----------------------------------------
@@ -387,14 +440,13 @@ def test_the_stage_prompt_no_longer_demands_json() -> None:
         checklist_md="- x",
         review=review,
         planner_verdict=None,
-        rendering_block="",
         open_ended=True,
         continuous_objective="obj",
     )
 
     assert "JSON" not in prompt
-    assert "ARGUS_ROLE_DECISION=" in prompt
-    assert '"action":"hold"' in prompt
+    assert "ARGUS_ROLE_DECISION=" not in prompt
+    assert "ACTION=hold" in prompt
 
 
 def test_stage_prompt_exposes_dynamic_later_stage_choices() -> None:

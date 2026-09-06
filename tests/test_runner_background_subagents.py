@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
+from argus_skill.core.models import RunnerResult
 from argus_skill.engineer.external_work import parse_external_wait_request
-from argus_skill.engineer.round_config import SupervisedConfig
+from argus_skill.engineer.round_config import EngineerConfig, SupervisedConfig
 from argus_skill.engineer.round_state import RoundLoopState
 from argus_skill.engineer.round_waits import RoundWaitsMixin
+from argus_skill.engineer.runner import SupervisedEngineer
+from argus_skill.reviewer import ReviewerConfig
 
 
 def test_subagent_wait_uses_structured_request() -> None:
@@ -20,13 +24,17 @@ def test_external_work_wait_uses_structured_request() -> None:
     assert parse_external_wait_request(
         '{"wait_for": "external_work", "wait_id": "work-123"}'
     ) == ("external_work", "work-123")
+    assert parse_external_wait_request(
+        'ARGUS_ROLE_DECISION={"role":"engineer"} '
+        '{"wait_for":"external_work","wait_id":"work-123"}'
+    ) == ("external_work", "work-123")
 
 
 def test_incomplete_json_is_not_a_wait_request() -> None:
     assert parse_external_wait_request('"wait_for": "subagent"') is None
 
 
-def test_healthy_subagent_wait_does_not_consume_cadence_rounds(
+def test_healthy_subagent_wait_releases_the_mission_after_one_cadence(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -38,16 +46,11 @@ def test_healthy_subagent_wait_does_not_consume_cadence_rounds(
         "mode": "direct",
         "pid": os.getpid(),
     }), encoding="utf-8")
-    waits = iter([
-        ("cadence_elapsed", 120.0),
-        ("cadence_elapsed", 120.0),
-        ("terminal", 15.0),
-    ])
     calls: list[str] = []
 
     def wait_once(**kwargs):
         calls.append(kwargs["work_id"])
-        return next(waits)
+        return ("cadence_elapsed", 120.0)
 
     from argus_skill.engineer import runner
 
@@ -66,9 +69,74 @@ def test_healthy_subagent_wait_does_not_consume_cadence_rounds(
         on_event=None,
     )
 
-    assert control.action == "continue_loop"
-    assert calls == ["task-123", "task-123", "task-123"]
-    assert state.last_decision_progress_at == progress_at + 255.0
+    assert control.action == "return"
+    assert control.terminal is not None
+    assert control.terminal[0] == "paused_external_work"
+    assert calls == ["task-123"]
+    assert state.last_decision_progress_at == progress_at + 120.0
+
+
+def test_wait_uses_the_real_last_message_when_a_process_decision_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class Engineer:
+        backend = "test"
+
+        def run_exec(self, **_kwargs):
+            return RunnerResult(
+                exit_code=0,
+                agent_messages=[
+                    'work prepared\n{"wait_for":"external_work","wait_id":"job-1"}'
+                ],
+                role_decisions=[{
+                    "role": "engineer",
+                    "payload": {
+                        "status": "done",
+                        "result": "material result and decisive check",
+                        "next_owner": "reviewer",
+                    },
+                }],
+            )
+
+    class ReviewerMustNotRun:
+        def evaluate(self, **_kwargs):
+            raise AssertionError("a healthy external wait must release before review")
+
+    registry = tmp_path / ".argus_external_work"
+    registry.mkdir()
+    (registry / "job-1.json").write_text(json.dumps({
+        "version": 1,
+        "work_id": "job-1",
+        "state": "running_healthy",
+        "heartbeat_at": time.time(),
+        "stale_after_seconds": 300,
+        "poll_after_seconds": 30,
+        "description": "benchmark",
+    }), encoding="utf-8")
+    from argus_skill.engineer import runner
+
+    monkeypatch.setattr(
+        runner,
+        "_run_external_work_wait",
+        lambda **_kwargs: ("cadence_elapsed", 30.0),
+    )
+    engine = SupervisedEngineer(
+        engineer_runner=Engineer(),
+        reviewer=ReviewerMustNotRun(),
+        engineer_config=EngineerConfig(model="test"),
+        reviewer_config=ReviewerConfig(model="test"),
+    )
+
+    status, _rounds, message, _reason, _thread = engine.run(
+        objective="launch benchmark and continue independently",
+        engineer_prompt_builder=lambda _next, _static=True: "work",
+        supervised_config=SupervisedConfig(max_rounds=2),
+        workdir=tmp_path,
+    )
+
+    assert status == "paused_external_work"
+    assert '"wait_id":"job-1"' in message
 
 
 def test_a_direct_job_that_writes_nothing_is_not_healthy(tmp_path) -> None:
@@ -113,12 +181,10 @@ def test_a_direct_job_that_writes_nothing_is_not_healthy(tmp_path) -> None:
     assert working.state is ExternalWorkState.RUNNING_HEALTHY
     assert working.waitable is True
 
-    # Past the staleness window it needs a person, and it stops buying the
-    # free rounds the stall guard grants to healthy work.
+    # Quiet work remains healthy while its recorded process identity is alive.
     spinning = _status(4 * 3600)
-    assert spinning.state is ExternalWorkState.NEEDS_ATTENTION
-    assert spinning.waitable is False
-    assert "written nothing for 240m" in spinning.reason
+    assert spinning.state is ExternalWorkState.RUNNING_HEALTHY
+    assert spinning.waitable is True
 
 
 def test_a_job_that_writes_its_results_elsewhere_is_not_accused(tmp_path) -> None:

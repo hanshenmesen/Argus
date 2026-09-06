@@ -23,14 +23,19 @@ def test_reviewer_is_not_given_checkpoint_bookkeeping():
     p = _prompt()
     assert "/tmp/project/CHECKPOINT.md" not in p
     assert "CHECKPOINT_RECOMMENDED" not in p
-    assert "Do not inspect or edit checkpoint/context-packet/handoff bookkeeping" in p
+    assert "Do not inspect or edit checkpoint or context bookkeeping" in p
 
 
 def test_reviewer_never_acts_as_checkpoint_editor():
     p = _prompt()
     assert "You do not change the work under review" in p
     assert "Put the next Engineer instruction only in next_action" in p
-    assert "use tools only in proportion to unresolved uncertainty" in p
+    assert "Inspect claim-critical uncertainty with proportional tools" in p
+    assert (
+        "Never reward virtue's form in negative results, hedging, limitation lists, "
+        "or repeat runs—only anchored, decision-changing content; positive and "
+        "negative claims share one evidence standard."
+    ) in p
     assert "six total read/search tool calls" not in p
 
 
@@ -63,12 +68,12 @@ def test_reviewer_final_handoff_requires_explicit_progress_fields():
     p = _prompt()
 
     for field in (
-        "`forward_progress`",
-        "`plan_signal`",
+        "FORWARD_PROGRESS=true",
+        "PLAN_SIGNAL=continue",
         "`plan_challenge`",
         "`plan_alternative`",
         "`authority_impact`",
-        "`operator_options`",
+        "`OPERATOR_OPTIONS=",
     ):
         assert field in p
     assert "Return only STATUS, REASON, NEXT_ACTION and OPERATOR_QUESTION" not in p

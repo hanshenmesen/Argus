@@ -10,6 +10,7 @@ from argus_skill.skills.builtins import (
     _RETIRED_BUILTIN_SEED_HASHES,
     _validate_builtin,
     iter_builtin_skill_texts,
+    iter_common_builtin_skill_texts,
     iter_vertical_skill_texts,
     remove_unmodified_inactive_context_skill_seeds,
     remove_unmodified_vertical_skill_seeds,
@@ -53,12 +54,18 @@ RETIRED_NANOCHAT_SKILLS = {
 
 RESEARCH_BASE_SKILLS = {
     "engineer/figure_spec_scripts/figure_renderer.py",
+    "engineer/hypothesis-implementation-contract.md",
     "engineer/research-grind.md",
     "engineer/suspect-the-setup.md",
     "engineer/figure_spec_scripts/paper_chart_style.py",
     "engineer/paper-framework-figure-studio.md",
+    "engineer/research-svg-pipeline.md",
     "engineer/research-visualization-router.md",
     "engineer/research_visual_scripts/browser_render.py",
+    "research-idea-playbook.md",
+    "research-experiment-playbook.md",
+    "research-paper-playbook.md",
+    "research-review-playbook.md",
 }
 _RESEARCH_MOVE_MARKER = json.loads(
     (
@@ -67,11 +74,19 @@ _RESEARCH_MOVE_MARKER = json.loads(
     ).read_text(encoding="utf-8")
 )
 RESEARCH_MOVED_SKILLS = set(
-    _RESEARCH_MOVE_MARKER.get("paths", ())
-    if isinstance(_RESEARCH_MOVE_MARKER, dict)
-    else _RESEARCH_MOVE_MARKER
+    path
+    for path in (
+        _RESEARCH_MOVE_MARKER.get("paths", ())
+        if isinstance(_RESEARCH_MOVE_MARKER, dict)
+        else _RESEARCH_MOVE_MARKER
+    )
+    if (vertical_skill_source_path("research") / path).is_file()
 )
-RESEARCH_SKILLS = RESEARCH_BASE_SKILLS | RESEARCH_MOVED_SKILLS
+RESEARCH_SKILLS = RESEARCH_BASE_SKILLS | RESEARCH_MOVED_SKILLS | {
+    "engineer/venue-paper-drafting.md",
+    "engineer/venue-format-preflight.md",
+    "reviewer/venue-academic-language-review.md",
+}
 
 
 def test_iter_vertical_skill_texts_quant() -> None:
@@ -141,6 +156,16 @@ def test_minimal_coding_agent_skill_is_packaged() -> None:
     body = packaged["engineer/minimal-coding-agent.md"]
     assert "最少且足够的代码" in body
     assert "答不出来就不要添加" in body
+
+
+def test_agent_team_lead_is_a_common_builtin() -> None:
+    common = dict(iter_common_builtin_skill_texts())
+    packaged = dict(iter_builtin_skill_texts())
+
+    assert "agent-team-lead.md" in common
+    assert "engineer/agent-team-lead.md" not in packaged
+    assert "Every role may discover this Skill" in common["agent-team-lead.md"]
+    assert "before handing off to the normal mission" in common["agent-team-lead.md"]
 
 
 def test_machine_specific_nanochat_playbooks_are_retired() -> None:
@@ -268,9 +293,9 @@ def test_research_playbooks_are_owned_only_by_research_vertical() -> None:
     common = dict(iter_builtin_skill_texts())
     research = dict(iter_vertical_skill_texts("research"))
 
-    assert "engineer/idea-discovery.md" not in common
+    assert "research-idea-playbook.md" not in common
     assert "reviewer/experiment-results-review.md" not in common
-    assert "engineer/idea-discovery.md" in research
+    assert "research-idea-playbook.md" in research
     assert "reviewer/experiment-results-review.md" in research
 
 
@@ -307,10 +332,17 @@ def test_all_builtins_valid_including_stubs() -> None:
             _validate_builtin(name, text)
 
 
-def test_reference_corpora_are_not_enumerated_as_skills() -> None:
+def test_reference_corpora_are_assets_not_matchable_skills(tmp_path) -> None:
     names = {name for name, _text in iter_builtin_skill_texts()}
 
     assert not any("/references/" in f"/{name}" for name in names)
+    seed_vertical_skills(tmp_path, "research", overwrite=True)
+    # The Idea playbook may open these paths on demand. Excluding
+    # them from matching must not exclude them from the runtime cache.
+    assert (
+        tmp_path
+        / "engineer/references/ideation/anti-patterns.md"
+    ).is_file()
 
 
 def test_seed_for_vertical_overwrites_stub_with_real_body(tmp_path) -> None:
@@ -368,7 +400,10 @@ def test_seed_vertical_skills_writes_only_research_runtime_layer(
 ) -> None:
     written = seed_vertical_skills(tmp_path, "research")
 
-    assert set(written) == RESEARCH_SKILLS
+    assert RESEARCH_SKILLS.issubset(written)
+    assets = set(written) - RESEARCH_SKILLS
+    assert assets
+    assert all("/references/" in f"/{name}" for name in assets)
 
 
 def test_remove_unmodified_vertical_seeds_preserves_learned_edits(tmp_path) -> None:

@@ -53,6 +53,10 @@ def _enforce_operator_question_policy(
         and state.rounds[-1].review.review_source
         in OPERATOR_QUESTION_POLICY_REVIEW_SOURCES
     )
+    # ReviewDecision is a plain dataclass, so nothing enforces this field's
+    # type at runtime, and it carries model-derived data into a completion
+    # decision. ``core.models.ReviewDecision.to_event_payload`` guards the same
+    # field for the same reason; the two should not disagree.
     planner_report = (
         dict(review.planner_report) if isinstance(review.planner_report, dict) else {}
     )
@@ -133,13 +137,6 @@ def _review_forward_progress(review: ReviewDecision) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _review_plan_signal(review: ReviewDecision) -> str:
-    report = review.planner_report
-    if not isinstance(report, dict):
-        return ""
-    return str(report.get("plan_signal") or "").strip().lower()
-
-
 def _blocked_on_healthy_work(workdir: Path) -> bool:
     """True while a job this mission launched is still running and healthy."""
     from .external_work import scan_external_work
@@ -208,20 +205,9 @@ class RoundSettlementMixin:
         decision_idle_seconds: float = 0.0,
         decision_timeout_seconds: int = 0,
         policy_retry: bool = False,
+        soft_limit_stalled: bool = False,
+        soft_round_limit: int = 0,
     ) -> tuple[LoopStatus | None, str]:
-        if _review_plan_signal(review) == "reconsider":
-            report = review.planner_report if isinstance(review.planner_report, dict) else {}
-            challenge = str(report.get("challenge") or review.reason or "").strip()
-            authority = str(report.get("authority_impact") or "technical").strip()
-            if authority == "operator" and review.operator_question:
-                return (
-                    "blocked",
-                    challenge or "The plan challenge requires an operator decision.",
-                )
-            return (
-                "replan_requested",
-                challenge or "Later evidence materially challenged the current plan.",
-            )
         if review.status == "done":
             return "done", review.reason or "Reviewer judged the objective complete."
         if review.status == "blocked":
@@ -241,10 +227,17 @@ class RoundSettlementMixin:
                 "Engineer produced no effective output for "
                 f"{no_progress_streak} consecutive rounds." + _STALL_REDIRECT,
             )
+        if soft_limit_stalled:
+            return (
+                "no_progress",
+                f"Soft round limit {soft_round_limit} passed and neither of the "
+                "last two Reviewer verdicts reported forward progress."
+                + _STALL_REDIRECT,
+            )
         if (
             stall_threshold > 0
             and semantic_stall_streak >= stall_threshold
-            and round_index < max_rounds
+            and (max_rounds <= 0 or round_index < max_rounds)
         ):
             return (
                 "no_progress",
@@ -254,7 +247,7 @@ class RoundSettlementMixin:
         if (
             decision_timeout_seconds > 0
             and decision_idle_seconds >= decision_timeout_seconds
-            and round_index < max_rounds
+            and (max_rounds <= 0 or round_index < max_rounds)
         ):
             return (
                 "no_progress",
@@ -353,8 +346,8 @@ class RoundSettlementMixin:
         # declares ``producer_role="reviewer"`` and the supervisor replays it
         # as independent stage evidence, so sealing a self-review here would
         # let the Engineer certify its own stage transition.
-        if supervised_config.context_packet_path and str(
-            getattr(review, "review_source", "reviewer") or "reviewer"
+        if supervised_config.context_packet_path and (
+            review.review_source or "reviewer"
         ) == "reviewer":
             try:
                 from ..life.context_packet import record_reviewed_handoff
@@ -437,6 +430,16 @@ class RoundSettlementMixin:
             decision_idle_seconds=decision_idle_seconds,
             decision_timeout_seconds=(supervised_config.decision_progress_timeout_seconds),
             policy_retry=policy_retry,
+            soft_limit_stalled=bool(
+                supervised_config.soft_round_limit > 0
+                and round_index > supervised_config.soft_round_limit
+                and len(state.rounds) >= 2
+                and all(
+                    _review_forward_progress(row.review) is not True
+                    for row in state.rounds[-2:]
+                )
+            ),
+            soft_round_limit=supervised_config.soft_round_limit,
         )
         if terminal_status is not None:
             return control_return(
@@ -449,7 +452,10 @@ class RoundSettlementMixin:
                 )
             )
 
-        if continue_adaptor is not None and round_index < supervised_config.max_rounds:
+        if continue_adaptor is not None and (
+            supervised_config.max_rounds <= 0
+            or round_index < supervised_config.max_rounds
+        ):
             try:
                 adapted = str(continue_adaptor(state.rounds) or "").strip()
                 if adapted:

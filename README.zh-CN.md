@@ -10,7 +10,7 @@
 
 让长期 Agent 能够规划、执行、验证、暂停，并在一次模型调用之后继续推进。
 
-**当前为 Preview v0.1.2 · 用于提前发布 Argus 的后续更新。**
+**当前为 Preview v0.1.1 · 用于提前发布 Argus 的后续更新。**
 
 [![GitHub Stars](https://img.shields.io/github/stars/lbx154/Argus?style=flat-square)](https://github.com/lbx154/Argus/stargazers)
 [![License](https://img.shields.io/github/license/lbx154/Argus?style=flat-square)](LICENSE)
@@ -30,31 +30,33 @@
 > **[microsoft/ArgusAgent](https://github.com/microsoft/ArgusAgent)**。
 > 两个仓库后续会保持同步更新，关注或 Star 任意一个仓库都可以持续了解项目动态。
 
-## Argus 是什么？
+## Driver–Harness 模型
 
-大多数 Agent 面向一次对话或一次编码回合设计。Argus 面向真正需要持续推进的工作：保存状态、分离执行与判断，并从已经验证的进展继续，而不是每次重新开始。
+**模型**是发动机：它烧掉算力，输出 token。**Harness** 是传动系统，把这些 token 耦合到文
+件、shell、编译器、GPU 和测试上。**Driver** 是方向盘后面那个位子——决定接下来做什么、判断
+上一个结果好不好、以及知道什么时候该停下来问人。在其他所有 Agent 系统里，坐在那个位子上的
+都是一个人；所以那个人一睡觉，工作就停了。
 
-| 核心能力 | 含义 |
-|---|---|
-| **持久状态** | 任务、检查点、决策、Skill 与证据可跨 Session 和运行时升级保存。 |
-| **独立审查** | 执行与验证相互分离；正常回合由 Reviewer 给出独立判断。 |
-| **四角色运行时** | Manager、Planner、Engineer 和 Reviewer 分别拥有明确的权威与职责。 |
-| **真实工具调用** | Agent 直接使用文件、终端、实验、API 和可检查的产物。 |
-| **领域扩展** | Vertical 可以定义专属阶段、工具、证据要求与完成标准。 |
-| **多种 Backend** | 支持 GitHub Copilot CLI、Pi、Codex CLI、Claude Code、OpenCode 与 Grok Build。 |
+**Argus 坐上 Driver 的位子**，把这份活拆给四个**刻意不让互相代劳**的角色：
 
-## 运行模型
+| | 拥有 | **不得** |
+|---|---|---|
+| **Manager** | 阶段迁移权，以及被采纳的教训存放在哪一层 | 亲自执行它所要采纳的工作 |
+| **Planner** | 下一个任务，以及它必须产出的证据 | 推动战役进入下一阶段 |
+| **Engineer** | 实现、调研、实验、产物 | 宣布自己的工作已完成 |
+| **Reviewer** | 判决——正确性、证据、局限；可以返回 `blocked` | 修改任何东西。它**只读**运行 |
 
-| | 权威 | 职责 |
-|---:|---|---|
-| `01` | **Manager · 控制** | 理解 operator 意图、选择工作流，并独占阶段迁移权。 |
-| `02` | **Planner · 方向** | 选择下一项高价值任务，并定义它必须产出的证据。 |
-| `03` | **Engineer · 执行** | 实现代码、开展调研、运行实验，并生成可检查的产物。 |
-| `04` | **Reviewer · 验证** | 独立检查正确性、证据、局限和完成状态。 |
+凭据、支付、不可逆操作和对外发布，永远会停下来等人。
 
-项目可以停止、恢复、跨运行时替换，并从最近一次已验证位置继续推进。
+它还能不重训就变强：被采纳的 Skill 和带来源链接的 Wiki 发现，会按"它被证明成立的范围"放进
+`project` → `vertical` → `global`；而新领域以 **vertical** 的形式接入一个不会改变的核心
+——目前 24 个，全部 53,871 行领域代码里对权限边界的引用为零。
 
-**原生 Backend：** `GitHub Copilot CLI` · `Pi` · `OpenAI Codex CLI` · `Claude Code` · `OpenCode` · `Grok Build` · `Qoder` · `DeepSeek Harness`
+正因为干活的人不能给自己打分，没有人需要盯着它：在 27 场战役、1,548 小时里，它平均**每约
+310 小时**才需要人做一次研究判断，占空比 **95–99%**。其余内容都在
+**[技术报告](https://arxiv.org/pdf/2608.05144)**里。
+
+**原生 Backend：** `GitHub Copilot CLI` · `Pi` · `OpenAI Codex CLI` · `Claude Code` · `Cursor CLI` · `OpenCode` · `Grok Build` · `Qoder` · `DeepSeek Harness`
 
 **Harbor 评测：** Harbor Framework 可以把完整的有界 Argus
 Manager/Planner/Engineer/Reviewer 运行时作为自定义 Agent 直接调用。配置和边界见
@@ -69,10 +71,12 @@ Manager/Planner/Engineer/Reviewer 运行时作为自定义 Agent 直接调用。
 如果已经过期，请在 Issue 中联系维护者更新。
 
 <p align="center">
-  <a href="docs/assets/argus-wechat-group.jpg">
-    <img src="docs/assets/argus-wechat-group.jpg" width="360" alt="Argus 微信交流群二维码">
+  <a href="docs/assets/argus-wechat-group-2.jpg">
+    <img src="docs/assets/argus-wechat-group-2.jpg" width="360" alt="Argus 微信交流 2 群二维码">
   </a>
 </p>
+
+<p align="center"><strong>交流1群已满，请进入2群。</strong></p>
 
 ## 快速安装
 
@@ -92,6 +96,7 @@ Manager/Planner/Engineer/Reviewer 运行时作为自定义 Agent 直接调用。
 | GitHub Copilot CLI | `copilot` | `npm install -g @github/copilot` | `copilot login` |
 | OpenAI Codex CLI | `codex` | `npm install -g @openai/codex@latest` | `codex login` |
 | Claude Code | `claude` | `npm install -g @anthropic-ai/claude-code` | 运行 `claude`，再执行 `/login` |
+| Cursor CLI | `cursor` | `curl https://cursor.com/install -fsS | bash`（[Windows](https://cursor.com/install?win32=true)） | `agent login` 或 `CURSOR_API_KEY` |
 | Pi | `pi` | `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` | 运行 `pi`，再执行 `/login` |
 | OpenCode | `opencode` | [官方安装说明](https://opencode.ai/docs/) | `opencode auth login` |
 | Grok Build | `grok` | [官方安装说明](https://x.ai/cli) | `grok login` |
@@ -138,11 +143,11 @@ $env:Path = "$Scripts;$env:Path"
 使用 `$Argus` 绝对路径可以证明 setup 没有误调用旧安装。`$env:Path` 会让当前
 PowerShell 同时支持普通 `argus` 命令；新窗口的持久 PATH 修复见后面的排障章节。
 
-`argus doctor` 是主动修复命令：默认会在真实 Argus 目录中启动用户电脑上已安装的
-Agent CLI，开放工具让 Agent 直接检查并修复机器，然后重新运行确定性检查验收。
-只有需要“不调用模型的确定性验证”时才使用
-`argus doctor --advisor none --verify`。
-主动修复会执行一次真实 Agent turn，可能需要几分钟；它不是快速版本检查。
+`argus doctor` 默认只做只读诊断。只有明确执行
+`argus doctor --advisor auto`（或指定某个 advisor）时，才授权已安装的 Agent CLI
+在 Argus 范围内检查和修复文件、配置、运行时状态或依赖。需要不调用模型的确定性验收时，
+使用 `argus doctor --advisor none --verify`。明确请求的主动修复会执行真实 Agent turn，
+可能需要几分钟；它不是快速版本检查。
 
 Windows 当前支持安装、Manager 对话、配对、Web/TUI、终端作用域 daemon 控制和
 原生 durable subagent。Native Windows 使用独立 worker 承载 direct 或 supervised
@@ -201,9 +206,9 @@ Linux 新终端不要依赖全局 `argus`；请使用
 
 ### Backend 说明
 
-`--backend` 可使用 `copilot`、`pi`、`codex`、`claude`、`opencode`、`grok`、
+`--backend` 可使用 `copilot`、`pi`、`codex`、`claude`、`cursor`、`opencode`、`grok`、
 `qoder` 或 `dsh`。setup 会优先采用所选 CLI 自己目录中的模型；无法确定时保留
-该 CLI 的原生默认值，不会把 OpenAI 模型 id 注入 Claude Code、Pi、OpenCode、
+该 CLI 的原生默认值，不会把 OpenAI 模型 id 注入 Claude Code、Cursor CLI、Pi、OpenCode、
 Grok、Qoder 或 dsh。
 如果已有 OpenAI-compatible URL，setup 会在需要时自动安装 Pi 并完成配置：
 
@@ -263,7 +268,8 @@ argus
 ```
 
 ```bash
-argus doctor                         # 调用 Agent 检查并修复
+argus doctor                         # 确定性、只读诊断
+argus doctor --advisor auto          # 明确请求 Agent 检查并修复
 argus doctor --advisor none --verify # 不调用模型的确定性验证
 argus --status                       # 查看当前运行状态
 ```
@@ -272,10 +278,10 @@ argus --status                       # 查看当前运行状态
 
 ### Windows Desktop
 
-Windows x64 源码包含一个 Electron 桌面宿主：它监管由同一套 Argus 运行时冻结得到的
+Windows x64 源码包含一个 Tauri/Rust 桌面宿主：它监管由同一套 Argus 运行时冻结得到的
 本地后端，并直接打开现有 Web Cockpit；Manager、Workbench 与 WebAPI 不存在单独的
-Desktop 分叉。源码运行、安全边界、验收和打包命令见
-**[Windows Desktop 文档](docs/windows-desktop.md)**。
+Desktop 分叉。它还提供签名更新发现和经用户确认后的安装。源码运行、安全边界、验收和
+打包命令见 **[Windows Desktop 文档](docs/windows-desktop.md)**。
 
 ### Terminal Cockpit
 
@@ -381,6 +387,16 @@ export ARGUS_SKILL_AUTONOMY_MODE=autonomous
 
 如果你是 Agent 的狂热爱好者，我们推荐你在本地部署 Argus，让完整闭环真正适合自己的工作方式。你可以调整角色 Prompt、工作流边界、审查策略、工具与运行约定，对接已有基础设施，并用测试固定自己重视的行为。
 
+一个完整工程案例是 **[避免局部爬山](docs/exploration-without-local-hill-climbing.zh-CN.md)**：MI300X serving 任务暴露出过度保守激励后，Argus 如何把纯报告研究、高风险机制组合、单次探索筛选与严格最终声明分开。
+
+更完整的一份是 **[Argus 会出什么问题，我们怎么修的](docs/failure-modes-and-fixes.zh-CN.md)**：记录了六种真实失效——一个测的其实是自己 token 上限的实验、冻结在训练截止时刻的世界知识、满足于交差而不是做成一件事、在想法还没配得上时就施加的仪式、局部爬山，以及不愿意报喜。它也记录了一次**我们修错了的修法**：加一个门去逼出进取心——而诚实的答案是，防御性检查不产出好工作，它只产出能通过检查的工作。
+
+与之配套的实测版本是 **[系统审计：六条抱怨，逐条拿代码核对](docs/system-audit.zh-CN.md)** —— 过度防御、验证门槛过严、不必要的人类打扰、指令遵循弱、冗余，以及 schema 乱用，每条都用代码树上的实测数字给出成立与否。
+
+后续的 **[架构精简规划](docs/architecture-simplification-plan.md)** 把普通工程短链与完整研究团队分开，设计由 Host 生成的单一任务上下文，并规划兼容优先的 Vertical 拆库路径。
+
+由那份审计推出的是 **[精简计划](docs/simplification-plan.zh-CN.md)**：一组排好序的删除、一条用来机械分拣 2,277 个异常处理器的判据、一份明确的"不能删"清单，以及要避开的陷阱——把删掉的机械换成一个"统一系统"，那会变成同一个错误。
+
 ### 创建自己的 Vertical
 
 Vertical 可以为你的领域提供专属阶段、Skill、数据集、工具、证据要求、评测方法与完成标准。规划与审查将遵循该领域真正重要的规范，而不是一套通用流程。
@@ -389,9 +405,9 @@ Vertical 可以为你的领域提供专属阶段、Skill、数据集、工具、
 
 ### 让其他 Agent 成为外层入口
 
-你可以通过 GitHub Copilot、Pi、Codex、Claude Code、OpenCode、Grok Build、OpenClaw 或 Hermes 调用 Argus、检查状态、操作本地 CLI 或 Web/API，并继续迭代自己的部署。
+你可以通过 GitHub Copilot、Pi、Codex、Claude Code、Cursor CLI、OpenCode、Grok Build、OpenClaw 或 Hermes 调用 Argus、检查状态、操作本地 CLI 或 Web/API，并继续迭代自己的部署。
 
-- **Argus 原生 Backend：** GitHub Copilot CLI、Pi、Codex CLI、Claude Code、OpenCode、Grok Build、Qoder、DeepSeek Harness
+- **Argus 原生 Backend：** GitHub Copilot CLI、Pi、Codex CLI、Claude Code、Cursor CLI、OpenCode、Grok Build、Qoder、DeepSeek Harness
 - **外层 Agent：** OpenClaw、Hermes，或任何能够使用 Shell / HTTP API 的 Agent
 
 如需运行持久任务，可安装或适配可移植的
@@ -472,5 +488,51 @@ Linux 请先停止 Argus、保留所需工作，再删除 `$HOME/Argus` checkout
 - Linux 使用 `$HOME/Argus/.venv/bin/argus`；全局 `argus` 可能属于旧安装。
   `python3 -m venv` 缺少 `ensurepip` 时先安装 `python3-venv`。
 - `argus doctor --advisor none --verify` 只做确定性诊断；需要本机 Agent 直接检查和
-  修复 Argus 时使用 `argus doctor`。
+  修复 Argus 时，明确使用 `argus doctor --advisor auto`。
 - 用 `argus --config-help` 检查实际 backend/model，再判断 setup 或鉴权是否失败。
+
+## Argus 目前取得的成果
+
+一份部分记录，按**由谁来判定这个结果算不算数**分组——而这些判定者里没有一个是 Argus 自己。
+
+### 开源代码
+
+| 仓库 | 结果 |
+|---|---|
+| **[ace-2](https://github.com/Argus-AiTeam/ace-2)** | 一颗 Qwen2.5-0.5B W4A8 推理加速器，其规格、RTL、验证与物理流程都没有人类作者。运行时 **13,914/13,914** 条命令跑完；SKY130 面积 **0.614 mm²**（上限 2.0）、余量 **+0.6966 ns**、WNS/TNS 0.00 ns、100 MHz。证书自己公布了排除项：不含 DRC/LVS、不含 GDS、不含硅验证。 |
+| **[minimax-h3-mac](https://github.com/Argus-AiTeam/minimax-h3-mac)** · **[-desktop](https://github.com/Argus-AiTeam/minimax-h3-desktop)** · **[ComfyUI 节点](https://github.com/Argus-AiTeam/ComfyUI-MiniMax-H3-MLX)** | 一个约 62 GiB 的模型，不是被压小而是被跑起来：24 GB 的 M4 Pro 上 **47 分 58.7 秒**，峰值约 **15.8 GB**。单张 RTX A6000 上，Turbo 8-step 相对 BF16 的 N=10 基线达到 **6.159×**。未通过质量门禁的候选被公开标记为 *rejected*。 |
+| **[FlashDA](https://github.com/SJTU-DENG-Lab/FlashDA/tree/feature/dllm-fa4-adaptation)** · **[Diffulex](https://github.com/SJTU-DENG-Lab/Diffulex)** | 六种扩散语言模型 mask 家族被搬进 **FlashAttention-4 CuTe DSL** kernel，耗时 **21.85 小时**模型算力、不到 **80 元**、87.7 小时内只打扰 2 次。跨 SM80/SM90 **19/19** 对齐；H200/SM90 上达到**原生 FA4 的 92–95%**，并比 Diffulex Triton 后端快 **1.61–2.57×**（两边都开 CUDA Graph）。早期路线比原生**慢 4.9–29.6×**；正是"识别出这条数据通路本身就是错的并放弃它"才产出了最终结果，而那条被否掉的路线连同证据一起被保留。 |
+
+FlashDA 建立在 [Tri Dao](https://github.com/tridao) 及合作者出色的 FlashAttention-4 /
+CuTe DSL 工作之上。欢迎复现，以及向 SM90 之外的移植；完整协议与逐场景延迟见
+[`EXPERIMENT_RESULTS.md`](https://github.com/SJTU-DENG-Lab/FlashDA/blob/feature/dllm-fa4-adaptation/EXPERIMENT_RESULTS.md)。
+
+### 由外部维护者判定
+
+| 提交 | 结果 |
+|---|---|
+| **[sglang#35038](https://github.com/sgl-project/sglang/pull/35038)** —— SenseNova U1 原生多模态生成与交错服务 | 36 个文件、**+11,263/−72**、14 个 commit。1,116 个张量、0 缺失；视觉问答 **160/160** 精确；并发 8 下 **8/8** 精确；BS8 吞吐 **5.108×**。一位工程师配合逐轮 Agent 投入 **60 多小时**未能完成；Argus 在 **24.14 小时**内完成。*open。* |
+| **[fla-org#1045](https://github.com/fla-org/flash-linear-attention/pull/1045)** —— TileLang RWKV6 后端 | **已合入**，H100 NVL 上前向+反向 1.21×，无任何 inline 修改要求。它的说明里写明这项工作由 Argus 自主完成——而外部维护者连同代码一起接受了这句话。 |
+| **[fla-org#1109](https://github.com/fla-org/flash-linear-attention/pull/1109)** —— SM100 autotune 崩溃 | **已合入。** 两行，没有加速可报：修之前整个测试文件跑不完，修之后 **76 个测试通过**。 |
+| **[fla-org#1128](https://github.com/fla-org/flash-linear-attention/pull/1128)** · **[#1114](https://github.com/fla-org/flash-linear-attention/pull/1114)** | KDA 训练相对 Triton 1.29×，`AttnRes` 在 B200 上几何平均 1.102×。两者都把**最差的那一行**和均值并列写出；#1128 交付的是它能验证的 1.078–1.099×，而不是它测到的 1.541×。*open。* |
+
+### 由官方评测器打分
+
+| 竞技场 | 结果 |
+|---|---|
+| SWE-Bench Pro（731 任务） | **≈78%**，对照直接使用 Copilot 的 **59%**（两边同一个模型）——并且 **35** 个任务被判为 `blocked`，而不是报成没有证据支撑的成功 |
+| SOL-ExecBench | 全球排名 **#6**；7 个 kernel 进入 top-3；在 2 个上超过第 1 名 |
+| MLE-Bench Lite | 奖牌率 **69.2%**（9/13）：3 金、3 银、3 铜，对照 Kaggle 排行榜 |
+| AARRI-Bench | **63/82（76.8%）**，对照论文最好成绩 68.3% |
+| nanochat / nanoGPT speedrun | B200 上 0.9636 vs 人类最好 0.9646 BPB；**79.77 秒** vs 同设备人类记录 80.18 秒 |
+
+### 由外部检查器判定
+
+- **MOF 生成**——化学可控性 92.5 / 100.0 / 74.5%，AUC 0.594 → 0.833，由外部 `MOFChecker` 验证。被采纳的方法比它所取代的那个**更小**。
+- **Erdős–Gyárfás**——六项有证明支撑的前沿更新，其中一条被证伪的路线作为证据被保留而不是删掉。
+- **研究写作**——六条论文流水线推进到投稿，共 254 个 mission，含 16 次 Stage 回滚。
+- **作用在它自己身上**——成熟期解决一个 SWE-Bench Pro 任务，比启动期少用 **21% 的 token**、少花 **15% 的活跃时间**，全程权重未变。最长单场战役 **8.1 天**。
+
+> [!NOTE]
+> 以上每个数字都来自[技术报告](https://arxiv.org/pdf/2608.05144)或所链接的仓库，并各自带着
+> 那里声明的适用条件。

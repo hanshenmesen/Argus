@@ -21,6 +21,11 @@ _PLANNER_TALLY_KINDS = (
     "mission_failed",
     "mission_replan_requested",
 )
+# How many terminal settlements the campaign tally may count. Only tally
+# kinds occupy window slots (``tail_settlements``); a saturated window means
+# the campaign is genuinely longer than this, and the tally must then speak
+# about "the last N" instead of the whole campaign.
+_TALLY_WINDOW_MISSIONS = 4096
 
 
 def _payload(entry: Any) -> dict[str, Any]:
@@ -70,12 +75,41 @@ def _cumulative_price(missions: list[Any]) -> str:
 
 
 class PlannerRenderingMixin:
-    def _item_iteration_cycles(self) -> int:
-        """Default iteration cycles for planner-generated tasks."""
+    def _render_research_plan_for_planner(self) -> str:
+        """Return the fail-soft, bounded living research plan projection."""
+        from ..research_plan import render_research_plan_for_planner
+
         try:
-            return max(1, int(self.config.planner_task_iteration_max_cycles))
+            return render_research_plan_for_planner(self.memory.root)
+        except Exception:  # noqa: BLE001 - planner state must never stop a cycle
+            return "(no plan yet — create RESEARCH_PLAN.md in this planning cycle)"
+
+    def _apply_research_plan_update(self, raw_text: str) -> bool:
+        """Apply an optional full ``PLAN_UPDATE`` block from Planner output."""
+        from ...core.role_reply import read_block
+        from ...planner.planner import _GLOBAL_KEY_VALUE_KEYS
+        from ..research_plan import replace_research_plan
+
+        keys = (*_GLOBAL_KEY_VALUE_KEYS, "PLAN_UPDATE", "TASK_KEY")
+        update = read_block(raw_text, "PLAN_UPDATE", keys).strip()
+        if not update or not replace_research_plan(self.memory.root, update):
+            return False
+        # ``user.note`` is the canonical free-form journal event. The file is
+        # already durable if event delivery happens to fail.
+        self._emit({
+            "type": "user.note",
+            "title": "research plan updated",
+            "text": "research plan updated",
+            "tags": ["planner", "research_plan"],
+        })
+        return True
+
+    def _item_iteration_cycles(self) -> int:
+        """Optional iteration ceiling for planner-generated tasks."""
+        try:
+            return max(0, int(self.config.planner_task_iteration_max_cycles))
         except (TypeError, ValueError):
-            return 6
+            return 0
 
     def _render_campaign_tally(self) -> str:
         """Whole-campaign terminal facts, as facts and nothing else.
@@ -94,18 +128,21 @@ class PlannerRenderingMixin:
         harness must not pre-chew it into a recommendation.
         """
         try:
-            missions = [
-                entry
-                for entry in self.memory.journal.tail(4096)
-                if getattr(entry, "kind", "") in _PLANNER_TALLY_KINDS
-            ]
+            missions = self.memory.journal.tail_settlements(
+                _TALLY_WINDOW_MISSIONS,
+                kinds=_PLANNER_TALLY_KINDS,
+            )
         except Exception:  # noqa: BLE001 — planner context is best-effort
             return ""
         if not missions:
             return ""
         counts = Counter(getattr(entry, "kind", "") for entry in missions)
+        # A full window means the campaign extends past what the tally can
+        # see, so every "whole campaign" claim degrades to window-scoped.
+        saturated = len(missions) >= _TALLY_WINDOW_MISSIONS
+        scope = ("last " if saturated else "") + f"{len(missions)} terminal missions"
         facts = [
-            f"Campaign totals ({len(missions)} terminal missions): "
+            f"Campaign totals ({scope}): "
             + ", ".join(
                 f"{kind.removeprefix('mission_')}={counts[kind]}"
                 for kind in _PLANNER_TALLY_KINDS
@@ -122,7 +159,12 @@ class PlannerRenderingMixin:
                 "objective-level progress"
             )
         if not counts["mission_replan_requested"]:
-            facts.append("no mission has ever requested a replacement plan")
+            facts.append(
+                f"no replacement plan requested in the last {len(missions)} "
+                "terminal missions"
+                if saturated
+                else "no mission has ever requested a replacement plan"
+            )
         elif distance := _missions_since_replan(missions):
             facts.append(f"{distance} terminal missions since the last replan")
         if price := _cumulative_price(missions):
@@ -132,11 +174,13 @@ class PlannerRenderingMixin:
     def _render_journal_for_planner(self) -> str:
         """Render a bounded recency window of terminal mission evidence."""
         try:
-            entries = [
-                entry
-                for entry in self.memory.journal.tail(64)
-                if entry.kind in _PLANNER_HISTORY_KINDS
-            ][-_PLANNER_HISTORY_COUNT:]
+            # tail_kinds (not tail_settlements): ``budget_pause`` also has a
+            # non-settlement event source (``life.budget.pause``), and the
+            # Planner must still see why nothing is running.
+            entries = self.memory.journal.tail_kinds(
+                _PLANNER_HISTORY_COUNT,
+                kinds=_PLANNER_HISTORY_KINDS,
+            )
         except Exception:  # noqa: BLE001
             return ""
         lines: list[str] = []

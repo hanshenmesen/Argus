@@ -104,11 +104,15 @@ def test_doctor_advisor_uses_installed_agent_to_repair(
 def test_doctor_advisor_uses_configured_manager_executable(monkeypatch) -> None:
     monkeypatch.setattr(
         "argus_skill.core.knobs.resolve_role_backend",
-        lambda _role: "claude",
+        # **_kw: the real resolver now takes a keyword-only `default=`, which
+        # advisor._advisor_selections passes explicitly.
+        lambda _role, **_kw: "claude",
     )
     monkeypatch.setattr(
         "argus_skill.core.knobs.resolve_runner_bin_setting",
-        lambda _role: "/opt/agents/claude-custom",
+        lambda _role, *, backend: (
+            "/opt/agents/claude-custom" if backend == "claude" else ""
+        ),
     )
     calls: list[tuple[str, str | None]] = []
 
@@ -133,11 +137,13 @@ def test_doctor_advisor_uses_configured_manager_executable(monkeypatch) -> None:
 def test_doctor_advisor_accepts_qoder_and_dsh(monkeypatch) -> None:
     monkeypatch.setattr(
         "argus_skill.core.knobs.resolve_role_backend",
-        lambda _role: "codex",
+        # **_kw: the real resolver now takes a keyword-only `default=`, which
+        # advisor._advisor_selections passes explicitly.
+        lambda _role, **_kw: "codex",
     )
     monkeypatch.setattr(
         "argus_skill.core.knobs.resolve_runner_bin_setting",
-        lambda _role: "",
+        lambda _role, *, backend: "",
     )
     monkeypatch.setattr(
         "argus_skill.agent_cli.runner_backend.resolve_runner_bin",
@@ -153,11 +159,15 @@ def test_doctor_advisor_retries_path_when_configured_executable_is_stale(
 ) -> None:
     monkeypatch.setattr(
         "argus_skill.core.knobs.resolve_role_backend",
-        lambda _role: "claude",
+        # **_kw: the real resolver now takes a keyword-only `default=`, which
+        # advisor._advisor_selections passes explicitly.
+        lambda _role, **_kw: "claude",
     )
     monkeypatch.setattr(
         "argus_skill.core.knobs.resolve_runner_bin_setting",
-        lambda _role: "/missing/claude",
+        lambda _role, *, backend: (
+            "/missing/claude" if backend == "claude" else ""
+        ),
     )
 
     def resolve(backend: str, requested: str | None = None):
@@ -178,11 +188,13 @@ def test_doctor_advisor_uses_configured_codex_for_repair(
 ) -> None:
     monkeypatch.setattr(
         "argus_skill.core.knobs.resolve_role_backend",
-        lambda _role: "codex",
+        # **_kw: the real resolver now takes a keyword-only `default=`, which
+        # advisor._advisor_selections passes explicitly.
+        lambda _role, **_kw: "codex",
     )
     monkeypatch.setattr(
         "argus_skill.core.knobs.resolve_runner_bin_setting",
-        lambda _role: "",
+        lambda _role, *, backend: "",
     )
     monkeypatch.setattr(
         "argus_skill.agent_cli.runner_backend.resolve_runner_bin",
@@ -262,16 +274,11 @@ def test_doctor_repair_prompt_contains_actual_machine_locations(tmp_path) -> Non
     context = _context(tmp_path)
 
     prompt = advisor._advisor_prompt(_report(), context)
-    locations = json.loads(
-        prompt.split("LOCATIONS:\n", 1)[1].split(
-            "\n\nThe finding metadata", 1
-        )[0]
-    )
 
-    assert locations["argus_home"] == str(context.global_root)
-    assert locations["project_root"] == str(context.project_root)
-    assert locations["checkout"] == str(context.checkout)
-    assert locations["install_mode"] == "source"
+    assert json.dumps(str(context.global_root))[1:-1] in prompt
+    assert json.dumps(str(context.project_root))[1:-1] in prompt
+    assert json.dumps(str(context.checkout))[1:-1] in prompt
+    assert '"install_mode": "source"' in prompt
 
 
 def test_doctor_repair_prompt_omits_untrusted_finding_text(

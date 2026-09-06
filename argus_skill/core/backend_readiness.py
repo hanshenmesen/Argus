@@ -9,10 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+from ..agent_cli._process_control import background_subprocess_kwargs
 from ..agent_cli.runner_backend import (
     SUPPORTED_BACKENDS,
     normalize_runner_backend,
     resolve_runner_bin,
+    runner_child_environment,
 )
 from .knob_store import read_persisted_knobs, write_persisted_knobs
 from .knobs import resolve_runner_bin_setting
@@ -39,6 +41,7 @@ _VERSION_RE = re.compile(
 _AUTH_COMMANDS: dict[str, tuple[str, ...]] = {
     "codex": ("login", "status"),
     "claude": ("auth", "status"),
+    "cursor": ("status",),
     "opencode": ("auth", "list"),
     # qodercli exits non-zero from --list-models when unauthenticated, so it
     # doubles as a read-only auth probe.
@@ -51,6 +54,7 @@ _INSTALL_COMMANDS = {
     "codex": "npm install -g @openai/codex@latest",
     "copilot": "npm install -g @github/copilot",
     "claude": "npm install -g @anthropic-ai/claude-code",
+    "cursor": "curl https://cursor.com/install -fsS | bash",
     "opencode": "curl -fsSL https://opencode.ai/install | bash",
     "pi": "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
     "grok": "curl -fsSL https://x.ai/cli/install.sh | bash",
@@ -61,6 +65,7 @@ _LOGIN_COMMANDS = {
     "codex": "codex login",
     "copilot": "copilot login",
     "claude": "claude auth login",
+    "cursor": "agent login",
     "opencode": "opencode auth login",
     "pi": "pi, then /login",
     "grok": "grok login",
@@ -82,6 +87,7 @@ def backend_install_command(
         "copilot": "npm.cmd install -g @github/copilot",
         "codex": "npm.cmd install -g @openai/codex@latest",
         "claude": "npm.cmd install -g @anthropic-ai/claude-code",
+        "cursor": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm 'https://cursor.com/install?win32=true' | iex\"",
         "pi": "npm.cmd install -g --ignore-scripts @earendil-works/pi-coding-agent",
         "opencode": "choose a Windows installer at https://opencode.ai/docs/#windows",
         "grok": "use the official Windows instructions at https://x.ai/cli",
@@ -154,19 +160,16 @@ def resolve_backend_profile(
     if explicit_backend:
         backend_value, backend_source = explicit_backend, "argument"
     else:
-        backend_value, backend_source = "", "default"
-        for name in ("ARGUS_SKILL_RUNNER_BACKEND", "ARGUS_SKILL_LIFE_BACKEND"):
-            value = str(env_map.get(name) or "").strip()
-            if value:
-                backend_value, backend_source = value, f"env:{name}"
-                break
-        if not backend_value:
-            for name in ("ARGUS_SKILL_RUNNER_BACKEND", "ARGUS_SKILL_LIFE_BACKEND"):
-                value = str(persisted.get(name) or "").strip()
-                if value:
-                    backend_value, backend_source = value, f"persisted:{name}"
-                    break
-    raw_backend = str(backend_value or "codex").strip().lower()
+        # One chain, defined once. ``resolve_role_backend_with_source`` walks the
+        # same names in the same order and reports the same env:/persisted:/
+        # default vocabulary this function established, so spelling it out a
+        # second time only created somewhere for the two to drift apart.
+        from .knobs import resolve_role_backend_with_source
+
+        backend_value, backend_source = resolve_role_backend_with_source(
+            "", env=env_map, default="codex"
+        )
+    raw_backend = backend_value.strip().lower()
     normalized_backend = (
         normalize_runner_backend(raw_backend)
         if raw_backend in _SUPPORTED_BACKENDS or raw_backend == "opencod"
@@ -202,6 +205,7 @@ def _run_text(
     timeout_s: float,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    executable = str(command[0]) if command else ""
     return subprocess.run(
         list(command),
         input=input_text,
@@ -211,6 +215,12 @@ def _run_text(
         errors="replace",
         timeout=timeout_s,
         check=False,
+        # Validate npm .cmd runners in the same repaired environment that
+        # AgentCliRunner will use for real turns.  A frozen desktop otherwise
+        # reported its Python runtime healthy while every Codex turn died
+        # before reaching the provider because the GUI PATH lacked node.exe.
+        env=runner_child_environment(executable),
+        **background_subprocess_kwargs(),
     )
 
 
@@ -314,6 +324,7 @@ _BACKEND_MODEL_CATALOG: dict[str, str] = {
 #: :func:`_check_backend_model_catalog` to say so out loud.
 _BACKEND_DEFAULT_MODELS: dict[str, str] = {
     "claude": "claude-opus-5",
+    "dsh": "deepseek-official/deepseek-v4-flash",
 }
 
 
@@ -408,6 +419,15 @@ def _check_backend_model_catalog(
     if expected is None:
         return
     env_map = env if env is not None else os.environ
+    if report.profile.backend == "codex":
+        from .knobs import backend_uses_openai_catalog
+
+        if not backend_uses_openai_catalog("codex", env=env_map):
+            # Codex can be configured as a generic client for an operator's
+            # own provider.  In that case Argus deliberately omits its OpenAI
+            # defaults and Codex owns model selection, so an OpenAI catalog
+            # mismatch warning would be false.
+            return
     persisted_map = read_persisted_knobs()
     # Roles usually share one model id; speak once per distinct selector.
     seen: set[str] = set()
@@ -574,17 +594,21 @@ def _probe_cli_auth(
     executable: str,
     *,
     timeout_s: float,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
+    env_map = env if env is not None else os.environ
     if backend == "copilot":
         return _probe_copilot_auth(executable, timeout_s)
+    if backend == "cursor" and str(env_map.get("CURSOR_API_KEY") or "").strip():
+        return True, ""
     if backend == "pi":
         _catalog, detail = _probe_pi_catalog(executable, timeout_s)
         return (bool(_catalog), detail)
     if backend == "grok":
-        if str(os.environ.get("XAI_API_KEY") or "").strip():
+        if str(env_map.get("XAI_API_KEY") or "").strip():
             return True, ""
         grok_home = Path(
-            str(os.environ.get("GROK_HOME") or Path.home() / ".grok")
+            str(env_map.get("GROK_HOME") or Path.home() / ".grok")
         ).expanduser()
         auth_file = grok_home / "auth.json"
         try:
@@ -599,7 +623,7 @@ def _probe_cli_auth(
     if backend == "qoder":
         # A PAT is the headless path; otherwise fall through to the generic
         # `qodercli --list-models` probe below, which reports login state.
-        if str(os.environ.get("QODER_PERSONAL_ACCESS_TOKEN") or "").strip():
+        if str(env_map.get("QODER_PERSONAL_ACCESS_TOKEN") or "").strip():
             return True, ""
     if backend == "dsh":
         # dsh has no read-only auth probe: the headless profile rejects an
@@ -608,10 +632,10 @@ def _probe_cli_auth(
         # layered env loader (process > cwd .env > $DSH_HOME/.env) also
         # admits DEEPSEEK_API_KEY from $DSH_HOME/.env, so scan that file too
         # rather than misreporting a working deployment as unauthenticated.
-        if str(os.environ.get("DEEPSEEK_API_KEY") or "").strip():
+        if str(env_map.get("DEEPSEEK_API_KEY") or "").strip():
             return True, ""
         dsh_home = Path(
-            str(os.environ.get("DSH_HOME") or Path.home() / ".dsh")
+            str(env_map.get("DSH_HOME") or Path.home() / ".dsh")
         ).expanduser()
         env_file = dsh_home / ".env"
         try:
@@ -634,6 +658,12 @@ def _probe_cli_auth(
         result = _run_text((executable, *suffix), timeout_s=timeout_s)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
+    combined = "\n".join(filter(None, (result.stdout, result.stderr))).strip()
+    if backend == "cursor" and any(
+        marker in combined.casefold()
+        for marker in ("not logged in", "not authenticated", "authentication required")
+    ):
+        return False, combined[:300]
     if result.returncode == 0:
         return True, ""
     detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
@@ -728,7 +758,7 @@ def check_backend_readiness(
             ReadinessProblem(
                 "backend",
                 f"unsupported backend {profile.backend!r}",
-                "choose one of: codex, copilot, claude, opencode, pi, grok, qoder, dsh",
+                "choose one of: " + ", ".join(SUPPORTED_BACKENDS),
             )
         )
         return report
@@ -744,7 +774,11 @@ def check_backend_readiness(
 
     configured_bin = str(
         runner_bin
-        or resolve_runner_bin_setting(env=env_map, persisted=read_persisted_knobs())
+        or resolve_runner_bin_setting(
+            backend=profile.backend,
+            env=env_map,
+            persisted=read_persisted_knobs(),
+        )
     ).strip()
     executable = resolve_runner_bin(profile.backend, configured_bin or None)
     if executable is None:
@@ -850,28 +884,44 @@ def check_backend_readiness(
         )
     elif probe_auth:
         report.auth_checked = True
-        # Pi's auth probe already reads the full authenticated catalog; reuse
-        # that one subprocess to also validate the selectors Argus will send.
-        pi_catalog: dict[str, set[str]] = {}
-        if profile.backend == "pi":
-            pi_catalog, detail = _probe_pi_catalog(executable, timeout_s)
-            ok = bool(pi_catalog)
+        custom_codex_provider = None
+        if profile.backend == "codex":
+            from ..tools.capability_vault import read_codex_provider_config
+
+            custom_codex_provider = read_codex_provider_config(env_map)
+        if (
+            custom_codex_provider is not None
+            and not custom_codex_provider.requires_openai_auth
+        ):
+            report.warnings.append(
+                "Codex custom provider "
+                f"{custom_codex_provider.name!r} declares "
+                "requires_openai_auth=false; skipped irrelevant `codex login status`"
+            )
         else:
-            ok, detail = _probe_cli_auth(
-                profile.backend,
-                executable,
-                timeout_s=timeout_s,
-            )
-        if not ok:
-            report.problems.append(
-                ReadinessProblem(
-                    "authentication",
-                    f"{profile.backend} authentication is not usable: {detail}",
-                    f"run `{_LOGIN_COMMANDS[profile.backend]}`, then `argus --doctor`",
+            # Pi's auth probe already reads the full authenticated catalog; reuse
+            # that one subprocess to also validate the selectors Argus will send.
+            pi_catalog: dict[str, set[str]] = {}
+            if profile.backend == "pi":
+                pi_catalog, detail = _probe_pi_catalog(executable, timeout_s)
+                ok = bool(pi_catalog)
+            else:
+                ok, detail = _probe_cli_auth(
+                    profile.backend,
+                    executable,
+                    timeout_s=timeout_s,
+                    env=env_map,
                 )
-            )
-        elif pi_catalog:
-            _check_pi_model_routing(report, pi_catalog, env=env_map)
+            if not ok:
+                report.problems.append(
+                    ReadinessProblem(
+                        "authentication",
+                        f"{profile.backend} authentication is not usable: {detail}",
+                        f"run `{_LOGIN_COMMANDS[profile.backend]}`, then `argus --doctor`",
+                    )
+                )
+            elif pi_catalog:
+                _check_pi_model_routing(report, pi_catalog, env=env_map)
     if profile.auth_mode == AUTH_MODE_SUBSCRIPTION:
         # Subscription mode only: under model_api the operator points Codex at
         # an arbitrary OpenAI-compatible endpoint, so a foreign-looking id may
