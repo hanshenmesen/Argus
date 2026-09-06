@@ -65,6 +65,9 @@
 > 未定价，或默认 allow。** 我只对 FuseHead daemon 用环境变量 `=allow` 重启（每日 $1000
 > 上限仍生效），未改持久化配置；s-0ebfd18c、7ddbde45b40d 两个 daemon（07:14 由他人启动）
 > 仍在被该规则拒绝，未动。
+> 07:27 UTC 续：操作员指示"放行这些，继续研究"。已把 `ARGUS_SKILL_UNPRICED_COST_POLICY=allow`
+> 写入 `~/.argus-skill/config.json`（全会话生效，每日 $1000 上限不变）。FuseHead
+> pid 3254520 的 Engineer 已在执行（核对 LEMP 评估器与附录一致性、等待后台任务）。
 
 > 另外两点更正/未处理：本文"今日花费约 $1,148"实为 cost-control.jsonl
 > 自 08-28 起的累计（09-05 当天约 $111，FuseHead 当天 $7.9）；FuseHead 的
