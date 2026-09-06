@@ -50,6 +50,28 @@ def test_drafting_lets_the_venue_and_claim_decide_the_form() -> None:
     assert "legitimate paper when its evidence is as complete" in drafting
 
 
+def test_drafting_follows_the_craft_reference() -> None:
+    root = Path(argus_skill.__file__).parent / "verticals" / "research" / "skills"
+    craft = (root / "engineer" / "references" / "paper-writing-craft.md").read_text(
+        encoding="utf-8"
+    )
+    lowered = " ".join(craft.lower().split())
+    drafting = _research_skill("engineer/venue-paper-drafting.md")
+    playbook = _research_skill("research-paper-playbook.md")
+    language = _research_skill("reviewer/venue-academic-language-review.md")
+
+    for text in (drafting, playbook, language):
+        assert "references/paper-writing-craft.md" in text
+    assert "the introduction is written twice" in lowered
+    assert "takeaway" in lowered
+    assert "compress after expanding" in lowered
+    assert "nothing here is a quota" in lowered
+    assert "170" not in lowered and "five-sentence" not in lowered
+    assert "draft 0 introduction" in drafting
+    assert "abstract" in drafting and "last" in drafting
+    assert "read as a stranger" in language
+
+
 def test_no_research_prompt_or_skill_carries_a_writing_quota() -> None:
     root = Path(argus_skill.__file__).parent / "verticals" / "research"
     offenders = []

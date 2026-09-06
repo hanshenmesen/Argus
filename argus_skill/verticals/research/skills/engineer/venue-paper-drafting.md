@@ -1,15 +1,17 @@
 ---
 name: "Venue Paper Drafting"
-description: "Create a complete paper draft from the selected venue and its official author kit."
+description: "Write the complete paper from the selected venue's author kit, in the order strong papers are actually written."
 ---
 
 # Venue Paper Drafting
 
 Use this only in Paper after Experiment clears the paper-entry bar. Read
 `HANDOFF.md`, direct evidence, the selected venue in pipeline state, and that
-venue's current official author kit.
+venue's current official author kit. Read `references/paper-writing-craft.md`
+once before drafting and keep it open while revising; it is the how, this file
+is the order.
 
-## Select and package the evidence
+## The standard
 
 The standard is a strong accepted paper at the selected venue, the kind the
 exemplar skill has you read. There is no house quota for sentences, words,
@@ -25,58 +27,82 @@ uncertain. Keep the complete method, baseline, control, adverse-result,
 uncertainty, and scope coverage in the paper; selection changes where evidence
 lives, never whether it is there.
 
-Before drafting prose, assign the complete evidence to five roles:
+## 1. Architecture before prose
 
-- **headline** directly establishes the thesis and may recur in the abstract,
-  introduction, results, main caption, and conclusion;
-- **mechanism** explains why the result occurs or fails;
-- **disambiguating control** rules out a credible alternative explanation;
-- **scope-changing** changes the claim, uncertainty, population, or boundary;
-- **completeness** makes the comparison comprehensive or reproducible without
-  changing the current inference.
+Write down, before any section:
 
-For each item, choose its canonical full location and any repeat locations.
-Methods and tables retain complete definitions and matrices; prose selects the
-rows, columns, differences, and controls that change the current inference and
-explains why. Appendix placement is packaging, not deletion. Adverse or null
-results that change the headline interpretation remain visible in the main
-reader path.
+- the thesis sentence: "This paper shows that X, because Y, as evidenced by Z";
+- the contribution claims, each paired with the results subsection, figure or
+  table that will carry its evidence;
+- the figure and table plan (Figure 1 explains the idea or mechanism; the first
+  table carries the main result), and the page budget per section under the
+  venue's limit.
 
-The same exact headline number may appear in several major locations, but each
-appearance must do that location's job: evidence in the abstract, expectation
-change in the introduction, full conditional interpretation in results,
-standalone readability in the caption, and scientific meaning in the
-conclusion. Do not impose a universal repetition cap, and do not copy the same
-method-by-dataset-by-metric recital into every location.
+Assign the complete evidence to roles while planning: **headline** (establishes
+the thesis; may recur where each location has a distinct job), **mechanism**
+(why it works or fails), **disambiguating control** (rules out an alternative),
+**scope-changing** (changes the claim or its boundary), **completeness** (makes
+the comparison whole without changing the inference). Give each item a
+canonical full location; methods and tables keep complete definitions and
+matrices, prose selects what changes the inference. Appendix placement is
+packaging, not deletion. Adverse or null results that change the headline
+interpretation stay in the main reader path. These role words are planning
+vocabulary and never appear in the manuscript.
 
-## Draft
+## 2. Write in this order
 
-- Build one confident thesis around the method's strongest supported win.
-- Follow the selected venue's expected reader path and required end matter.
-- Explain the real mechanism and actual evaluated implementation.
-- Compare against real strong published baselines under fair information and
-  resource conditions.
-- Include every intended claim-bearing experiment, figure, table, and citation.
-- Keep internal paths, role names, workflow language, and development history
-  out of the manuscript. Evidence-role words (headline, mechanism, control,
-  scope, completeness) and workflow words (bounded, certified, gate, artifact,
-  mission, round, handoff, validator, audit) never appear in the paper.
+1. **Draft 0 introduction**: stakes, structural gap, key idea, one-paragraph
+   mental model, contribution claims. Rough, disposable, written to fix what
+   the results must establish.
+2. **Results**, organized by the claims, each cluster closed by a takeaway that
+   states the pattern and its implication. Then **Method** and **Setup**, only
+   as deep as a reader needs to follow and reproduce.
+3. **Final introduction**, from a blank page, now that the results stand: every
+   claim maps to a results subsection and the preview carries the real
+   headline numbers. Draft 0 is reference material, not the starting text.
+4. **Related work**: the closest work named, the actual technical difference
+   stated, critiques grounded in numbers or cases.
+5. **Conclusion**, then **abstract** last: problem, insight or mechanism,
+   decisive evidence, what follows; the final sentence lands on the
+   contribution, not on a caveat.
+6. **Compression pass** over the whole draft: remove what serves no explicit
+   claim, move detail the reader does not need on first pass to the appendix,
+   protect every claim, number, named baseline and limit. A cut of a third is
+   normal.
+7. **Stranger's read**: the questions in the craft reference, section 11. Fix
+   what fails before compiling the final PDF.
+
+Build one confident thesis around the method's strongest supported win. Follow
+the selected venue's expected reader path and required end matter. Explain the
+real mechanism and the actual evaluated implementation. Compare against real,
+strong, published baselines under fair information and resource conditions.
+Include every intended claim-bearing experiment, figure, table, and citation.
+
 - Do not write an experiment chronology, and do not present unfinished
   development as a finding. A clear thesis that the method helps only under
   identified conditions, or that an expected effect does not hold, is a
   legitimate paper when its evidence is as complete as a positive result would
   need.
+- Keep internal paths, role names, workflow language, and development history
+  out of the manuscript. Evidence-role words (headline, mechanism, control,
+  scope, completeness) and workflow words (bounded, certified, gate, artifact,
+  mission, round, handoff, validator, audit) never appear in the paper.
 
-Every figure and table must carry a scientific claim. Figure 1 should explain
-the method or central mechanism. Table 1 should normally present the main
+## 3. Figures and tables
+
+Every figure and table carries a scientific claim. Figure 1 should explain the
+method or central mechanism. Table 1 should normally present the main
 quantitative result. For a method pipeline, open `research-svg-pipeline.md` and
 draw the current code and paper as a compact, horizontal, staggered SVG with
-Times New Roman; include its vector PDF export. Use readable publication-scale typography and conventional
-axes, units, captions, and uncertainty. A caption tells the reader what to see:
-the question the figure answers, the comparison conditions that matter, and the
-decisive number when the number is the point or the pattern when the pattern is
-the point. The visual carries the complete matrix; the caption identifies its
-reader-facing structure rather than reading every cell aloud.
+Times New Roman; include its vector PDF export. Use readable publication-scale
+typography and conventional axes, units, captions, and uncertainty. A caption
+tells the reader what to see: the question the figure answers, the comparison
+conditions that matter, and the decisive number when the number is the point or
+the pattern when the pattern is the point. The visual carries the complete
+matrix; the caption identifies its reader-facing structure rather than reading
+every cell aloud.
+
+## 4. Files and finish
 
 Maintain only `paper/main.tex`, its direct included sources, bibliography,
 figures, tables, rendered paper, and project-root `HANDOFF.md`. Compile under

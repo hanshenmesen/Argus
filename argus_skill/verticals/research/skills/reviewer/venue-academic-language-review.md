@@ -29,9 +29,23 @@ artifact.
   artifact, mission, round, handoff, validator, audit) appears. Do not ask for
   more hedging than the evidence requires, and do not ask for a number where a
   plain statement is clearer.
+- Read as a stranger to the project. Can the argument be recovered from the
+  headings, the takeaways and the captions alone? Does the introduction promise
+  exactly what the results deliver? Is the central finding recoverable after
+  the first page? A results section that lists per-condition numbers without
+  saying what they mean, an introduction that opens with the technology rather
+  than the problem, or a conclusion that ends on a disclaimer are reader-facing
+  defects with a concrete repair; a preference for different wording is not.
 - Check whether headline, mechanism, disambiguating-control, scope-changing,
   and completeness evidence are visibly prioritized rather than reported as one
   flat experiment inventory.
+- Treat number walls and defensive patterns as findings with a location: a
+  prose passage that recites a matrix the table already carries, precision in
+  prose beyond what the comparison needs, a hedge or caveat repeated per result
+  when one statement of the design's limits would do, apologies for the
+  contribution, or assurances of rigor in place of the actual protocol.
+  `engineer/references/paper-writing-craft.md` describes the repairs; name the
+  passage and the obstacle, not a count.
 - Allow a headline number to recur when it serves a different section role.
   Reject repeated matrix recital, not repetition by mechanical count.
 - Require Methods, tables, and appendices to retain complete definitions and

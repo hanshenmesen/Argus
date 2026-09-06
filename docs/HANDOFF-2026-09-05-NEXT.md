@@ -313,3 +313,27 @@ sha e88207a7…（与当前 main.tex 一致）、`overall_complete=true`、`camp
 Manager complete；10:59 Planner 判决 `completed: bounded research vertical has a current
 completion certificate`，UI 显示 "Submission certified"。此后 daemon 空闲，无新的模型调用。
 FuseHead 进程 pid 4020364，revision 27645d873，保持运行等操作员决定是否开第二篇。
+
+## 2026-09-06 · 写作技能重写 + idea-01 回归测试 + 本地 checkout 更新
+
+**写作技能。** 新增 `engineer/references/paper-writing-craft.md`（写作工艺参考：论文的
+register、引言写两遍与六个 move、结果按论点组织并以 takeaway 收束、数字与精度、只在证据
+不确定处 hedge 与防御性句式修法表、句段工艺、标题/图注、相关工作定位、摘要与结论、
+先扩后压、以陌生读者身份自读），`venue-paper-drafting.md` 改为写作顺序工作流
+（架构→Draft 0 引言→结果→方法→重写引言→相关工作→结论→摘要最后→压缩→自读），
+playbook 与 reviewer 语言审稿 skill 同步引用；narrative_edit 提示词指向该参考。
+来源：SNL-UCSB/paper-writing-skill（从真实改稿历史提炼的编辑原则）、mikubaka88/CCFA-Skills
+（humanization policy 的防御性句式修法）、以及 FuseHead/write-01 两篇稿件的问题。
+仍然没有配额：全部是判断依据，不是检查项。
+
+**idea-01。** 09-04 的失败是"选一个题"的 direct 任务被确定性路径推进到 experiment/paper，
+之后 12 个任务重复跑同一目标。最新代码（a90ac235c 之后）在 idea 阶段直接 complete；
+加 tests/apps/test_direct_idea_task_completes_at_idea.py 固定。剩余的一般性问题（Reviewer
+done、Manager hold、同一目标被反复重排）没有加机制，先记录。
+
+**本地 checkout。** argus-runtime-latest 原在 5920babe3 且有一份未提交的 copilot
+pre-generation rejection 补丁，已保存到分支 `wip/copilot-pre-generation-rejection-20260906`
+后切到 main；argus-runtime-open-20260902 同步到 main。四个在跑的 daemon（s-2e56a77c、
+7ddbde45b40d、s-0ebfd18c、s-c73d4e48）用 setsid 脱离的脚本在任务边界排空重启，
+重启环境改为 ARGUS_SKILL_UNPRICED_COST_POLICY=allow；两个 web server 已重启。
+config.json 全部角色模型为 gpt-5.6-sol。

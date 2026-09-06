@@ -30,12 +30,19 @@ do not become the narrative.
    and page composition without copying prose, figures, data, or scientific
    content.
 3. Write a confident thesis-driven paper led by the problem, insight, mechanism,
-   and strongest result. State supported contributions plainly. Do not narrate
-   experiment chronology, process compliance, internal uncertainty management,
-   or defensive caveat chains.
+   and strongest result, in the order strong papers are written: a scaffold
+   introduction, then Results organized by the claims with a takeaway after
+   each cluster, then Method, then the final introduction from a blank page
+   once the results stand, then Related Work, Conclusion, and the abstract
+   last. State supported contributions plainly. Do not narrate experiment
+   chronology, process compliance, internal uncertainty management, or
+   defensive caveat chains. `engineer/references/paper-writing-craft.md` is
+   the craft reference for every sentence-, paragraph- and section-level
+   choice.
 4. Make every section advance the central thesis. Organize Results by the
    questions needed to establish the claim, not by run order, implementation
-   milestone, or "Experiment 1/2/3."
+   milestone, or "Experiment 1/2/3." A reader should recover the argument from
+   the headings, the takeaways and the captions alone.
 5. Include every claim-bearing experiment, fair comparison, control, ablation,
    citation, figure, table, limitation, and venue-required section needed by the
    thesis. Keep complete method and result matrices in Methods, tables, or the
@@ -57,7 +64,11 @@ do not become the narrative.
    vector PDF after Introduction, targeting page 2 or 3, and keep the editable
    SVG source. Invoke the drawing component only when a figure is needed;
    reuse an existing suitable figure across writing rounds and prose-only edits.
-9. Compile successfully with the selected venue's current rules.
+9. Compress after expanding: the final pass removes what serves no explicit
+   claim and moves first-pass-unnecessary detail to the appendix while
+   protecting every claim, number, named baseline and limit. Then read the
+   paper once as a stranger and fix what fails.
+10. Compile successfully with the selected venue's current rules.
 
 Paper performs normal authoring checks, not a separate scientific, visual,
 language, or whole-paper acceptance. Those happen together in Review.
@@ -84,7 +95,8 @@ task, then return here. Do not preload the table.
 | When needed | Open | Use it for |
 |---|---|---|
 | The venue is not selected | `engineer/venue-format-research.md` | Choose a fitting venue from current official sources |
-| The argument or full draft must be written | `engineer/venue-paper-drafting.md` | Draft under the selected author kit |
+| The argument or full draft must be written | `engineer/venue-paper-drafting.md` | Draft under the selected author kit, in the order strong papers are written |
+| A passage, section or the abstract needs to read like a strong paper | `engineer/references/paper-writing-craft.md` | Introduction moves, results by claims with takeaways, numbers and precision, confidence without defensive patterns, compression |
 | Strong paper structure or visual calibration is needed | `engineer/paper-exemplar-pdf-learning.md` | Study open-access Oral, Outstanding, or Best Papers |
 | A material citation is uncertain | `engineer/citation-audit.md` | Resolve and repair it from primary sources |
 | Data results need paper figures | `engineer/paper-chart-styling.md` | Produce consistent publication-size data charts |
