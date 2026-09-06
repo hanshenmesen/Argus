@@ -53,6 +53,10 @@
 > 恢复 checkout detach 到该 rev，07:13 UTC 重启 FuseHead（pid 3198853，
 > `source_root_matches_config=true`），实测首个 mission 结算为 `paused_provider_cooldown`，
 > backlog 10 pending + 1 paused，登录恢复后自动续跑。
+> 07:22 UTC 续：操作员授权使用 v-boxiuli_microsoft 账号。本机 relay 的 headless copilot
+> 进程环境里有该账号的 OAuth token，用它 `copilot login --with-token` 登录了默认
+> `~/.copilot` 和 Argus 隔离 home（`~/.argus-skill/copilot-home`），干净环境下两者调
+> gpt-5.6-sol 均返回 OK；daemon 未重启，冷却到期自动续跑。token 未写入任何仓库或文档。
 
 > 另外两点更正/未处理：本文"今日花费约 $1,148"实为 cost-control.jsonl
 > 自 08-28 起的累计（09-05 当天约 $111，FuseHead 当天 $7.9）；FuseHead 的
