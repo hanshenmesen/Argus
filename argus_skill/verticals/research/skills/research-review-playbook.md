@@ -15,8 +15,11 @@ compliance.
 ## Inputs
 
 Input access depends on the operation. The fresh-context Narrative Editor reads
-the current manuscript, `HANDOFF.md` evidence roles, and drafting contract, but
-not `paper/REVIEW.md` or review history. Scientific loss review reads immutable
+the current manuscript, `HANDOFF.md` evidence roles, drafting contract, and the
+latest actionable Reviewer findings supplied for this round. Use that feedback
+to repair the identified problem; do not search review history or internal
+diagnostic reports, or copy reviewer-response wording into the manuscript.
+Scientific loss review reads immutable
 before/after source and PDF snapshots plus a direct claim-critical source only
 for a concrete dispute. The cold reader receives an isolated workspace
 containing only `paper/main.pdf`. The integrated Reviewer may start with
@@ -27,10 +30,16 @@ claim-critical references without recursively inspecting history.
 
 1. Preserve the pre-edit manuscript source closure and rendered PDF in internal
    mission state; do not use Git as the scientific baseline.
-2. Run `narrative_edit` as a fresh-context Engineer operation. It selects and
-   packages evidence for each section while preserving exact facts, complete
-   coverage, the five-sentence/170-word abstract, and numerical captions.
-3. After the edit, the host runs the independent read-only passes concurrently.
+2. Run `narrative_edit` as a fresh-context Engineer operation. Start from the
+   existing manuscript and current findings. Repair only a located obstacle to
+   reader understanding or the argument, preserving clear content, structure,
+   wording, exact facts, complete coverage, the five-sentence/170-word abstract,
+   and numerical captions. Prefer a missing explanation or local sentence
+   adjustment; explain why local repair is insufficient before widening scope.
+   If no concrete problem needs repair, return without changing the manuscript.
+   Compile if manuscript inputs changed or the PDF is missing or stale; reuse
+   a current PDF when no input changed.
+3. After the Engineer turn, the host runs the independent read-only passes concurrently.
    Engineer and integrated Reviewer must not spawn a duplicate review team:
    - `science_loss_check` compares before/after scientific completeness,
      meaning, and carriers;
@@ -49,8 +58,12 @@ claim-critical references without recursively inspecting history.
    read findings begin in shadow mode: until calibration explicitly enables
    enforcement, they may guide or corroborate an existing review criterion but
    cannot be the sole reason to block.
-5. Have the Engineer resolve any scientific/readability conflict and recompile.
-   The host refreshes affected post-edit passes before integrated certification.
+5. Have the Engineer repair the identified problems and resolve any
+   scientific/readability conflict. Recompile when the paper changes. Reviewer
+   checks that the original problem is resolved and scientific content is
+   preserved, then closes that finding. Further revision requires a remaining
+   or newly introduced defect, not a preference for different wording. The host
+   refreshes affected post-edit passes before integrated certification.
 
 All scientific, experiment, visual, and language defects are repaired inside
 Review. The stage never rolls back.
@@ -75,6 +88,12 @@ implementation diary, tables without argumentative purpose, or a Results
 section that never establishes the central claim. Require one explicit thesis
 and a section-by-section argument in which each experiment answers a necessary
 scientific question.
+
+For each required narrative repair, identify the passage or PDF location, the
+concrete obstacle to understanding or inference, and the smallest repair goal.
+Calling a paper report-like, unacademic, or insufficiently fluent is not enough
+by itself. An explanation already clear in the surrounding context need not
+be repeated after every number. Keep unaffected passages intact.
 
 ## Completion
 

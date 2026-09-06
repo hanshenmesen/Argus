@@ -1,6 +1,6 @@
 # Argus 论文“实验报告味”治理方案
 
-状态：已在未提交工作树实现；新 semantic-loss / cold-read 信号默认只做 shadow calibration，不改变既有阻断标准。
+状态：运行能力已实现；当前修稿契约以原稿为基础，有具体问题才局部修改，允许无需修改。新 semantic-loss / cold-read 信号默认只做 shadow calibration，不改变既有阻断标准。
 
 ## 1. 问题定义
 
@@ -18,7 +18,7 @@
 
 ### 2.1 不新增第一类角色
 
-不在 Manager、Planner、Engineer、Reviewer 之外新增核心角色。`Narrative Editor` 是 Paper 阶段的一次 fresh-context Engineer mission，使用受限的编辑契约；Scientific Reviewer 仍是完整性裁决者。
+不在 Manager、Planner、Engineer、Reviewer 之外新增核心角色。`Narrative Editor` 沿用 Review 阶段的 fresh-context Engineer operation，使用受限的编辑契约；Scientific Reviewer 仍是完整性裁决者。
 
 ### 2.2 不新增强制项目可见审计包
 
@@ -48,6 +48,12 @@
 
 Narrative Editor 可以选择前景证据、合并重复解释、调整位置、表格化和改写；不能删除唯一承载某项科学事实的内容，不能修改数字、比较方向、claim scope 或 uncertainty。若认为唯一内容应退出主文，只能提出候选移动或省略建议，交 Scientific Reviewer 裁决。
 
+### 2.7 有具体问题才修改
+
+以当前稿件为基础，先检查本轮明确反馈和当前内容，保留已经清楚的内容、结构和表达。每项叙事修改应对应可定位的理解障碍或论证缺口；优先补足缺失解释、调整局部句序，扩大到小节或全文调整前说明局部修复为什么不足。没有具体问题时允许返回无需修改，继续由 Reviewer 判断完成情况。
+
+Reviewer 的修改要求至少说明位置、具体问题和最小修复目标。“像实验报告”“不够学术”“还可以更流畅”本身不足以要求修改。已解决的问题应关闭，再次修稿需要指出仍然存在或新引入的问题。
+
 ## 3. 建议工作流
 
 ```text
@@ -66,8 +72,9 @@ Author draft
       |
       v
 Fresh-context Narrative Editor
-  - select foreground evidence
-  - package numbers, controls, matrices, and captions
+  - inspect current findings and the existing manuscript
+  - repair only located problems; preserve clear passages
+  - return without editing when no concrete problem remains
   - no unilateral scientific deletion
       |
       v
@@ -80,7 +87,9 @@ Cold-reader readability review on rendered PDF only
 Author resolves any science/readability conflict
 ```
 
-Narrative Editor 不接收 Reviewer 的逐句措辞和历史 review log，只接收当前论文、Paper HANDOFF、必须覆盖的科学事实、已有 drafting contract 和位置职责。它的目标不是减少内容，而是把证据从“逐项汇报”转换为“围绕结论推进”。
+Narrative Editor 接收当前论文、Paper HANDOFF、必须覆盖的科学事实、已有 drafting contract、位置职责，以及正常当轮上下文提供的最新具体 Reviewer 修复意见。它不搜索历史 review log 或内部诊断报告，也不把 reviewer-response 措辞照搬进正文。它在已定位的问题处改善论证，保留没有问题的内容；不把现有稿件默认当作需要整体重写的草稿。
+
+论文输入变化或 PDF 缺失、过期时正常编译；没有输入变化且 PDF 已有效时复用当前 PDF。现有角色、operation 路由和评审顺序保持不变。
 
 ## 4. Experiment 到 Paper 的交接内容
 
@@ -189,7 +198,9 @@ caption 可以重述 headline 数字，因为它需要独立可读；但不应�
 
 ## 6. Narrative Editor 契约
 
-### 可以直接执行
+以下编辑仅用于修复具体理解障碍或论证缺口，不是每轮必须执行的重写清单。保留未受影响的段落，已有解释充分时不重复添加；不得为了叙事顺畅引入证据尚未支持的机制解释。
+
+### 有具体问题时可以直接执行
 
 - 为完整证据清单分配 headline、mechanism、control、scope 和 completeness 角色；
 - 选择每个 section 应前景化的结果，并保留其他结果的表格、Methods 或 Appendix 承载位置；
@@ -249,11 +260,13 @@ Scientific loss check 需要编辑前快照。实现时在内部 mission storage
 - **中心性**：第一页后能否用一句话说出唯一核心发现；
 - **推进性**：每个主要 section 的数字和实验是否推进理解，而非重新播放同一清单；
 - **层次性**：读者能否区分 headline、机制、控制、scope 和 completeness evidence；
-- **解释性**：精确数字之后是否说明它改变了什么判断；
+- **解释性**：关键比较的科学含义能否从当前段落及必要上下文中理解；已有解释充分时，不要求每个数字之后重复解释；
 - **时机**：关键证据、控制和限制是否在需要时出现；
 - **视觉叙事**：主图和 caption 是否共同回答清楚的问题，而不是充当 dashboard。
 
 冷读不得以“数字很多”“摘要较长”或“控制完整”本身判差。它必须区分必要科学密度与无层次的逐项汇报，也必须同时指出内容太少、解释不足或连接缺失。
+
+每条必要修复意见应给出 PDF 位置、具体理解障碍或推理缺口、最小修复目标。可提供示例措辞，但作者不必逐句照抄；没有实质可读性问题时通过，不为展示评审工作而制造修改项。
 
 ## 9. 科学完整性与可读性冲突
 
@@ -274,7 +287,7 @@ Scientific Reviewer 先排除造成结论或覆盖损失的版本，冷读 Revie
 | operation | core role | 读取范围 | 输出位置 | 阻断权 |
 |---|---|---|---|---|
 | `author_draft` | Engineer | HANDOFF、完整科学证据、代码、venue contract | 正常论文文件 | 无认证权 |
-| `narrative_edit` | Engineer | 当前论文、HANDOFF evidence roles、既有 drafting contract | 论文文件；内部编辑建议 | 无科学删除权 |
+| `narrative_edit` | Engineer | 当前论文、HANDOFF evidence roles、既有 drafting contract、本轮提供的最新具体修复意见 | 必要的局部修改，或无需修改结论；内部编辑建议 | 无科学删除权 |
 | `science_loss_check` | Reviewer | 编辑前后快照、decisive evidence、必要直接证据 | 内部 verdict；最终摘要可进入 REVIEW.md | 可阻断科学损失 |
 | `cold_read` | Reviewer | 当前 rendered PDF 与冷读 rubric | 内部 readability verdict | 可阻断 reject-level 可读性问题 |
 
@@ -297,10 +310,11 @@ Scientific Reviewer 先排除造成结论或覆盖损失的版本，冷读 Revie
 ### 11.2 `argus_skill/verticals/research/prompt_policy.py`
 
 - 使用 `operation` 区分 `author_draft`、`narrative_edit`、`science_loss_check` 和 `cold_read`；
-- Narrative Editor fragment 强调证据选择与包装，而不是默认压缩或删数字；
-- 不向 Narrative Editor 注入历史 Reviewer 原话和完整审计上下文；
+- Narrative Editor fragment 要求有具体问题才局部修复，保留清楚的原文，允许无需修改；
+- 保留正常当轮上下文中的最新具体 Reviewer 修复意见，不搜索历史评审或完整审计上下文，不照搬 reviewer-response 措辞；
 - cold-read fragment 只接收 rendered PDF；
-- Reviewer fragment 要求以“丢失的推理环节或覆盖位置”说明 veto。
+- Reviewer fragment 要求以“丢失的推理环节或覆盖位置”说明科学 veto，并为叙事修改指出具体位置、理解障碍和最小修复目标；
+- 现有 drafting 的证据分层和密度要求继续使用，不增加每段必须套用的表达模板。
 
 ### 11.3 venue drafting skills
 
@@ -350,6 +364,7 @@ Scientific Reviewer 先排除造成结论或覆盖损失的版本，冷读 Revie
 - Narrative Editor prompt 不包含删除唯一科学内容或取消既有硬规则的权限；
 - Reviewer prompt 要求指出具体 inference loss 或 coverage loss；
 - cold-read 输入不包含源码、HANDOFF、REVIEW 或证据审计；
+- 完整当轮提示词保留最新具体修复反馈，不预加载历史评审文件；
 - `reviewer_simulation` 不再参与 stage completion。
 
 ### 12.2 回归样例
@@ -363,6 +378,8 @@ Scientific Reviewer 先排除造成结论或覆盖损失的版本，冷读 Revie
 - 主图和 caption 是否从 dashboard 汇报变成问题、数字和 inference。
 
 至少加入两篇同领域、同 venue、贡献形态相近的优秀论文作为正向 calibration。不得仅靠 run04 训练 lexical blacklist，也不得把优秀论文更短或数字更少误当作目标。
+
+定点修稿另覆盖三类样例：本来清楚的段落无需修改；只有一个具体问题时只修复相关位置；修复后数字、实验条件、控制及不利证据完整保留。指令回归测试通过不等于这些实际写作效果已经验证。
 
 ### 12.3 端到端验收
 
@@ -379,7 +396,7 @@ Scientific Reviewer 先排除造成结论或覆盖损失的版本，冷读 Revie
 
 ## 13. 分阶段实现
 
-当前未提交实现状态：Phase 0 的 run04 基线和完整 shadow 改写已完成；Phase 0.5、Phase 1 及 Phase 2 的运行能力已实现；Phase 3 的候选诊断已实现，但仍保持 shadow。多篇正向 exemplar 校准和将新信号提升为 blocking 是后续观测决策，不应在缺少误报数据时自动开启。
+现有实现状态：Phase 0 的 run04 基线和完整 shadow 改写已完成；Phase 0.5、Phase 1 及 Phase 2 的运行能力已实现；Phase 3 的候选诊断已实现，但仍保持 shadow。当前仅收窄修稿指令为有问题才局部修改，不新增阶段、角色或评审调用。多篇正向 exemplar 校准和将新信号提升为 blocking 是后续观测决策，不应在缺少误报数据时自动开启。
 
 ### Phase 0：建立基线
 
@@ -442,3 +459,6 @@ Scientific Reviewer 先排除造成结论或覆盖损失的版本，冷读 Revie
 6. Author 提出位置或省略例外，Scientific Reviewer 批准；
 7. `draft_outline.py` / `argument_organization.py` 退出当前正常路径，不为本次治理升级；
 8. `reviewer_simulation.py` 按兼容弃用处理，不形成 Paper/Review gate。
+9. 原稿为默认基础；先定位问题，再做最小必要修改，允许无需修改；
+10. 作者保留本轮必要反馈，历史审计话术不照搬进正文；
+11. Reviewer 关闭已解决问题，后续修订以具体未解决或新引入的问题为依据。

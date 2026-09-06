@@ -169,7 +169,11 @@ def academic_paper_review_block() -> str:
         "Judge whether evidence is prioritized as headline, mechanism, disambiguating "
         "control, scope-changing, or completeness evidence. Allow exact headline numbers "
         "to recur for different section roles; object to flat matrix recital and internal "
-        "audit language, not to repetition by a mechanical count."
+        "audit language, not to repetition by a mechanical count. For each required "
+        "narrative repair, identify its location, the concrete obstacle to understanding "
+        "or inference, and the smallest repair goal. Calling prose report-like, "
+        "unacademic, or less fluent is insufficient by itself. Close resolved findings; "
+        "request another revision only for a remaining or newly introduced defect."
     )
 
 
@@ -213,18 +217,25 @@ def _planner_fragment(stage: str, project_root: Path | None) -> str:
 def _narrative_editor_block() -> str:
     return (
         "## Fresh-context Narrative Editor\n"
-        "Edit the current manuscript as a reader-facing research paper, not as an "
-        "experiment, audit, or acceptance report. Use the current paper, `HANDOFF.md` "
-        "evidence roles, and the venue drafting contract; do not read `paper/REVIEW.md`, "
-        "review history, or internal diagnostic results. Preserve every number, comparison "
+        "Keep the current manuscript as the starting point. Inspect it and the latest "
+        "actionable Reviewer findings supplied for this round; edit only a located "
+        "problem that impairs reader understanding or the argument. Use the current "
+        "paper, `HANDOFF.md` evidence roles, and the venue drafting contract. Do not "
+        "search review history or internal diagnostic reports, or copy reviewer-response "
+        "wording into the manuscript. Preserve clear content, structure, and wording. "
+        "Prefer adding a missing explanation or adjusting local sentence order; explain "
+        "why a local repair is insufficient before reorganizing a section or the paper. "
+        "If no concrete problem needs repair, report that no manuscript change is needed "
+        "and return to Reviewer without editing. Preserve every number, comparison "
         "direction, claim scope, adverse result, material uncertainty, decisive control, "
-        "and the complete method/result coverage. Select what each prose location "
-        "foregrounds, explain what the selected evidence changes in the reader's judgment, "
-        "and leave dense completeness evidence in its table, Methods, or Appendix carrier. "
+        "and the complete method/result coverage. Within the affected passage, clarify "
+        "what the evidence establishes using only supported inferences; keep other "
+        "evidence in its existing carrier. "
         "You may propose moving unique content in your final handoff, but you may not "
         "unilaterally remove it or change its scientific meaning. Keep the five-sentence, "
-        "at-least-170-word abstract and numerical-caption requirements. Compile the edited "
-        "source into the current rendered PDF before returning."
+        "at-least-170-word abstract and numerical-caption requirements. Compile when "
+        "manuscript inputs changed or the rendered PDF is missing or stale; reuse a "
+        "current PDF when no input changed."
     )
 
 
@@ -234,8 +245,8 @@ def _engineer_fragment(
     operation: str,
 ) -> str:
     narrative_edit = operation == "narrative_edit"
-    # Narrative editing intentionally starts without review wording or history.
-    # HANDOFF remains the complete evidence-role map even though the stage is Review.
+    # HANDOFF supplies evidence roles; current repair feedback arrives through
+    # the normal round context. Do not preload REVIEW.md or historical reports.
     context = active_research_context(
         "paper" if narrative_edit else stage,
         project_root,
@@ -293,11 +304,17 @@ def _reviewer_fragment(
             "internal diagnostics. Judge whether the PDF makes one central finding "
             "recoverable after the first page; whether sections advance rather than "
             "replay a flat matrix; whether headline, mechanism, control, scope, and "
-            "completeness evidence have visible hierarchy; whether exact numbers are "
-            "followed by their inference; and whether figures and numerical captions "
+            "completeness evidence have visible hierarchy; whether the scientific meaning "
+            "of key comparisons is clear from the passage and necessary context; and "
+            "whether figures and numerical captions "
             "answer a scientific question rather than resemble a dashboard. Dense "
             "science, a long abstract, repeated headline numbers, and complete controls "
-            "are not defects by themselves. Return concrete PDF-locatable findings."
+            "are not defects by themselves. Do not demand another explanation after "
+            "each number when the context already supplies it. For each required repair, "
+            "return a PDF location, a concrete obstacle to understanding or inference, "
+            "and the smallest repair goal. A report-like tone or a preference for "
+            "smoother wording alone is insufficient. Pass when no substantive "
+            "reader-facing defect remains."
         )
     if operation == "science_loss_check":
         return (

@@ -31,14 +31,23 @@ artifact.
   inference.
 - Prefer confident, precise academic prose over defensive qualification,
   process narration, repeated caveats, and integrity self-praise.
-- Remove generic openings, filler, repetitive transitions, unexplained
-  acronyms, vague method names, and score restatement.
+- Request changes to generic openings, filler, repetitive transitions,
+  unexplained acronyms, vague method names, or score restatement only when they
+  cause ambiguity, needless repetition, or obstruct the argument. Preserve
+  numerical restatement that serves the abstract, caption, or conclusion.
+  When the surrounding context already explains a comparison, do not require
+  another explanation after each number.
 - Keep claims faithful to the actual method and evidence.
 - Keep internal paths, role names, workflow language, and development history
   out of the manuscript.
 - Apply the selected venue's terminology, anonymity conventions, section
   expectations, and reader-facing style.
 
-Return a concise pass/fail assessment and exact proposed revisions. The single
-Engineer resolves them with the scientific-loss and visual findings. The
-integrated Reviewer records the final result only in `paper/REVIEW.md`.
+For each required repair, return the passage or PDF location, the concrete
+obstacle to understanding or inference, and the smallest repair goal. A
+report-like tone or a preference for different wording alone is insufficient.
+Example wording is optional; the Engineer need not copy it verbatim. Return
+pass when no substantive reader-facing defect remains; do not manufacture
+revisions to demonstrate review effort. The single Engineer resolves findings
+with the scientific-loss and visual findings. The integrated Reviewer closes
+resolved issues and records the final result only in `paper/REVIEW.md`.
