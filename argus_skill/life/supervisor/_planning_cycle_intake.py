@@ -421,6 +421,36 @@ class PlanningCycleIntakeMixin:
             return terminal_idle
 
         if revision_request is None:
+            if not state.had_operator_messages:
+                active = self.memory.backlog.active()
+                parked = [item for item in active if item.status == "paused_external_work"]
+                pending = [item for item in active if item.status == "pending"]
+                if parked and pending:
+                    in_flight = {
+                        item.id for item in active
+                        if item.status in {"running", "paused_external_work"}
+                    }
+                    blocked = set(in_flight)
+                    while dependents := {
+                        item.id for item in pending
+                        if item.id not in blocked and blocked.intersection(item.deps)
+                    }:
+                        blocked.update(dependents)
+                    if all(item.id in blocked for item in pending):
+                        from ...planner import PlannerVerdict
+
+                        # The existing mission external_wait records own the wake:
+                        # run() resumes each parked mission when its job settles.
+                        # Pending descendants are already planned work, so another
+                        # Planner turn cannot make them ready.
+                        return self._record_planner_waiting(PlannerVerdict(
+                            project_done=False,
+                            waiting=True,
+                            reason=(
+                                "Pending work depends on in-flight missions: "
+                                + ", ".join(sorted(in_flight))
+                            ),
+                        ))
             event_wait_outcome = self._planner_event_wait_outcome()
             if event_wait_outcome:
                 return event_wait_outcome

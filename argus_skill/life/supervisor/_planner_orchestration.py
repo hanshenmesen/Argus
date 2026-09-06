@@ -100,9 +100,8 @@ class PlannerOrchestrationMixin:
             )
         note = (
             "CURRENT-REALITY CHECK (read before trusting the journal below): you "
-            f"have idled {n} consecutive cycle(s) concluding `waiting=true` on the "
-            "same blocker. Your journal may be STALE — the external dependency may "
-            "already have cleared. Before concluding `waiting` again, compare CURRENT "
+            f"have had {n} consecutive idle or paused cycle(s). This does not mean "
+            "a prior waiting verdict was rejected. Before concluding `waiting`, compare CURRENT "
             "evidence to your persisted recheck condition. Reuse the same contract "
             "token while it is unchanged; the harness permits at most one probe for "
             "each Planner-authored fingerprint/token pair."
@@ -224,9 +223,9 @@ class PlannerOrchestrationMixin:
                 f"- stage_statuses: {', '.join(stage_rows) or '(none)'}",
                 f"- backlog_counts: {json.dumps(backlog_counts, sort_keys=True)}",
                 *(
-                    f"- pending task {item.id}: {item.title}"
+                    f"- {item.status} task {item.id}: {item.title}; deps={item.deps}"
                     for item in backlog_rows
-                    if item.status == "pending"
+                    if item.status in {"pending", "running", "paused_external_work"}
                 ),
                 *([live_subagent_line] if live_subagent_line else []),
                 (

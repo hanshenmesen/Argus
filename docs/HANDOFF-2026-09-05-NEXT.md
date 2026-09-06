@@ -358,3 +358,11 @@ config.json 全部角色模型为 gpt-5.6-sol。
 **部署。** main = a8e049980 已 push。ACL daemon 用 `deploy_and_roll.sh`（先 drain 到任务边界，再更新 argus-runtime-latest，再 `--resume --resume-continuous`）滚动；fig-03 从 `argus-runtime-recovery-20260905`（已 detach 到 a8e049980）用 `PYTHONPATH`+`ARGUS_SKILL_SOURCE_ROOT` 启动。idea-02（s-d141e08e，RLVR 开放选题）仍在旧代码上跑完。
 
 **没做的事。** 没有把 Codex 对 ACL benchmark 的审计（标签矛盾、常数基线 78.6%、yes/no 是受限打分等）交给项目；它存在 `argus-capability-tests/_yardsticks/`，用来检验新 Reviewer 指导能否让 Argus 自己抓到这些问题。
+
+## 2026-09-06 16:20 UTC · Planner 退役待办（74452def4）与"全部槽位等外部任务时的规划空转"修复
+
+**退役待办。** 证据：s-0ebfd18c 待办涨到 152 条，多数是同一个已被否定机制的换名变体；FuseHead 曾需要操作员手工标 7 条 superseded。现在 Planner 页脚可写 `RETIRE_TASK=<item id> | <一句话原因>`（每行一条），`Backlog.supersede_items` 原子地把点名的 pending 任务标为 superseded（running 与已完成的不动），规划周期即使没有新任务也会执行退役并发 `life.plan.node.superseded`（source=planner）。Planner 上下文现在列出 pending/running/paused 任务及其 id 与 deps。研究纵向的 Planner 片段要求把被否定路线的待办退役。测试：tests/planner、tests/life/test_backlog_replacement.py、test_planner_delegation_flow.py。
+
+**规划空转。** 现象：两个任务槽都停在 `paused_external_work`（等 GPU 子任务）时，主循环只看 `running` 就以为没活可干，每 1–2 分钟叫一次 Planner；Planner 想等却因为回复里缺 `WAITING=true` 被解析成"空计划"，修复提示词又只示范任务页脚，于是它编造依赖在途任务的新任务，`tasks_scheduled` 又把控制权交回规划循环。CoT 15:50–15:57 五次、ACL 上午十次。修法（Codex，无新计数器）：规划 intake 在"有停在外部等待的任务且所有 pending 都直接或传递依赖在途任务"时直接记一个 waiting 判定、不调 LLM，由既有的任务唤醒路径在子任务结束时恢复；规划提示词和无任务修复提示词明说"等 Argus 自己启动的后台任务是合法等待，返回 WAITING=true 且不要编依赖任务"；现实核对文案不再把空转周期说成"你上次的等待判定被拒"。测试：tests/life/test_durable_wait_poll_suppression.py（重复等待、重启、任务成功/失败唤醒、有可启动工作时不受影响）。
+
+**观察到的行为变化（新代码，CoT 项目 s-0ebfd18c 15:51 重启后）。** 第一次规划就写"不重复派发字典修复"，随后自己把论题改为边界命题"SAE 轨迹恢复不等于可执行推理保留"并安排在未见模型与任务上确认，这正是 experiment playbook 新加的"机制被否定后重推论点"。

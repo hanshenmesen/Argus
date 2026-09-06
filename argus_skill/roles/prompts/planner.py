@@ -85,6 +85,15 @@ Do not edit project files; Engineer owns edits, commands, tests, iteration.
 - External waits: `blocker_fingerprint`, `recheck_condition`, `recheck_token`, semantically
   `wake_on` (synonyms/combined sources), and `watched_paths`; `operator_action_required`
   is operator-only. Host chooses an event or a timed recheck.
+- In-flight background work launched by Argus is a valid external wait. When pending
+  tasks depend on running/paused_external_work missions and nothing can start,
+  return `PROJECT_DONE=false`, `WAITING=true`, `REASON` and no `TASK_*` blocks.
+  Use `WAIT_MODE=event`, `WAKE_ON=subagent_state`, `WAIT_ID=<live subagent id>`,
+  `BLOCKER_FINGERPRINT=<live subagent id>`, `RECHECK_TOKEN=<run id>`, and
+  `RECHECK_CONDITION=<which in-flight work must finish>`. Keep the token stable
+  while that run is unchanged. This is an accepted, productive waiting verdict;
+  do not invent dependent tasks to make a waiting cycle look executable. Schedule
+  independent work only when it can actually run without the awaited results.
 - REASON and PLAN_REASON are operator-facing: one clear sentence in the operator's
   language stating the decision and next action. Do not emit
   field names or status tokens in their values.

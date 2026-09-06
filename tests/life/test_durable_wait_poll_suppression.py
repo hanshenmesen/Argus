@@ -5,9 +5,11 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from argus_skill.engineer.external_work import ExternalWorkState, ExternalWorkStatus
 from argus_skill.life.event_log import JsonlEventSink
-from argus_skill.life.memory import LifeMemory
+from argus_skill.life.memory import BacklogItem, LifeMemory
 from argus_skill.life.supervisor import LifeBudget, LifeSupervisor, LifeSupervisorConfig
 from argus_skill.life.supervisor._constants import (
     IDLE_BACKOFF_CAP_SECONDS,
@@ -328,17 +330,20 @@ def _supervisor(project: Path, life: Path) -> LifeSupervisor:
     return supervisor
 
 
-def _write_direct_job(project: Path, *, state: str = "running") -> Path:
+def _write_direct_job(
+    project: Path, *, state: str = "running", task_id: str = "data-build"
+) -> Path:
     registry = project / ".argus_subagents"
     registry.mkdir(exist_ok=True)
-    path = registry / "data-build.json"
+    path = registry / f"{task_id}.json"
     path.write_text(
         json.dumps(
             {
-                "task_id": "data-build",
-                "run_id": "data-build-run-1",
+                "task_id": task_id,
+                "run_id": f"{task_id}-run-1",
                 "mode": "direct",
                 "state": state,
+                "pid": os.getpid(),
                 "worker_pid": os.getpid(),
                 "started_at": 123.0,
             }
@@ -346,6 +351,143 @@ def _write_direct_job(project: Path, *, state: str = "running") -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def _park_missions_with_dependents(supervisor: LifeSupervisor) -> list[BacklogItem]:
+    project = supervisor._project_workdir()
+    supervisor.config.coordinate_parallel_claims = True
+    missions = []
+    for task_id in ("blind-test-a", "blind-test-b"):
+        _write_direct_job(project, task_id=task_id)
+        item = supervisor.memory.backlog.add(BacklogItem.new(
+            title=task_id,
+            objective=f"Run and assess {task_id}",
+            parallel_safe=True,
+            owns_paths=[f"results/{task_id}"],
+        ))
+        supervisor.memory.backlog.update(
+            item.id,
+            status="paused_external_work",
+            outcome={"external_wait": {"work_id": task_id, "workdir": str(project)}},
+        )
+        missions.append(item)
+    analysis = supervisor.memory.backlog.add(BacklogItem.new(
+        title="Assess blind tests",
+        objective="Compare both completed blind tests",
+        deps=[item.id for item in missions],
+    ))
+    supervisor.memory.backlog.add(BacklogItem.new(
+        title="Write conclusion",
+        objective="Write the conclusion from the comparison",
+        deps=[analysis.id],
+    ))
+    return missions
+
+
+@pytest.mark.parametrize("terminal_state", ["done", "failed"])
+def test_parked_missions_wait_without_planner_and_resume_on_job_completion(
+    tmp_path: Path, monkeypatch, terminal_state: str
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    life = tmp_path / "life"
+    supervisor = _supervisor(project, life)
+    missions = _park_missions_with_dependents(supervisor)
+    calls = []
+
+    def plan_next(_planner, **_kwargs):
+        calls.append(True)
+        return PlannerVerdict(
+            project_done=False,
+            reason="waiting for blind tests",
+            waiting=True,
+            waiting_contract=supervisor._live_subagent_event_wait_contract(
+                supervisor._waitable_subagent_jobs()
+            ),
+        )
+
+    monkeypatch.setattr("argus_skill.planner.Planner.plan_next", plan_next)
+    original = supervisor.memory.backlog.active()
+    assert supervisor.memory.backlog.next_pending(respect_running=True) is None
+    for _ in range(3):
+        summary = supervisor.run()
+        assert summary["stopped_by"] == PLAN_AWAITING
+        assert summary["suggested_sleep"] > 0
+    assert calls == []
+    assert supervisor.memory.backlog.active() == original
+    assert supervisor._idle_since is None
+    events = [json.loads(line) for line in (life / "events.jsonl").read_text().splitlines()]
+    assert not any(event["type"] == "life.planner.start" for event in events)
+    waits = [event for event in events if event["type"] == "life.planner.waiting"]
+    assert all(item.id in waits[-1]["reason"] for item in missions)
+
+    restarted = _supervisor(project, life)
+    restarted.config.coordinate_parallel_claims = True
+    assert restarted.run()["stopped_by"] == PLAN_AWAITING
+    assert calls == []
+
+    _write_direct_job(project, task_id="blind-test-a", state=terminal_state)
+    executed = []
+
+    def run_one(item):
+        executed.append(item.id)
+        restarted.memory.backlog.mark_done(item.id)
+        return {"item_id": item.id, "status": "done", "success": True}
+
+    monkeypatch.setattr(restarted, "_run_one", run_one)
+    restarted.config.post_mission_hook = lambda _outcome: "test_mission_finished"
+    assert restarted.run()["stopped_by"] == "test_mission_finished"
+    assert executed == [missions[0].id]
+    assert calls == []
+
+
+def test_startable_work_still_runs_beside_parked_missions(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    supervisor = _supervisor(project, tmp_path / "life")
+    _park_missions_with_dependents(supervisor)
+    independent = supervisor.memory.backlog.add(BacklogItem.new(
+        title="Implement independent parser",
+        objective="Implement the parser without blind-test results",
+        parallel_safe=True,
+        owns_paths=["src/parser.py"],
+    ))
+    planning_context = []
+
+    def plan_next(_planner, **kwargs):
+        planning_context.append(kwargs["runtime_change_summary"])
+        return PlannerVerdict(
+            project_done=False,
+            reason="prepare independent fixtures",
+            new_tasks=[TaskSpec(
+                title="Prepare parser fixtures",
+                objective="Prepare fixtures without blind-test results",
+                parallel_safe=True,
+                owns_paths=["tests/fixtures"],
+            )],
+        )
+
+    monkeypatch.setattr("argus_skill.planner.Planner.plan_next", plan_next)
+    supervisor._enter_pause_backoff()
+    supervisor._enter_pause_backoff()
+    original = supervisor.memory.backlog.active()
+    assert supervisor._plan_next_work() is True
+    assert len(planning_context) == 1
+    assert "2 consecutive idle or paused cycle(s)" in planning_context[0]
+    assert "concluding `waiting=true`" not in planning_context[0]
+    for item in original:
+        assert f"{item.status} task {item.id}: {item.title}; deps={item.deps}" in planning_context[0]
+    executed = []
+
+    def run_one(item):
+        executed.append(item.id)
+        supervisor.memory.backlog.mark_done(item.id)
+        return {"item_id": item.id, "status": "done", "success": True}
+
+    monkeypatch.setattr(supervisor, "_run_one", run_one)
+    supervisor.config.post_mission_hook = lambda _outcome: "test_mission_finished"
+    assert supervisor.run()["stopped_by"] == "test_mission_finished"
+    assert executed == [independent.id]
 
 
 def test_unchanged_live_job_skips_planner_across_restart(
