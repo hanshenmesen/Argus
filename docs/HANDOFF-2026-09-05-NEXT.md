@@ -34,6 +34,20 @@
 > runner 拿的是启动默认值 True，导致有界的 idea-01 无法在 idea 阶段完成，被推进到
 > Paper 后同一 mission 重跑 144 次。部署时请一并 `git checkout --detach 30435976a`
 > 或更新。
+> **2026-09-06 07:20 UTC（Claude 会话）FuseHead 接手记录，供 codex 会话对照：**
+> 恢复 checkout `/data/v-boxiuli/argus-runtime-recovery-20260905` 已 detach 到 main
+> `087824b1e`（codex 的 `argus-runtime-latest` 在 `5920babe3`，含 main HEAD 加
+> token 分支，两者都是最新代码，codex 07:10 UTC 启动的 daemon pid 3180799 保持不动）。
+> 已做：`kernel.perf_event_paranoid` 4→2（sudo，非持久，重启失效），`perf stat -e
+> cache-misses` 已验证可读，PMU 问题（3f38ac71d420）据此作答；框架部署卡
+> 639378197e33 已 decline；7 个"模型不可用"暂停项已答复"按原计划重试"，backlog 13 项
+> 全部 pending；`copilot-guard.json` 的 24 小时 `blocked_until` 已清零。
+> **当前唯一阻塞：Copilot CLI 无登录态**。`~/.copilot/config.json` 在 07:08 UTC 被
+> 改写，`copilotTokens` 为空，所有调用报 "Failed to load models / 421 Misdirected
+> Request"（07:00 起先是 "Access denied by policy settings"）。用 gh 的两个账号
+> token 能认证但没有 gpt-5.6-sol。需要操作员以 lbx154 重新 `copilot login`；
+> Argus 隔离 home 会同步 token，daemon 无需重启。
+
 > 另外两点更正/未处理：本文"今日花费约 $1,148"实为 cost-control.jsonl
 > 自 08-28 起的累计（09-05 当天约 $111，FuseHead 当天 $7.9）；FuseHead 的
 > `selected_idea` 与工作区 `.argus/PIPELINE_STATE.json`（停在 09-03 的
