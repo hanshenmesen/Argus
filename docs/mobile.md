@@ -41,7 +41,7 @@ configure and no inbound port to open.
 1. Create an app at <https://open.feishu.cn/> (or
    <https://open.larksuite.com/> for international Lark) and add the **bot**
    capability.
-2. Grant `im:message` and `im:message:send_as_bot`. Progress reactions also
+2. Grant `im:message`, `im:message.p2p_msg:readonly` and `im:message:send_as_bot`. Progress reactions also
    need `im:message.reaction`.
 3. Under *Event Subscription*, choose **长连接 / long connection** — not a
    request URL — and subscribe to `im.message.receive_v1`.

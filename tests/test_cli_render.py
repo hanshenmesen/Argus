@@ -49,7 +49,7 @@ def test_mission_completion_color_uses_structured_status() -> None:
     assert "\x1b[1m\x1b[31m" in failure
 
 
-def test_life_mission_completed_renders_outcome_dimensions() -> None:
+def test_life_mission_completed_renders_a_human_outcome() -> None:
     rendered = render_event_for_terminal(
         {
             "type": "life.mission.completed",
@@ -64,9 +64,10 @@ def test_life_mission_completed_renders_outcome_dimensions() -> None:
         },
         theme=_PLAIN,
     )
-    assert "execution=completed" in rendered
-    assert "review=done" in rendered
-    assert "stage=not_certified" in rendered
+    assert "Completed: current task." in rendered
+    assert "execution=" not in rendered
+    assert "review=" not in rendered
+    assert "stage=" not in rendered
 
 
 def test_engineer_progress_terminal_redacts_raw_secret() -> None:
@@ -89,6 +90,26 @@ def test_engineer_reasoning_is_hidden_by_default() -> None:
         theme=_PLAIN,
     )
     assert rendered == ""
+
+
+def test_engineer_handoff_fields_are_hidden() -> None:
+    rendered = render_event_for_terminal(
+        {
+            "type": "engineer.progress",
+            "kind": "assistant_message",
+            "text": (
+                "Artifact complete.\n"
+                "MILESTONE_STATUS=done\n"
+                "NEXT_OWNER=reviewer\n"
+                "OPERATOR_QUESTION=none\n"
+                "OPERATOR_OPTIONS=none"
+            ),
+        },
+        theme=_PLAIN,
+    )
+    assert "Artifact complete." in rendered
+    assert "NEXT_OWNER" not in rendered
+    assert "OPERATOR_" not in rendered
 
 
 def test_review_verdict_colors() -> None:

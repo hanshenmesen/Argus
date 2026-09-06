@@ -74,7 +74,10 @@ def _parser() -> argparse.ArgumentParser:
         default="",
         help="Playwright browser channel such as chrome; empty uses bundled Chromium",
     )
-    parser.add_argument("--timeout-ms", type=int, default=30_000)
+    parser.add_argument(
+        "--timeout-ms", type=int, default=0,
+        help="explicit Playwright timeout; default 0 waits indefinitely",
+    )
     return parser
 
 
@@ -223,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             svg = locator.evaluate(
                 """root => {
                   const svg = root.matches('svg') ? root : root.querySelector('svg');
-                  if (!svg) throw new Error('figure root contains no SVG');
+                  if (!svg) throw new Error('figure root contains no SVG. A CSS layout has none: render it with --output *.pdf for vector or *.png for raster. Never hand-write an <svg> to satisfy this.');
                   const clone = svg.cloneNode(true);
                   const sourceNodes = [svg, ...svg.querySelectorAll('*')];
                   const cloneNodes = [clone, ...clone.querySelectorAll('*')];

@@ -11,15 +11,18 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from ..agent_cli._process_control import windows_hidden_subprocess_kwargs
 from ..core.daemon_lock import DaemonAlreadyRunning, acquire_global_daemon_lock
 from .state import (
     _daemon_log_path,
     _daemon_pid_path,
     _daemon_status_path,
     _daemon_status_payload,
+    _descendant_pids,
     _new_boot_id,
     _point_active_daemon_log,
     _redirect_std_to_log,
+    _terminate_windows_process_tree,
     read_daemon_status,
 )
 
@@ -29,6 +32,31 @@ _DAEMON_PUBLISH_TIMEOUT_SECONDS = 5.0
 _WINDOWS_DAEMON_PUBLISH_TIMEOUT_SECONDS = 180.0
 _DAEMON_STABILITY_SECONDS = 0.5
 _DAEMON_POLL_INTERVAL_SECONDS = 0.1
+
+
+def _close_inherited_fds(workspace_lease_fd: int | None) -> None:
+    keep = {0, 1, 2}
+    if workspace_lease_fd is not None:
+        keep.add(workspace_lease_fd)
+    try:
+        names = os.listdir("/proc/self/fd")
+    except FileNotFoundError:
+        first = 3
+        if workspace_lease_fd is not None:
+            os.closerange(first, workspace_lease_fd)
+            first = workspace_lease_fd + 1
+        os.closerange(first, 4096)
+        return
+    for name in names:
+        try:
+            fd = int(name)
+        except ValueError:
+            continue
+        if fd not in keep:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _wait_for_stable_daemon_status(
@@ -83,12 +111,59 @@ def _windows_daemon_command(config: Any) -> list[str]:
         ]
     )
     if config.continuous:
-        command.extend(["--continuous", "--objective", config.continuous_objective])
+        objective_file = getattr(config, "continuous_objective_file", None)
+        if objective_file is not None:
+            command.extend(["--continuous", "--objective-file", str(objective_file)])
+        else:
+            command.extend(["--continuous", "--objective", config.continuous_objective])
     if config.resume_continuous:
         command.append("--resume-continuous")
     if not config.continuous_open_ended:
         command.append("--bounded")
+    command.extend(["--mission-width", str(getattr(config, "mission_width", 2))])
     return command
+
+
+def _windows_runtime_belongs_to_launcher(
+    launcher_pid: int,
+    runtime_pid: int,
+) -> bool:
+    """Prove that a published worker PID belongs to the process we spawned.
+
+    A Windows virtual-environment ``python.exe`` is a launcher stub. Its PID is
+    the one returned by :class:`subprocess.Popen`, while the base interpreter
+    child acquires ``daemon.pid`` and publishes ``daemon.status.json``. Requiring
+    PID equality therefore rejects a healthy source-checkout worker. Keep the
+    foreign-status protection by accepting only the launcher itself or one of
+    its current descendants.
+    """
+    if runtime_pid == launcher_pid:
+        return True
+    return runtime_pid in _descendant_pids(launcher_pid)
+
+
+def _reap_failed_windows_spawn(process: subprocess.Popen[Any]) -> None:
+    """Reclaim the exact worker tree after a failed publication handshake."""
+    pid = int(process.pid)
+    if process.poll() is None:
+        terminated = _terminate_windows_process_tree(
+            pid,
+            identity_check=lambda: process.pid == pid and process.poll() is None,
+        )
+        if not terminated and process.poll() is None:
+            # Popen owns an OS handle to this exact process, so this fallback
+            # cannot target a reused PID. The tree helper normally handles all
+            # descendants; terminate() is the final root cleanup if Windows
+            # denied process enumeration.
+            process.terminate()
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            log.error("Windows worker pid=%s resisted startup cleanup", pid)
 
 
 def _spawn_windows_background_process(
@@ -104,10 +179,14 @@ def _spawn_windows_background_process(
     """Launch the terminal-scoped Windows worker without POSIX fork()."""
     env = os.environ.copy()
     env["ARGUS_BINARY_MODE"] = "cli"
-    creationflags = (
-        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    )
+    # Windows commonly inherits a CP936 console.  The detached worker emits
+    # Unicode status glyphs and must not crash before publishing daemon status.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    spawn_options = windows_hidden_subprocess_kwargs()
+    spawn_options["creationflags"] = int(
+        spawn_options.get("creationflags", 0)
+    ) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with log_path.open("ab") as log_handle:
@@ -119,29 +198,63 @@ def _spawn_windows_background_process(
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 close_fds=True,
-                creationflags=creationflags,
+                **spawn_options,
             )
         deadline = time.monotonic() + _WINDOWS_DAEMON_PUBLISH_TIMEOUT_SECONDS
+        exit_rc: int | None = None
+        stable_since: float | None = None
+        stable_pid: int | None = None
         while time.monotonic() < deadline:
             if pid_path.exists() and status_path.exists():
                 status = read_daemon_status(config.life_dir)
-                if status.alive and status.pid is not None:
-                    if not quiet:
-                        sys.stdout.write(
-                            f"argus-skill: daemon started (pid {status.pid}, "
-                            f"life_dir={config.life_dir}, log={log_path}).\n"
-                        )
-                    return 0
+                runtime_pid = int(status.pid or 0)
+                if (
+                    status.alive
+                    and runtime_pid > 0
+                    and _windows_runtime_belongs_to_launcher(
+                        int(process.pid),
+                        runtime_pid,
+                    )
+                    and not status.status_read_error
+                    and process.poll() is None
+                ):
+                    now = time.monotonic()
+                    if stable_since is None or stable_pid != runtime_pid:
+                        stable_since = now
+                        stable_pid = runtime_pid
+                    elif now - stable_since >= _DAEMON_STABILITY_SECONDS:
+                        if not quiet:
+                            sys.stdout.write(
+                                f"argus-skill: daemon started (pid {status.pid}, "
+                                f"life_dir={config.life_dir}, log={log_path}).\n"
+                            )
+                        return 0
+                else:
+                    stable_since = None
+                    stable_pid = None
             if process.poll() is not None:
+                exit_rc = process.returncode
                 break
             time.sleep(0.1)
+        if exit_rc is None:
+            _reap_failed_windows_spawn(process)
         if not quiet:
-            sys.stderr.write(
-                "argus-skill: Windows worker did not publish its status within "
-                f"{_WINDOWS_DAEMON_PUBLISH_TIMEOUT_SECONDS:g}s. "
-                f"Check {log_path} for errors.\n"
-            )
-        return 2
+            if exit_rc is not None:
+                sys.stderr.write(
+                    "argus-skill: Windows worker exited before publishing "
+                    f"daemon status (rc={exit_rc}). Check {log_path} for errors.\n"
+                )
+            else:
+                sys.stderr.write(
+                    "argus-skill: Windows worker did not publish its status within "
+                    f"{_WINDOWS_DAEMON_PUBLISH_TIMEOUT_SECONDS:g}s. "
+                    f"Check {log_path} for errors.\n"
+                )
+        # A zero exit before the PID/status handshake is still a failed worker:
+        # no process remains to execute queued work. Preserve actionable
+        # non-zero child codes, but never turn an unverified clean exit into a
+        # successful executor start.
+        return int(exit_rc) if exit_rc not in {None, 0} else 2
     finally:
         release_spawn_lock(spawn_lock_fd)
 
@@ -303,22 +416,7 @@ def spawn_detached_process(
     # connections queue to a daemon that never accepts). The daemon opens every
     # fd it actually needs (pid lock, status sidecar, events) AFTER this point,
     # so dropping the inherited table is safe and correct daemonisation.
-    try:
-        _keep = {0, 1, 2}
-        if workspace_lease_fd is not None:
-            _keep.add(workspace_lease_fd)
-        for _name in os.listdir("/proc/self/fd"):
-            try:
-                _fd = int(_name)
-            except ValueError:
-                continue
-            if _fd not in _keep:
-                try:
-                    os.close(_fd)
-                except OSError:
-                    pass
-    except FileNotFoundError:  # /proc unavailable — bounded fallback
-        os.closerange(3, 4096)
+    _close_inherited_fds(workspace_lease_fd)
 
     logging.basicConfig(
         level=logging.INFO,

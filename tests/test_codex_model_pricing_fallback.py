@@ -285,12 +285,11 @@ def test_codex_call_without_pinned_model_is_priced_not_blocked(
     assert {row["model"] for row in usage_rows} == {"gpt-5.5"}
 
 
-def test_codex_unknown_pinned_model_stays_unpriced_without_freezing_next_call(
+def test_codex_unknown_pinned_model_remains_unpriced_and_obeys_budget_gate(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Safety: the fallback must NOT paper over a genuinely unknown *pinned*
-    # model. It remains visible as unpriced telemetry, but it is not a second
-    # global admission gate for an unrelated known-price call.
+    # An unknown pinned model must remain unpriced; the configured block
+    # policy prevents further spending until that usage can be reconciled.
     backend, root, _seen_models = _codex_backend(tmp_path, monkeypatch)
 
     first = backend.run_exec(
@@ -306,5 +305,6 @@ def test_codex_unknown_pinned_model_stays_unpriced_without_freezing_next_call(
 
     assert first.pricing_status == "unpriced"
     assert first.cost_usd is None
-    assert second.fatal_error is None
-    assert second.pricing_status == "priced"
+    assert "unresolved provider cost" in second.fatal_error
+    assert second.stop_kind == "budget_exhausted"
+    assert second.pricing_status == "not_billed"

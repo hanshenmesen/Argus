@@ -95,6 +95,11 @@ class _Probe:
     def _persist_planner_waiting_contract(self, contract):
         # The real one returns None without a recheck_condition, which is the
         # second short-circuit this test exists to hold.
+        if str(getattr(contract, "recheck_condition", "") or "").strip():
+            return {
+                "blocker_fingerprint": contract.blocker_fingerprint,
+                "recheck_token": contract.recheck_token,
+            }
         return None
 
     def _persist_manager_planner_feedback(self, **feedback):
@@ -141,7 +146,7 @@ def test_an_uncontracted_wait_still_reaches_the_manager() -> None:
     assert _reconciles(probe, _verdict()) is True
     assert probe.manager_feedback == [
         {
-            "stage": "research",
+            "stage": "idea",
             "reason": "held",
             "diagnostic": "manager_hold_requires_stage_repair",
         }
@@ -170,6 +175,40 @@ def test_an_operator_gated_wait_is_never_reconciled() -> None:
     result = probe._reconcile(_verdict(waiting_contract=contract))
 
     assert result == ""
+
+
+def test_deterministic_subagent_event_wait_never_polls_the_manager() -> None:
+    probe = _Probe()
+    contract = SimpleNamespace(
+        blocker_fingerprint="live-subagents:abc",
+        recheck_token="run-1",
+        operator_action_required=False,
+        stage_reconciliation_required=False,
+        wait_mode="event",
+        wake_on=("subagent_state",),
+    )
+
+    result = probe._reconcile(_verdict(waiting_contract=contract))
+
+    assert result == ""
+    assert probe.manager_calls == 0
+
+
+def test_event_wait_without_wake_source_still_reaches_the_manager() -> None:
+    probe = _Probe()
+    contract = SimpleNamespace(
+        blocker_fingerprint="live-subagents:abc",
+        recheck_token="run-1",
+        operator_action_required=False,
+        stage_reconciliation_required=False,
+        wait_mode="event",
+        wake_on=(),
+        recheck_condition="wait for a real event source",
+    )
+
+    probe._reconcile(_verdict(waiting_contract=contract))
+
+    assert probe.manager_calls == 1
 
 
 @pytest.mark.parametrize(

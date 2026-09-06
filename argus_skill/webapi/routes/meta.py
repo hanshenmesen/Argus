@@ -13,12 +13,79 @@ module-level functions ``create_app`` re-exports/defines).
 from __future__ import annotations
 
 import shlex
+import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, Header, HTTPException, Response
 
 from .context import ServerContext
 from .models import BudgetSetIn, ConfigSetIn, IdentitySetIn, SkillsIn
+
+_RESOURCE_PROSE_LIMIT = 300
+
+
+def _trim_resource_prose(value: str) -> str:
+    text = " ".join(value.split())
+    if len(text) <= _RESOURCE_PROSE_LIMIT:
+        return text
+    return text[: _RESOURCE_PROSE_LIMIT - 1].rstrip() + "…"
+
+
+def _remaining_ttl(record: dict[str, Any], now: float) -> float:
+    return max(0.0, float(record["expires_at"]) - now)
+
+
+def _resource_status_payload(snapshot: dict[str, Any], *, now: float) -> dict[str, Any]:
+    from ...tools.resource_ledger.status_schema_generated import validate_resource_status
+
+    probe = snapshot["probe"]
+    holders = []
+    for record in snapshot["grants"]:
+        owner = record["owner"]
+        yield_requests = []
+        for request in record["yield_requests"]:
+            response = request["response"]
+            yield_requests.append({
+                "reason": _trim_resource_prose(request["reason"]),
+                "response": None if response is None else {
+                    "decision": response["decision"],
+                    "reason": _trim_resource_prose(response["reason"]),
+                },
+            })
+        holders.append({
+            "project": Path(owner["project_root"]).name,
+            "task_id": owner["task_id"],
+            "intent": record["demand"]["intent"],
+            "ttl_seconds": _remaining_ttl(record, now),
+            "device_count": len(record["grant"]["devices"]),
+            "yield_requests": yield_requests,
+        })
+    queue = []
+    for position, record in enumerate(snapshot["queue"], start=1):
+        owner = record["owner"]
+        queue.append({
+            "position": position,
+            "project": Path(owner["project_root"]).name,
+            "task_id": owner["task_id"],
+            "intent": record["demand"]["intent"],
+            "ttl_seconds": _remaining_ttl(record, now),
+        })
+    return validate_resource_status({
+        "schema_version": 1,
+        "enforcement": probe["enforcement"],
+        "accelerators": [
+            {
+                "kind": accelerator["kind"],
+                "status": accelerator["status"],
+                "device_count": len(accelerator["devices"]),
+                "detail": accelerator["detail"],
+            }
+            for accelerator in probe["accelerators"]
+        ],
+        "holders": holders,
+        "queue": queue,
+    })
 
 
 def register_meta_routes(app, ctx: ServerContext, server_mod) -> None:
@@ -32,16 +99,26 @@ def register_meta_routes(app, ctx: ServerContext, server_mod) -> None:
     ) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
         expected = "Bearer " + str(token)
-        if not token or authorization == expected:
-            return api_meta
+        authenticated = not token or authorization == expected
+        authentication = {
+            "required": bool(token),
+            "authenticated": authenticated,
+        }
+        if authenticated:
+            return {**api_meta, "authentication": authentication}
         runtime = {
             **api_meta["runtime"],
             "source_root": "<redacted>",
             "configured_source_root": None,
             "source_root_matches_config": None,
             "executable": "<redacted>",
+            "desktop_launch_nonce": None,
         }
-        return {**api_meta, "runtime": runtime}
+        return {
+            **api_meta,
+            "authentication": authentication,
+            "runtime": runtime,
+        }
 
     @app.get("/api/metrics", dependencies=[Depends(ctx.require_auth)])
     def _metrics() -> dict[str, Any]:
@@ -76,11 +153,49 @@ def register_meta_routes(app, ctx: ServerContext, server_mod) -> None:
             )
         }
 
-    @app.get("/api/projects/{sid}/doctor")
+    @app.get(
+        "/api/projects/{sid}/doctor",
+        dependencies=[Depends(ctx.require_auth)],
+    )
     def _doctor(sid: str) -> dict[str, Any]:
         return ctx.not_found_if_none(
             server_mod.get_doctor(sid, global_root=ctx.project_root_or_404(sid)), sid
         )
+
+    @app.get("/api/system/doctor", dependencies=[Depends(ctx.require_auth)])
+    def _system_doctor() -> dict[str, Any]:
+        """Read-only typed host/runtime inventory for Web and Desktop support."""
+        import sys
+        from pathlib import Path
+
+        from ...core.runtime_identity import source_root
+        from ...maintenance.doctor import DoctorContext, run_full_doctor
+
+        root = server_mod._global_root(ctx.global_root)
+        source = source_root()
+        checkout = source if (source / "pyproject.toml").is_file() else None
+        report = run_full_doctor(
+            DoctorContext(
+                global_root=root,
+                project_root=root,
+                checkout=checkout,
+                python_executable=Path(sys.executable),
+                install_mode=(
+                    "frozen" if getattr(sys, "frozen", False)
+                    else "source" if checkout is not None
+                    else "wheel"
+                ),
+            ),
+            include_backend=True,
+        )
+        return report.to_jsonable()
+
+    @app.get("/api/system/resources", dependencies=[Depends(ctx.require_auth)])
+    def _system_resources() -> dict[str, Any]:
+        from ...tools.resource_ledger.ledger import ResourceLedger
+
+        snapshot = ResourceLedger().status()
+        return _resource_status_payload(snapshot, now=time.time())
 
     @app.post("/api/projects/{sid}/config/set", dependencies=[Depends(ctx.require_auth)])
     def _config_set(sid: str, body: ConfigSetIn) -> dict[str, Any]:

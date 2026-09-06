@@ -102,9 +102,20 @@ class ProofGraph:
         self.routes: list[dict[str, Any]] = [
             item for item in (payload.get("routes") or []) if isinstance(item, dict)
         ]
+        # ``nodes`` is an object keyed by node id. An agent authoring this file
+        # by hand writes a list about as often as it writes a mapping, and
+        # ``[].items()`` is an AttributeError that escapes ``validate`` — the
+        # one method whose whole job is to turn a malformed graph into a
+        # sentence the author can act on. Every other field here already
+        # tolerates the wrong shape; this one is recorded so ``validate`` can
+        # say what was wrong instead of the caller seeing a traceback.
+        raw_nodes = payload.get("nodes") or {}
+        self.nodes_wrong_shape: str = (
+            "" if isinstance(raw_nodes, dict) else type(raw_nodes).__name__
+        )
         self.nodes: dict[str, dict[str, Any]] = {
             str(key): value
-            for key, value in (payload.get("nodes") or {}).items()
+            for key, value in (raw_nodes.items() if isinstance(raw_nodes, dict) else ())
             if isinstance(value, dict)
         }
 
@@ -115,6 +126,11 @@ class ProofGraph:
         issues: list[str] = []
         if not self.goal:
             issues.append("goal is empty; there is nothing to measure the gap against")
+        if self.nodes_wrong_shape:
+            issues.append(
+                f"nodes is a {self.nodes_wrong_shape}, not an object keyed by node "
+                "id; write {\"<node-id>\": {...}} rather than a list of nodes"
+            )
 
         for index, route in enumerate(self.routes):
             name = str(route.get("name") or "").strip()

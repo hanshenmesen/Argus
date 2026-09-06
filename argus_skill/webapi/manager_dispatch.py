@@ -241,7 +241,12 @@ def _cancelled_result() -> dict[str, Any]:
     }
 
 
-def _journal_argus_reply(life_dir: Path, turn_id: str, reply: str) -> None:
+def _journal_argus_reply(
+    life_dir: Path,
+    turn_id: str,
+    reply: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     """Persist ``reply`` to transcript.jsonl and stream it to the live UI.
 
     This exact journal-then-emit pair follows every terminal Manager reply in
@@ -252,10 +257,16 @@ def _journal_argus_reply(life_dir: Path, turn_id: str, reply: str) -> None:
     from ..core.transcript import append_turn
 
     try:
-        append_turn(life_dir, "argus", reply)
+        append_turn(life_dir, "argus", reply, metadata=metadata)
     except Exception:  # noqa: BLE001
         pass
-    _emit_ui_turn(life_dir, "argus", reply, message_id=f"{turn_id}-argus")
+    _emit_ui_turn(
+        life_dir,
+        "argus",
+        reply,
+        message_id=f"{turn_id}-argus",
+        metadata=metadata,
+    )
 
 
 @dataclass
@@ -270,8 +281,8 @@ class _TurnEmitter:
     fragment: Callable[[str, dict[str, Any]], None]
     after_reply: Callable[[str], None] | None = None
 
-    def phase(self, label: str) -> None:
-        self.fragment("phase", {"role": "manager", "label": label})
+    def phase(self, label: str, *, role: str = "manager") -> None:
+        self.fragment("phase", {"role": role, "label": label})
 
     def reply_fragment(self, text: str, *, message_id: str | None = None) -> None:
         payload: dict[str, Any] = {"text": text, "fragment_mode": "snapshot"}
@@ -279,8 +290,25 @@ class _TurnEmitter:
             payload["message_id"] = message_id
         self.fragment("delta", payload)
 
-    def journal(self, text: str) -> None:
-        _journal_argus_reply(self.life_dir, self.turn_id, text)
+    def journal(self, text: str, result: dict[str, Any]) -> None:
+        metadata = {
+            key: result[key]
+            for key in (
+                "mission_result",
+                "item_id",
+                "success",
+                "summary",
+                "delivery_id",
+                "delivery",
+            )
+            if key in result
+        }
+        _journal_argus_reply(
+            self.life_dir,
+            self.turn_id,
+            text,
+            metadata or None,
+        )
 
     def emit_only(self, text: str) -> None:
         """Stream ``text`` to the UI without journaling it to transcript.jsonl.
@@ -302,7 +330,7 @@ class _TurnEmitter:
         pattern used by nearly every ``manager_message`` branch.
         """
         self.reply_fragment(text, message_id=message_id)
-        self.journal(text)
+        self.journal(text, result)
         if result.get("kind") == "chat" and self.after_reply is not None:
             self.after_reply(text)
         return {"reply": text, **result}
@@ -312,7 +340,7 @@ class _TurnEmitter:
         callee (e.g. ``manager_triage`` drives ``on_fragment`` itself), so no
         extra delta fragment is emitted here.
         """
-        self.journal(text)
+        self.journal(text, result)
         if result.get("kind") == "chat" and self.after_reply is not None:
             self.after_reply(text)
         return {"reply": text, **result}
@@ -335,7 +363,13 @@ def _handle_pending_question_turn(
     from ..life.memory import BacklogItem
 
     if len(pending_questions) == 1:
-        emitter.phase("Manager · interpreting your answer to the blocked mission")
+        from ..core.operator_messages import uses_cjk
+
+        emitter.phase(
+            "正在核对你的回答与已暂停的任务…"
+            if uses_cjk(body)
+            else "Checking your answer against the paused task…"
+        )
         result = _resolve_pending_question_with_manager(
             mem,
             pending_questions[0],
@@ -377,6 +411,11 @@ class _ClassifyResult:
     frontdoor_failure: str
 
 
+# Explicit message categories are operator authority. ``task`` skips only the
+# category model; the normal Manager + Planner ownership chain remains intact.
+_FORCED_ROUTES = {"chat": "simple", "task": "complex"}
+
+
 def _self_skill_context_available(chat_state: dict[str, Any]) -> bool:
     runner = chat_state.get("manager_runner")
     manager = getattr(runner, "manager", None)
@@ -406,21 +445,47 @@ def _classify_operator_turn(
     startup_handoff: str,
     emitter: _TurnEmitter,
     cancelled: Callable[[], bool],
+    route_override: str = "",
 ) -> "_ClassifyResult | dict[str, Any]":
     """Run rotation bookkeeping + the merged front-door classify call.
 
     Returns a ``_ClassifyResult`` normally, or a terminal ``{"kind":
     "cancelled", ...}`` dict if the request was cancelled mid-classify — the
     caller must check ``isinstance(result, dict)`` before reading fields.
+
+    An explicit ``chat``/``task`` category skips this classifier call. This is
+    the same operator-authority pattern as Codex execution mode selection and
+    avoids paying for a model to second-guess a category the operator supplied.
     """
+    from ..core.operator_messages import uses_cjk
     from ..life.memory import BacklogItem
     from ..manager.config_intent import _front_door_classify
     from ..manager.front_door import _accepts_parameter
 
+    forced_route = _FORCED_ROUTES.get(str(route_override or "").strip().lower())
+
     # Emit the stage BEFORE the classifier call. Copilot ACP may produce no
     # protocol events while the model is reasoning, so without this real
     # transition the TUI can only show its generic rotating slogan.
-    emitter.phase("Manager · classifying this message")
+
+    if forced_route == "complex":
+        emitter.phase(
+            "任务模式：正在准备 Manager 路由…"
+            if uses_cjk(body)
+            else "Task mode: preparing Manager routing…"
+        )
+    elif forced_route == "simple":
+        emitter.phase(
+            "对话模式：Manager 正在准备回复…"
+            if uses_cjk(body)
+            else "Chat mode: preparing the Manager reply…"
+        )
+    else:
+        emitter.phase(
+            "正在理解你的请求…"
+            if uses_cjk(body)
+            else "Understanding your request…"
+        )
 
     # Persistent Manager session with context-rotation: it stays alive (the
     # codex/copilot thread is resumed via last_thread_id each turn) and is
@@ -432,15 +497,9 @@ def _classify_operator_turn(
         chat_state.pop("_frontdoor_dispatch_body", "") or body
     )
     handoff = startup_handoff
-    send_body = (
-        f"{handoff}\n\n{dispatch_body}"
-        if handoff
-        else dispatch_body
-    )
     root_task_id = BacklogItem.new_id()
     if chat_state["turns"] > _rotate_after():
         handoff = _build_handoff(life_dir)
-        send_body = f"{handoff}\n\n{dispatch_body}"
         chat_state["last_thread_id"] = None  # start a fresh session thread
         # The cached runner keeps its OWN copy of the session id
         # (``_next_seed_thread_id``); ``_simple_quick_reply`` falls back to it
@@ -476,6 +535,38 @@ def _classify_operator_turn(
     )
     if _accepts_parameter(_front_door_classify, "active_mission"):
         classify_kwargs["active_mission"] = active_mission
+    if forced_route:
+        # No classifier ran, so clear every classifier-owned transient before
+        # constructing the authoritative route. A prior turn must never leak a
+        # greeting, control, lifetime or failure into this one.
+        for stale in (
+            "_frontdoor_lifetime",
+            "_frontdoor_self_mode",
+            "_frontdoor_fast_reply",
+            "_frontdoor_greeting_reply",
+            "_frontdoor_failure",
+            "_frontdoor_steering_directive",
+            "_frontdoor_operator_question_policy",
+            "_frontdoor_authorization",
+            "_frontdoor_intake",
+        ):
+            chat_state.pop(stale, None)
+        if forced_route == "simple":
+            chat_state["_frontdoor_self_mode"] = "inspect"
+        selected_body = dispatch_body if forced_route == "complex" else body
+        return _ClassifyResult(
+            intent=None,
+            control=None,
+            route=forced_route,
+            send_body=(
+                f"{handoff}\n\n{selected_body}" if handoff else selected_body
+            ),
+            root_task_id=root_task_id,
+            self_mode="inspect",
+            fast_reply="",
+            greeting_reply="",
+            frontdoor_failure="",
+        )
     decision = _front_door_classify(
         mem,
         body,
@@ -490,7 +581,7 @@ def _classify_operator_turn(
     else:
         intent, route = decision
         control = None
-    selected_body = dispatch_body if route == "complex" else body
+    selected_body = dispatch_body
     send_body = f"{handoff}\n\n{selected_body}" if handoff else selected_body
 
     self_mode = str(
@@ -502,7 +593,7 @@ def _classify_operator_turn(
     if (
         self_mode == "reply"
         and (
-            int(chat_state.get("turns", 0) or 0) > 1
+            chat_state["turns"] > 1
             or _self_skill_context_available(chat_state)
         )
     ):
@@ -539,9 +630,9 @@ def _maybe_greeting_reply(
     """Short-circuit a safe message-only reply from the merged classifier.
 
     Only fires when no stateful action was decided and the classifier did not
-    need the startup/rotation handoff to
-    answer it (``send_body == body``) — otherwise the greeting reply could be
-    stale relative to the actual enriched turn sent to the Manager.
+    need the startup/rotation handoff to answer it (``send_body == body``).
+    Otherwise the greeting would consume the handoff without seeding the next
+    substantive Manager turn.
     """
     if (
         classify.greeting_reply
@@ -591,9 +682,7 @@ def _handle_authorization_control(
             raise ValueError(
                 "no current Manager-bound blocker is awaiting authorization"
             )
-        terminal_evidence = list(
-            snapshot.get("terminal_evidence") or []
-        ) if snapshot else []
+        terminal_evidence = list(snapshot.get("terminal_evidence") or [])
         diagnosis = (
             terminal_evidence[-1]
             if terminal_evidence
@@ -646,8 +735,8 @@ def _handle_authorization_control(
             expected_wait_id=str(active_wait.get("wait_id") or ""),
         )
         reply = (
-            "Authorization recorded for the current campaign blocker "
-            f"as {authorization.authorization_id}. No task was dispatched."
+            "Authorization saved for the current blocker. "
+            "The team can use it when the task resumes."
         )
         result = {
             "kind": "control",
@@ -672,6 +761,7 @@ def _handle_steer_control(
     from ..apps._inbox import queue_inbox_message
     from ..manager.directive import (
         active_manager_directive_message,
+        active_operator_question_policy,
         set_active_manager_directive,
     )
 
@@ -688,40 +778,58 @@ def _handle_steer_control(
             {"kind": "chat", "control": "steer_unresolved"},
             message_id="steer",
         )
-    set_active_manager_directive(
-        life_dir,
-        manager_directive,
-        source="manager.steer",
-    )
+    from ..daemon.state import read_continuous_state
+
+    current = read_continuous_state(life_dir)
+    operator_question_policy = str(
+        chat_state.pop(
+            "_frontdoor_operator_question_policy",
+            "unchanged",
+        )
+        or "unchanged"
+    ).strip().lower()
+    if operator_question_policy == "unchanged":
+        inherited_question_policy = active_operator_question_policy(
+            life_dir,
+            expected_objective=current.objective,
+        )
+        if inherited_question_policy != "unchanged":
+            operator_question_policy = inherited_question_policy
     lifetime = str(
         chat_state.pop("_frontdoor_lifetime", "") or ""
     ).strip().lower()
     promoted_to_standing = False
+    standing_objective = ""
     if lifetime == "standing":
-        from ..daemon.state import (
-            compare_and_swap_continuous_config,
-            read_continuous_state,
-        )
+        from ..daemon.state import compare_and_swap_continuous_config
         from ..life.memory import LifeMemory
 
-        current = read_continuous_state(life_dir)
         running = [
             item
-            for item in LifeMemory.open(life_dir).backlog.all()
-            if str(getattr(item, "status", "") or "") == "running"
+            for item in LifeMemory.open(life_dir).backlog.active()
+            if item.status == "running"
         ]
         active_objective = ""
         if running:
             active = max(
                 running,
-                key=lambda item: float(getattr(item, "started_ts", 0.0) or 0.0),
+                key=lambda item: float(item.started_ts or 0.0),
             )
             active_objective = str(
-                getattr(active, "original_objective", "")
-                or getattr(active, "objective", "")
+                active.original_objective
+                or active.objective
                 or ""
             ).strip()
         standing_objective = active_objective or current.objective or manager_directive
+    set_active_manager_directive(
+        life_dir,
+        manager_directive,
+        source="manager.steer",
+        operator_question_policy=operator_question_policy,
+        authorized_objective=standing_objective,
+        scope_objective=current.objective,
+    )
+    if lifetime == "standing":
         promoted_to_standing = compare_and_swap_continuous_config(
             life_dir,
             expected=current,
@@ -729,26 +837,27 @@ def _handle_steer_control(
             objective=standing_objective,
             open_ended=True,
         )
-        if not promoted_to_standing:
-            latest = read_continuous_state(life_dir)
-            promoted_to_standing = bool(
-                latest.enabled and latest.open_ended
-            )
         if promoted_to_standing:
             chat_state.setdefault("config", {})["continuous"] = True
             chat_state["continuous_objective"] = standing_objective
+        else:
+            latest = read_continuous_state(life_dir)
+            chat_state.setdefault("config", {})["continuous"] = latest.enabled
+            chat_state["continuous_objective"] = latest.objective
     directive = active_manager_directive_message(life_dir)
-    queue_inbox_message(
-        life_dir,
-        directive,
-        source="manager.steer",
-    )
+    if directive:
+        queue_inbox_message(
+            life_dir,
+            directive,
+            source="manager.steer",
+        )
     reply = f"我已调整团队方向：{manager_directive}"
     if lifetime == "standing":
-        if promoted_to_standing:
-            reply += " 当前任务已升级为持续任务，本轮结束后会继续规划下一项工作。"
-        else:
-            reply += " 但持续任务状态未能持久化；本轮方向已更新，请重试持续运行指令。"
+        reply += (
+            " 当前任务已升级为持续任务，本轮结束后会继续规划下一项工作。"
+            if promoted_to_standing
+            else " 方向已记录，但持续任务升级未成功；当前持续状态保持不变。"
+        )
     return emitter.respond(
         reply,
         {
@@ -799,42 +908,47 @@ def _handle_pause_control(
     daemon_stop_requested, daemon_pid = request_daemon_stop(life_dir)
     daemon_stop_failed = daemon_pid is not None and not daemon_stop_requested
 
-    chinese = any("\u3400" <= ch <= "\u9fff" for ch in body)
+    from ..core.operator_messages import uses_cjk
+
+    chinese = uses_cjk(body)
     if not pause_persisted:
         reply = (
-            "已请求中止当前任务和停止 daemon，但暂停状态未能持久化；"
-            "在检查 continuous.json 前不要重启该会话。"
+            "我已要求当前任务和后台工作进程停止，但暂停状态未能保存。"
+            "请先检查项目状态，再恢复工作。"
             if chinese
-            else "The active task and daemon were asked to stop, but the pause "
-            "could not be persisted; do not restart this session until "
-            "continuous.json is checked."
+            else "I asked the current task and background worker to stop, but "
+            "could not save the paused state. Check the project status before resuming."
+        )
+    elif daemon_stop_failed:
+        reply = (
+            "任务已暂停，现有工作已保存，但后台工作进程未能停止。"
+            "恢复前请检查其状态。"
+            if chinese
+            else "The task is paused and your work is saved, but the background "
+            "worker did not stop. Check its status before resuming."
         )
     elif chinese:
-        pieces = ["已暂停：持续任务已关闭"]
-        pieces.append("当前任务已请求中止" if abort_requested else "当前没有运行中的任务")
-        if daemon_stop_requested:
-            pieces.append("daemon 正在停止")
-        elif daemon_stop_failed:
-            pieces.append("daemon 停止请求失败")
+        if abort_requested and daemon_stop_requested:
+            first = "已暂停。当前任务和后台工作进程正在停止。"
+        elif abort_requested:
+            first = "已暂停。当前任务正在停止，后台工作进程已经停止。"
+        elif daemon_stop_requested:
+            first = "已暂停。当前没有运行中的任务，后台工作进程正在停止。"
         else:
-            pieces.append("daemon 已停止")
-        reply = "，".join(pieces) + "。目标和待办已保留；明确继续时才会恢复。"
+            first = "已暂停。当前没有运行中的任务，后台工作进程已经停止。"
+        reply = first + "目标和待办已保存；只有你提出继续时才会恢复。"
     else:
-        pieces = ["Paused: continuous work is disabled"]
-        pieces.append(
-            "the active task was asked to abort"
-            if abort_requested
-            else "no task is currently running"
-        )
-        if daemon_stop_requested:
-            pieces.append("the daemon is stopping")
-        elif daemon_stop_failed:
-            pieces.append("the daemon stop request failed")
+        if abort_requested and daemon_stop_requested:
+            first = "Paused. The current task and background worker are stopping."
+        elif abort_requested:
+            first = "Paused. The current task is stopping; the background worker is stopped."
+        elif daemon_stop_requested:
+            first = "Paused. No task is running, and the background worker is stopping."
         else:
-            pieces.append("the daemon is stopped")
+            first = "Paused. No task is running, and the background worker is stopped."
         reply = (
-            "; ".join(pieces)
-            + ". The objective and backlog are preserved until you explicitly resume."
+            first
+            + " Your objective and queue are saved; work will resume only when you ask."
         )
 
     return emitter.respond(
@@ -868,13 +982,22 @@ def _handle_abort_control(
         reason=f"operator requested: {body}",
         requested_by="manager",
     )
+    from ..core.operator_messages import uses_cjk
+
+    chinese = uses_cjk(body)
     if requested:
-        reply = f"Stop requested for running task {item_id}."
+        reply = "我已要求当前任务停止。" if chinese else "I asked the current task to stop."
     elif item_id is not None:
-        reply = f"Stop request failed for running task {item_id}."
+        reply = (
+            "当前任务未能停止；请先检查其状态，再重试。"
+            if chinese
+            else "I couldn't ask the current task to stop. Check its status before trying again."
+        )
     else:
         reply = (
-            "No running task to abort. Pending tasks were left unchanged."
+            "当前没有运行中的任务；待办任务未受影响。"
+            if chinese
+            else "No task is currently running. Pending tasks were left unchanged."
         )
     return emitter.respond(
         reply,
@@ -940,6 +1063,19 @@ def _run_triage_and_fallbacks(
     from ..manager.front_door import manager_triage
 
     self_mode = str(chat_state.pop("_frontdoor_self_mode", "inspect") or "inspect")
+    if frontdoor_failure:
+        # A failed classifier did not produce a trustworthy route. Reporting
+        # that failure must precede triage: otherwise a timed-out front-door
+        # call can start a second long Manager turn before the operator learns
+        # that no safe dispatch decision exists.
+        reply = (
+            "[not dispatched] Manager could not classify this message "
+            f"({frontdoor_failure}). The configured Manager backend is "
+            "unavailable or failed during classification. No task was queued. "
+            "Run `argus doctor --deep` to check backend readiness, then retry."
+        )
+        return emitter.respond(reply, {"kind": "chat"})
+
     # 1) Manager triage — chat/SELF returns a reply; TEAM returns None. The
     # route was already decided in the merged call above, so triage skips its
     # own route classify (``route=route``).
@@ -957,7 +1093,17 @@ def _run_triage_and_fallbacks(
         reply = None
 
     if reply is not None:
-        return emitter.journal_and_respond(reply, {"kind": "chat"})
+        result: dict[str, Any] = {"kind": "chat"}
+        delivery = chat_state.pop("_self_delivery", None)
+        if isinstance(delivery, dict):
+            result.update({
+                "mission_result": True,
+                "success": True,
+                "summary": str(delivery.get("summary") or ""),
+                "delivery_id": str(delivery.get("delivery_id") or ""),
+                "delivery": delivery,
+            })
+        return emitter.journal_and_respond(reply, result)
     if route == "simple" and control != "no_dispatch":
         # The classifier already said SELF/chat. A failed inline Manager turn
         # must never fall through into TEAM dispatch — that queues greetings,
@@ -970,12 +1116,6 @@ def _run_triage_and_fallbacks(
         return emitter.respond(reply, {"kind": "chat"})
     if control == "no_dispatch":
         reply = _NO_DISPATCH_FALLBACK
-        return emitter.respond(reply, {"kind": "chat"})
-    if frontdoor_failure:
-        reply = (
-            "[not dispatched] Manager could not classify this message. "
-            "No task was queued; please retry."
-        )
         return emitter.respond(reply, {"kind": "chat"})
     return None
 
@@ -993,6 +1133,7 @@ def _dispatch_team_mission(
     """Apply the Manager's lifetime decision, resume a done lifecycle, and
     enqueue the operator's TEAM mission. Raises on failure — the caller
     catches it and turns it into a structured ``{"kind": "error"}`` reply."""
+    from ..core.operator_messages import uses_cjk
     from ..manager.dispatch import (
         enqueue_mission,
         maybe_promote_to_continuous,
@@ -1006,18 +1147,31 @@ def _dispatch_team_mission(
     # A publication campaign has a finite finish line, but Manager may still
     # require staged progression. Run the normal workflow decision once, use it
     # to choose topology, then reuse the sealed handoff during commit.
-    emitter.phase("Manager · choosing workflow and task lifetime")
+
+    chinese = uses_cjk(body)
+    emitter.phase(
+        "正在选择合适的工作流程…"
+        if chinese
+        else "Choosing the right workflow…"
+    )
     prepared = prepare_manager_execution_task(
         mem,
         body,
         chat_state,
         root_task_id=root_task_id,
     )
-    emitter.phase("Manager · validating project lifecycle")
+    emitter.phase(
+        "正在确认这个项目能否恢复…"
+        if chinese
+        else "Checking whether this project can resume…"
+    )
     resume_done_lifecycle_for_team_dispatch(mem)
     workflow_mode = str(
         getattr(prepared.decision, "workflow_mode", "") or ""
     )
+    prepared.lifetime = str(
+        chat_state.get("_frontdoor_lifetime", "bounded") or "bounded"
+    ).strip().lower()
     try:
         maybe_promote_to_continuous(
             mem,
@@ -1026,9 +1180,35 @@ def _dispatch_team_mission(
             root_task_id=root_task_id,
             workflow_mode=workflow_mode,
         )
+        prepared.continuous = bool(
+            chat_state.get("config", {}).get("continuous", False)
+        )
+        prepared.open_ended = bool(
+            chat_state.get("_continuous_open_ended", False)
+        )
+        if prepared.continuous:
+            prepared.lifetime = (
+                "standing" if prepared.open_ended else "bounded"
+            )
     except Exception as exc:
         prepared.failed(exc)
         raise
+    if prepared.continuous:
+        emitter.phase(
+            "正在将长期工作写入待办…"
+            if chinese
+            else "Adding standing work to the backlog…"
+        )
+    else:
+        # Bounded dispatch now enters a real Planner call before persistence.
+        # Keep the stream on the role that is actually working instead of
+        # making that model latency look like a stalled Manager turn.
+        emitter.phase(
+            "Planner 正在拆分并签发任务…"
+            if chinese
+            else "Planner is decomposing and signing off the task…",
+            role="planner",
+        )
     return enqueue_mission(
         mem,
         body,

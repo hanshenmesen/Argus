@@ -1,0 +1,312 @@
+\documentclass[10pt,letterpaper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{mathptmx}
+\usepackage[scaled=0.92]{helvet}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[letterpaper,top=0.65in,bottom=0.72in,left=0.78in,right=0.78in,
+  headheight=14pt]{geometry}
+\usepackage[protrusion=true,expansion=true]{microtype}
+\usepackage{xspace}
+\usepackage[table]{xcolor}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{colortbl}
+\usepackage{etoolbox}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[most]{tcolorbox}
+\usepackage[round,authoryear]{natbib}
+\usepackage[colorlinks=true,allcolors=argusblue]{hyperref}
+
+% Anime-editorial paper palette derived from the mountain illustration: navy
+% linework, cream paper, restrained blue, sand, and sage accents.
+\definecolor{sjtuRed}{HTML}{C8161D}
+\definecolor{argusblue}{HTML}{315BCE}
+\definecolor{argusdeep}{HTML}{24465D}
+\definecolor{ink}{HTML}{24465D}
+\definecolor{muted}{HTML}{66717D}
+\definecolor{papercream}{HTML}{FBF7EE}
+\definecolor{papersand}{HTML}{F5E6C8}
+\definecolor{papersage}{HTML}{6F9B86}
+\definecolor{papergold}{HTML}{D9C58F}
+\definecolor{mist}{HTML}{F8F2E7}
+\definecolor{rulegray}{HTML}{D8E0E8}
+\definecolor{softgray}{HTML}{FFFDF8}
+
+% Canonical product name; use \MakeUppercase{\systemname} only where the
+% surrounding typography requires all caps.
+\newcommand{\systemname}{Argus\xspace}
+
+\hypersetup{
+  pdftitle={\systemname: Who Drives the Harness for Days? Unattended Multi-Day Research on an Evidence-Driven Runtime Where Domains Plug In and Self-Improvement Compounds},
+  pdfauthor={Argus Team},
+  pdfsubject={\systemname Technical Report},
+  pdfkeywords={unattended autonomy, driver-harness model, evidence-driven control, duty cycle, interruption rate, long-horizon research}
+}
+
+\color{ink}
+\setlength{\parindent}{1.05em}
+\setlength{\parskip}{0pt}
+\setlength{\textfloatsep}{12pt plus 2pt minus 2pt}
+\setlength{\intextsep}{9pt plus 2pt minus 2pt}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{0pt}
+\renewcommand{\arraystretch}{1.10}
+\setlist{leftmargin=1.45em,itemsep=1.5pt,topsep=3pt,parsep=0pt}
+\setlength{\emergencystretch}{2.5em}
+\AtBeginEnvironment{table}{\rowcolors{2}{papercream}{white}\arrayrulecolor{rulegray}}
+\AtEndEnvironment{table}{\rowcolors{2}{white}{white}\arrayrulecolor{black}}
+
+\titleformat{\section}
+  {\sffamily\Large\bfseries\color{ink}}
+  {\color{argusblue}\thesection}{0.65em}{}
+\titleformat{\subsection}
+  {\sffamily\large\bfseries\color{ink}}
+  {\thesubsection}{0.55em}{}
+\titleformat{\subsubsection}
+  {\sffamily\normalsize\bfseries\color{ink}}
+  {\thesubsubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.15em}{0.45em}
+\titlespacing*{\subsection}{0pt}{0.85em}{0.28em}
+\titlespacing*{\subsubsection}{0pt}{0.65em}{0.2em}
+
+\captionsetup{
+  font=small,
+  labelfont={bf,sf,color=ink},
+  textfont={color=ink},
+  labelsep=period
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.35pt}
+\fancyhead[L]{\footnotesize\rmfamily\color{muted}\systemname}
+\fancyhead[R]{\footnotesize\rmfamily\color{muted}Who Drives the Harness for Days?}
+\fancyfoot[C]{\footnotesize\sffamily\color{muted}\thepage}
+\newcommand{\linkitem}[3]{%
+  \raisebox{-0.18\height}{\includegraphics[height=8.5pt]{#1}}\,\href{#2}{#3}}
+\fancypagestyle{firstpage}{
+  \fancyhf{}
+  \renewcommand{\headrulewidth}{0pt}
+  \fancyfoot[C]{%
+    \small\sffamily\color{argusblue}
+    \linkitem{assets/icon-web.png}{https://argusbot.cn/}{argusbot.cn}%
+    \hspace{0.34in}%
+    \linkitem{assets/icon-github.png}{https://github.com/lbx154/Argus}{github.com/lbx154/Argus}%
+    \hspace{0.34in}%
+    \linkitem{assets/icon-youtube.png}{https://www.youtube.com/watch?v=i8Qy9HCboQE}{youtu.be/i8Qy9HCboQE}%
+    \\[3pt]
+    \footnotesize\color{muted}\thepage}
+}
+
+\newtcolorbox{abstractbox}{
+  enhanced,
+  colback=papercream,
+  colframe=papergold,
+  boxrule=0pt,
+  arc=1.5pt,
+  left=9pt,right=9pt,top=7pt,bottom=7pt,
+  before skip=7pt,after skip=6pt
+}
+
+\newtcolorbox{paperbox}[1]{
+  enhanced,
+  colback=softgray,
+  colframe=papergold,
+  boxrule=0.45pt,
+  arc=1.5pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,
+  before skip=6pt,after skip=6pt,
+  fonttitle=\sffamily\bfseries\small\color{argusdeep},
+  title={#1}
+}
+
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\strong}[1]{\textbf{#1}}
+\input{figures/swebench_metrics}
+\input{figures/reviewer_metrics}
+\input{figures/paper_case_study_metrics}
+\input{figures/autonomy_metrics}
+
+\begin{document}
+\thispagestyle{firstpage}
+
+\vspace{0.04in}
+
+\noindent{\color{argusdeep}\rule{\linewidth}{0.9pt}}\par
+\vspace{0.035in}
+\noindent{\sffamily\small\bfseries\color{muted}%
+  \hbox to\linewidth{\MakeUppercase{\systemname} TECHNICAL REPORT\hfill 2026\,\textperiodcentered\,08}}\par
+\vspace{0.075in}
+
+\noindent{\raggedright\sffamily\fontsize{23}{26}\selectfont\bfseries\color{ink}
+  \systemname: Who Drives the Harness for Days?}\par
+\vspace{0.055in}
+\noindent{\raggedright\sffamily\fontsize{13}{16}\selectfont\bfseries\color{argusdeep}
+  Unattended Multi-Day Research on an Evidence-Driven Runtime\\
+  Where Domains Plug In and Self-Improvement Compounds}\par
+\vspace{0.06in}
+\noindent{\raggedright\sffamily\normalsize\bfseries\color{ink}
+  \systemname Team}\par
+\vspace{0.085in}
+
+\noindent\hbox to\linewidth{%
+  \raisebox{-0.5\height}{\includegraphics[height=0.227in]{assets/logo-microsoft.png}}\hfill
+  \raisebox{-0.5\height}{\includegraphics[height=0.30in]{assets/logo-sjtu.png}}\hfill
+  \raisebox{-0.5\height}{\includegraphics[height=0.30in]{assets/logo-fudan.png}}\hfill
+  \raisebox{-0.5\height}{\includegraphics[height=0.30in]{assets/logo-nju.png}}\hfill
+  \raisebox{-0.5\height}{\includegraphics[height=0.30in]{assets/logo-thu.png}}%
+}
+\vspace{0.07in}
+
+\noindent\hbox to\linewidth{%
+  \raisebox{-0.5\height}{\includegraphics[height=0.227in]{assets/logo-hku.png}}\hfill
+  \raisebox{-0.5\height}{\includegraphics[height=0.30in]{assets/logo-pku.png}}\hfill
+  \raisebox{-0.5\height}{\includegraphics[height=0.196in]{assets/logo-cuhk-shenzhen.png}}\hfill
+  \raisebox{-0.5\height}{\includegraphics[height=0.30in]{assets/logo-donghua.png}}%
+}
+\vspace{0.10in}
+
+\begin{abstractbox}
+\small
+\textbf{Abstract.}
+An agent harness lets a model reach the real world. Something still has to decide
+where to reach, when the result is good enough, and when to stop and ask. That seat
+has always held a person, which bounds progress by a resource nobody can scale: human
+waking hours. Human intelligence is discrete---it arrives in bursts and stops---while
+the work that justifies this machinery runs for days without pausing. We call the occupant the \emph{Driver} and hand it to the machine. Its four
+nested questions---is this done and any good, what is next, how does the system get
+better at this, does this need a person---are trivial under an explicit numeric
+reward and hard without one, which is why self-improvement advanced fastest where
+scores exist and stalled elsewhere. \systemname{} answers all four without one, sustaining
+\emph{multi-day} research with nobody in the seat, under \emph{evidence-driven}
+control: the next step follows
+from what the campaign established, not from what the plan assumed.
+
+Each question goes to a different party: a read-only Reviewer that cannot edit what
+it judges and may withhold completion; Manager-owned stage authority over a durable
+campaign; a certified path promoting what a round learned to project, domain, or
+global scope; and a boundary that stops for credentials, money, and irreversible acts. Independent review is therefore not a quality
+filter bolted onto execution: it is what makes the seat delegable at all, because
+the component doing the work is no longer the one declaring it finished. Where no score exists the runtime does not
+manufacture one, which would have one system produce both the work and its grade.
+Domain competence enters the same seam: a specialist carries \systemname{} into a new
+field by writing a \emph{vertical}---what counts as evidence there, its stages and
+completion gates---and registering it without touching the runtime. What the expert writes is a
+seed, not a ceiling: campaigns running under it accumulate knowledge and revise its
+checks, so a domain's standard is authored once and sharpened continuously above a
+floor of gates no revision may remove. The seam is one-way---a vertical can demand
+more evidence than the core requires, never less, and cannot grant itself
+authority.
+
+Across \DutyCampaigns{} campaigns spanning \DutyWallHours{} wall-clock hours,
+\systemname{} asked for a human \DutyInterruptions{} times, once every
+\DutyInterval{} hours, and spent the rest working rather than waiting:
+\DutyCycleLow--\DutyCycleHigh\% of available time computing, with work in hand. A
+turn-by-turn coding agent sustains roughly \CodexEndurance{} hour by comparison.
+
+Those hours produced work, most stringently where the verifier is unforgiving.
+\systemname{} carried six diffusion-LLM mask families into a FlashAttention-4 kernel
+across two GPU architectures, within \FlashDAGapLow--\FlashDAGapHigh\% of native for
+under \FlashDACostCNY{} CNY, after abandoning a first route slower than baseline and
+keeping it as evidence. It finished an SGLang integration one engineer had not
+completed in over \SGLangHumanHours{} hours, and \FLAPRTotal{} kernels it authored
+were accepted by outside maintainers of \code{flash-linear-attention}. An external
+chemistry validator scored its MOF discrimination at 0.833 AUC against a 0.594
+baseline, with a \emph{simpler} sampler beating the published one at matched
+compute. It clears a capability floor across seven benchmark arenas---%
+\SWEProArgusAccuracy\% on SWE-Bench Pro---and declares \ReviewerFirstBlocked{} tasks
+blocked rather than claiming success it cannot support.
+
+The hours leave something behind besides the work. Multi-day autonomy is what an AI
+Driver reaches first, ahead of the models it drives, and the traces are long:
+\CampaignsOverWeek{} campaigns beyond a week, the longest \LongestCampaignDays{}
+days, one of \LargestTraceEvents{} events recording a premise adopted early,
+contradicted days later, and revised with every verdict retained. Scraped corpora
+hold the artifacts of such work and almost none of the deliberation, because nobody
+was paid to write down the reasoning that failed. \systemname{} has built the
+pretraining stack such traces would feed; whether that judgment can be trained into
+weights rather than supplied by scaffolding is the question they exist to answer.
+\end{abstractbox}
+
+\noindent{\footnotesize\color{muted}
+  \textbf{Keywords:} unattended autonomy; multi-day operation; driver--harness model;
+  evidence-driven control; duty cycle; interruption rate; verification-gated
+  self-evolution; pluggable domain verticals; long-horizon research.\par}
+
+\begin{figure}[!ht]
+  \centering
+  \includegraphics[width=\linewidth]{figures/argus_teaser.pdf}
+  \caption{\systemname runtime, autonomy profile, and delivered work. The central
+  diagram shows how the four Driver questions are distributed. The Reviewer answers
+  Q1 and runs read-only, so it cannot edit the evidence it judges; its four verdicts
+  include \code{blocked}, which withholds completion outright. The Planner answers Q2
+  under a Manager that holds sole authority over Stage transitions. Q3 is answered in
+  the shared workspace, where a certified lesson is promoted to the project, to the
+  domain's vertical contract, or to every campaign. Q4 is an explicit boundary:
+  credentials, budget, publication, and irreversible actions stop for the operator,
+  while ordinary technical failure does not. The dashed return path exists because a
+  Reviewer sees evidence the Planner did not have: holding a result that contradicts
+  the plan, it may mark that plan for reconsideration rather than only judging the
+  work done under it, and the Manager decides whether to keep, revise, or replace it,
+  which prevents an early decision from binding better-informed rounds
+  (Section~\ref{sec:endogenous-harness}). All roles operate over a shared workspace holding
+  the two kinds of state of Section~\ref{sec:problem}: certified \emph{knowledge}
+  (wiki and skills) and uncertified \emph{memory} (event journal, backlog, session
+  context, and the artifacts themselves), both persisting across bounded missions. The cards immediately
+  surrounding it report task-native benchmark outcomes together with the two
+  measurements of unattended operation: how long the runtime goes before it needs a
+  person, and what share of its available time it spends producing. The
+  human-driven comparison on the second card is arithmetic rather than a measured
+  system: a harness cannot outlast its operator's working day, which bounds it near
+  a third of wall-clock time however capable its model becomes. Bars use independent scales and indicate comparison direction with
+  arrows; they are breadth evidence rather than a single normalized leaderboard. The
+  lower band summarizes delivered work where the deciding evaluator is external to the
+  runtime: a compiler and a reference implementation for infrastructure, an
+  independent chemistry validator and a proof checker for science, and a
+  static-timing engine for silicon. The silicon card also records the human cost of
+  that campaign---eight days, six interruptions, two of them caused by the server
+  failing rather than by the runtime asking. The pretraining card is the runtime
+  pointed at its own supply chain: an eight-GPU B200 node taken from raw data to a
+  trained 1B model, built and operated by \systemname{} rather than by the person
+  who commissioned it (Section~\ref{sec:rsi-vertical}).}
+  \label{fig:overview}
+\end{figure}
+
+\input{sections/01_introduction}
+\input{sections/02_related_work}
+\input{sections/03_problem_formulation}
+\input{sections/04_argus_method}
+\input{sections/05_empirical_methodology}
+\input{sections/06_results}
+\input{sections/06b_vertical_trace}
+\input{sections/06c_paper_production_case_study}
+\input{sections/06f_infra_vertical}
+\input{sections/06h_rsi_vertical}
+\input{sections/06d_silicon_vertical}
+\input{sections/06e_materials_vertical}
+\input{sections/07_discussion}
+\input{sections/08_limitations}
+\input{sections/09_conclusion}
+
+\clearpage
+\input{sections/95_contributors}
+
+\appendix
+\input{sections/90_appendix}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

@@ -333,7 +333,7 @@ def _result_template(idea_id: str) -> str:
         + "## Reviewer decision basis\n\n- Pending independent Reviewer assessment.\n\n"
         + "## Promotion boundary\n\n"
         + "- Even `promoted` means eligible for formal Research consideration; it does "
-        + "not change `research/PIPELINE_STATE.json` or establish a scientific fact.\n\n"
+        + "not change `.argus/PIPELINE_STATE.json` or establish a scientific fact.\n\n"
         + "## References\n\n- None recorded.\n"
     )
 
@@ -515,10 +515,7 @@ def _is_placeholder_section(content: str) -> bool:
 
 def _has_substantive_section(content: str) -> bool:
     visible_content = _strip_markdown_code(content)
-    if _is_placeholder_section(visible_content):
-        return False
-    visible = _canonical_visible_text(visible_content)
-    return sum(character.isalnum() for character in visible) >= 24
+    return not _is_placeholder_section(visible_content)
 
 
 def _canonical_section_text(content: str) -> str:

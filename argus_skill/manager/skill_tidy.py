@@ -1,19 +1,66 @@
 """Agent-owned post-mission Skill promotion."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ..core.knobs import resolve_manager_classify_model
 from ..core.models import RunnerOptions
 from ..core.run_gateway import run_exec as gateway_run_exec
+from .source_writeback import atomic_write
 
 log = logging.getLogger(__name__)
 
 _TEAM_ROLES = ("manager", "planner", "engineer", "reviewer")
 _MAX_CANDIDATE_FILES = 8
 _MAX_CANDIDATE_CHARS = 12_000
+
+#: Names from this repository's own verification surface.
+#:
+#: A mission's success verdict is evidence about the work. It is not evidence
+#: about a procedure that operated on the machinery which computed the verdict,
+#: because that procedure's only witness is the thing it altered. Run 13 is the
+#: worked example: an Engineer blocked at a goal gate called
+#: ``complete_final_stage`` directly, the forced completion made the mission
+#: read as success, and the post-mission reviewer -- correctly following its
+#: instruction that a done verdict is verified evidence -- promoted the
+#: technique into the cross-project profile library, where every future
+#: Engineer in every future project would have loaded it. The candidate it
+#: promoted said, in as many words, "before calling ``complete_final_stage``,
+#: ensure ``.argus/PIPELINE_STATE.json`` in the project state root has a
+#: resolved math objective mode".
+#:
+#: So a candidate naming any of these is withheld from the evidence bundle
+#: rather than argued about, and anything reaching the shared library that
+#: names one is quarantined afterwards. Both, because the reviewer can write
+#: such a skill from the mission result alone without ever seeing a candidate.
+#:
+#: This is a text filter and text filters are evadable: a paraphrase that never
+#: names a symbol passes. It is worth having anyway -- the run-13 candidate did
+#: not paraphrase, because nothing was hiding. An agent that repairs a gate and
+#: writes down how believes it did the right thing, and says so plainly. What
+#: this stops is the honest version travelling silently to every later project.
+#: The evadable version is the host-side receipt problem, which is a different
+#: and larger piece of work.
+_VERIFIER_SURFACE = (
+    "complete_final_stage",
+    "advance_stage",
+    "allow_early_completion",
+    "stage_machine",
+    "stage-certificates.json",
+    "PIPELINE_STATE.json",
+    "vertical_completion_certificate_status",
+    "_staged_goal_completion_issue",
+    "staged_goal_gate_incomplete",
+    "adopt_operator_objective",
+)
+
+_QUARANTINE_DIRNAME = "_uncertified"
+_REVIEW_STATE_RELATIVE = Path(".argus") / "TEAM_LEARNING_REVIEWED.json"
 
 _ZERO_SHARED = {
     "to_shared": 0,
@@ -22,7 +69,22 @@ _ZERO_SHARED = {
     "cached": 0,
     "stayed": 0,
     "errors": 0,
+    "quarantined": 0,
 }
+
+
+def names_the_verifier(text: str) -> str:
+    """The first verification-surface name in ``text``, or empty.
+
+    Public because it is the predicate, not an implementation detail: a caller
+    that wants to know whether a piece of writing is certifiable by the verdict
+    of the mission it came from asks this.
+    """
+    haystack = text or ""
+    for marker in _VERIFIER_SURFACE:
+        if marker in haystack:
+            return marker
+    return ""
 
 
 def _emit(on_event: Any, event: dict[str, Any]) -> None:
@@ -69,20 +131,108 @@ def _snapshot(paths: Iterable[Path]) -> dict[Path, tuple[int, int]]:
     return snapshot
 
 
-def _candidate_evidence(root: Path | None) -> str:
+def _unshared_project_skill_hashes(
+    project_root: Path | None,
+    shared_root: Path,
+) -> dict[str, str]:
+    """Content hashes for project-authored Skills absent from the shared layer."""
+    if project_root is None or not project_root.is_dir():
+        return {}
+    hashes: dict[str, str] = {}
+    for source in _role_skill_paths(project_root):
+        try:
+            relative = source.relative_to(project_root)
+            target = shared_root / relative
+            body = source.read_bytes()
+            if target.is_file() and body == target.read_bytes():
+                continue
+            hashes[relative.as_posix()] = hashlib.sha256(body).hexdigest()
+        except (OSError, ValueError):
+            continue
+    return hashes
+
+
+def _reviewed_project_skill_hashes(state_root: Path | None) -> dict[str, str]:
+    if state_root is None:
+        return {}
+    try:
+        payload = json.loads(
+            (state_root / _REVIEW_STATE_RELATIVE).read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return {}
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, dict):
+        return {}
+    return {
+        str(path): str(digest)
+        for path, digest in candidates.items()
+        if str(path).strip() and str(digest).strip()
+    }
+
+
+def _record_reviewed_project_skills(
+    state_root: Path | None,
+    reviewed: dict[str, str],
+) -> None:
+    if state_root is None:
+        return
+    path = state_root / _REVIEW_STATE_RELATIVE
+    atomic_write(
+        path,
+        json.dumps(
+            {"version": 1, "candidates": reviewed},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
+def _candidate_evidence(
+    root: Path | None,
+    *,
+    include: frozenset[str] | None = None,
+) -> tuple[str, frozenset[str]]:
     if root is None:
-        return "- none"
+        return "- none", frozenset()
     rendered: list[str] = []
+    presented: set[str] = set()
     remaining = _MAX_CANDIDATE_CHARS
-    for path in _role_skill_paths(root)[:_MAX_CANDIDATE_FILES]:
+    for path in _role_skill_paths(root):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
             relative = path.relative_to(root)
         except (OSError, ValueError):
             continue
+        if include is not None and relative.as_posix() not in include:
+            continue
+        marker = names_the_verifier(text)
+        if marker:
+            # Withheld rather than shown-and-forbidden. A reviewer that reads a
+            # plausible, well-written repair procedure and is then told not to
+            # act on it is being asked to hold a line under argument; one that
+            # never sees it is not. The line is still stated in the prompt, for
+            # the case where the mission result alone is enough to reconstruct
+            # the procedure.
+            rendered.append(
+                f"- {relative.as_posix()}\n"
+                "<withheld_candidate>\n"
+                f"This candidate names {marker!r}, part of the machinery that "
+                "produced this mission's verdict. The verdict cannot certify a "
+                "procedure that acted on it, so the candidate is not evidence "
+                "here and its text is not shown. It stays in the project layer.\n"
+                "</withheld_candidate>"
+            )
+            presented.add(relative.as_posix())
+            if len(rendered) >= _MAX_CANDIDATE_FILES:
+                break
+            continue
         excerpt = text[:remaining]
         if not excerpt:
             continue
+        presented.add(relative.as_posix())
         rendered.append(
             f"- {relative.as_posix()}\n"
             "<untrusted_candidate>\n"
@@ -90,24 +240,25 @@ def _candidate_evidence(root: Path | None) -> str:
             "</untrusted_candidate>"
         )
         remaining -= len(excerpt)
-        if remaining <= 0:
+        if remaining <= 0 or len(rendered) >= _MAX_CANDIDATE_FILES:
             break
-    return "\n".join(rendered) or "- none"
+    return "\n".join(rendered) or "- none", frozenset(presented)
 
 
 def _team_learning_prompt(
     *,
-    project_root: Path,
-    project_state_dir: Path | None,
     project_skill_root: Path | None,
+    candidate_paths: frozenset[str],
     shared_root: Path,
     mission_objective: str,
     mission_success: bool,
     mission_result: str,
-) -> str:
-    del project_root, project_state_dir
-    candidates = _candidate_evidence(project_skill_root)
-    return (
+) -> tuple[str, frozenset[str]]:
+    candidates, presented = _candidate_evidence(
+        project_skill_root,
+        include=candidate_paths,
+    )
+    prompt = (
         "You are an isolated post-mission TEAM learning reviewer. The TEAM mission "
         "has ended and its canonical verdict is complete. Do not continue the "
         "mission, answer the operator, run builds or tests, or edit the project and "
@@ -116,10 +267,22 @@ def _team_learning_prompt(
         f"Mission result: {mission_result[:2000] or '(not supplied)'}\n\n"
         "Decide whether the mission demonstrated a durable role procedure "
         "that would materially improve later sessions. A successful mission with a "
-        "canonical done verdict is verified evidence: a project candidate that abstracts "
+        "canonical done verdict verifies only that mission's accepted output: it is "
+        "verified evidence about the work, not about every causal attribution in its "
+        "summary or candidate Skill, and not about a procedure that acted on the "
+        "machinery which produced the verdict. Promote a causal rule only when the "
+        "supplied evidence includes phase attribution/profiling or a controlled "
+        "comparison that supports it; end-to-end correlation is insufficient. A "
+        "candidate whose procedure edits stage, gate, certificate, objective, or "
+        "pipeline state — or otherwise operates on what a completion check reads — was "
+        "certified by the very thing it altered, and one success says nothing about "
+        "whether it was right. Make no profile edit from such a procedure however well "
+        "it appeared to work, and do not restate it in your own words; say in your "
+        "final message that you saw one and stopped. A project candidate that abstracts "
         "task-specific details into a broadly reusable procedure may be promoted after "
-        "that one success. Do not reject it merely because it came from one session, and "
-        "do not require novelty beyond improving future execution. For a failure, write "
+        "that one success when its evidence is sufficient. Do not reject it merely "
+        "because it came from one session, and do not require novelty beyond improving "
+        "future execution. For a failure, write "
         "only when the root cause is concretely verified or recent session evidence shows "
         "the same mechanism/assumption failing repeatedly. Capture a reusable detection, "
         "research, stopping, or recovery procedure—not the task-specific outcome. A "
@@ -152,6 +315,7 @@ def _team_learning_prompt(
         "`description` frontmatter followed by concise Markdown. If the evidence does "
         "not justify profile-level learning, make no edit."
     )
+    return prompt, presented
 
 
 def propagate_runtime_skills_to_shared(
@@ -189,15 +353,61 @@ def propagate_after_mission(
         log.debug("TEAM learning review skipped: no runner backend")
         return counts
 
-    project = Path(project_root).expanduser().resolve()
     state = (
         Path(project_state_dir).expanduser().resolve()
         if project_state_dir is not None
         else None
     )
-    project_skills = state / "skills" if state is not None else None
+    configured_project_skills = str(
+        os.environ.get("ARGUS_SKILL_PROJECT_SKILLS_DIR", "") or ""
+    ).strip()
+    project_skills = (
+        Path(configured_project_skills).expanduser().resolve()
+        if configured_project_skills
+        else state / "skills"
+        if state is not None
+        else None
+    )
     shared = Path(shared_root).expanduser().resolve()
     shared.mkdir(parents=True, exist_ok=True)
+    candidate_hashes = _unshared_project_skill_hashes(
+        project_skills,
+        shared,
+    )
+    reviewed_hashes = _reviewed_project_skill_hashes(state)
+    pending_paths = frozenset(
+        path
+        for path, digest in candidate_hashes.items()
+        if reviewed_hashes.get(path) != digest
+    )
+    if not mission_success or not pending_paths:
+        _emit(on_event, {
+            "type": "team.learning.review.skipped",
+            "agent_layer": "manager",
+            "mission_success": mission_success,
+            "reason": (
+                "mission failed"
+                if not mission_success
+                else "no project skill delta"
+            ),
+        })
+        return counts
+    prompt, presented_paths = _team_learning_prompt(
+        project_skill_root=project_skills,
+        candidate_paths=pending_paths,
+        shared_root=shared,
+        mission_objective=mission_objective,
+        mission_success=mission_success,
+        mission_result=mission_result,
+    )
+    if not presented_paths:
+        _emit(on_event, {
+            "type": "team.learning.review.skipped",
+            "agent_layer": "manager",
+            "mission_success": mission_success,
+            "reason": "no readable project skill delta",
+        })
+        return counts
     before = _snapshot(_role_skill_paths(shared))
     _emit(on_event, {
         "type": "team.learning.review.started",
@@ -214,17 +424,11 @@ def propagate_after_mission(
     try:
         result = gateway_run_exec(
             backend,
-            prompt=_team_learning_prompt(
-                project_root=project,
-                project_state_dir=state,
-                project_skill_root=project_skills,
-                shared_root=shared,
-                mission_objective=mission_objective,
-                mission_success=mission_success,
-                mission_result=mission_result,
-            ),
+            prompt=prompt,
             options=RunnerOptions(
-                model=resolve_manager_classify_model(),
+                model=resolve_manager_classify_model(
+                    backend=getattr(backend, "backend", None),
+                ),
                 reasoning_effort="low",
                 dangerous_yolo=True,
                 skip_git_repo_check=True,
@@ -263,18 +467,94 @@ def propagate_after_mission(
         for path, signature in after.items()
         if path in before and before[path] != signature
     ]
+    quarantined = _quarantine_uncertified(shared, (*created, *updated), on_event)
+    created = [path for path in created if path not in quarantined]
+    updated = [path for path in updated if path not in quarantined]
     counts["to_shared"] = len(created)
     counts["updated"] = len(updated)
+    counts["quarantined"] = len(quarantined)
     counts["stayed"] = int(not created and not updated)
+    try:
+        _record_reviewed_project_skills(
+            state,
+            {
+                **reviewed_hashes,
+                **{
+                    path: candidate_hashes[path]
+                    for path in presented_paths
+                    if path in candidate_hashes
+                },
+            },
+        )
+    except OSError:
+        log.warning("could not persist TEAM learning review receipt", exc_info=True)
     _emit(on_event, {
         "type": "team.learning.review.completed",
         "agent_layer": "manager",
         "mission_success": mission_success,
         "created": len(created),
         "updated": len(updated),
+        "quarantined": len(quarantined),
         "paths": [str(path) for path in (*created, *updated)],
     })
     return counts
 
 
-__all__ = ["propagate_after_mission", "propagate_runtime_skills_to_shared"]
+def _quarantine_uncertified(
+    shared: Path, written: Iterable[Path], on_event: Any
+) -> set[Path]:
+    """Move anything naming the verifier out of the loaded library.
+
+    The withholding in ``_candidate_evidence`` keeps the reviewer from seeing
+    such a procedure; this catches the case where it did not need to. The
+    mission result is in the prompt, and a result that says "unblocked the
+    scope gate by completing the stage against the project state root" carries
+    the whole procedure — a reviewer can write the skill from that alone.
+
+    Moved, not deleted. The destination is outside every role directory, so
+    nothing loads it, and it stays readable: a promotion refused here is a
+    finding about the run, and a finding that deletes its own evidence is not
+    much of one. An operator who reads it and disagrees can move it back.
+    """
+    quarantined: set[Path] = set()
+    for path in written:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        marker = names_the_verifier(text)
+        if not marker:
+            continue
+        destination = shared / _QUARANTINE_DIRNAME / path.name
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            path.replace(destination)
+        except OSError as exc:  # noqa: PERF203 — one failure must not stop the rest
+            log.warning("could not quarantine %s: %s", path, exc)
+            continue
+        quarantined.add(path)
+        _emit(on_event, {
+            "type": "team.learning.promotion.quarantined",
+            "agent_layer": "manager",
+            "path": str(path),
+            "moved_to": str(destination),
+            "marker": marker,
+            "reason": (
+                "a procedure that operates on the completion machinery cannot be "
+                "certified by a verdict that machinery produced"
+            ),
+        })
+        log.warning(
+            "quarantined a promoted Skill naming %r: %s -> %s",
+            marker,
+            path,
+            destination,
+        )
+    return quarantined
+
+
+__all__ = [
+    "names_the_verifier",
+    "propagate_after_mission",
+    "propagate_runtime_skills_to_shared",
+]

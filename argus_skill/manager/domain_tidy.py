@@ -19,7 +19,6 @@ same ``ARGUS_SKILL_AUTOCOMMIT_SKILLS`` as skill writeback.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -68,18 +67,16 @@ def _vertical_package_path(name: str) -> Path:
 def _domain_is_proven(project_root: Path) -> bool:
     """Cheap 'has this domain made real progress' heuristic.
 
-    Proven when ``research/PIPELINE_STATE.json`` shows at least one completed
+    Proven when the generic pipeline state shows at least one completed
     stage (``stages.<s>.status == "done"``) or at least one advance in
     ``stage_history``. Fail-open to False so a missing/corrupt state file never
     triggers a promotion proposal.
     """
+    from ..core.pipeline_state import read_pipeline_state
+
     try:
-        payload = json.loads(
-            (project_root / "research" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
-        )
+        payload = read_pipeline_state(project_root)
     except Exception:  # noqa: BLE001 — no/!valid state → not proven
-        return False
-    if not isinstance(payload, dict):
         return False
     stages = payload.get("stages")
     if isinstance(stages, dict):

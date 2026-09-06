@@ -167,7 +167,7 @@ def test_project_local_vertical_completion_uses_project_root(tmp_path) -> None:
 def test_a_completion_that_overrode_a_hold_does_not_read_as_a_hold() -> None:
     """Persisted history must not contradict itself.
 
-    Observed verbatim in a captured `research/PIPELINE_STATE.json`:
+    Observed verbatim in a captured `.argus/PIPELINE_STATE.json`:
 
         {"direction": "complete", ..., "reason": "manager held (default)"}
 

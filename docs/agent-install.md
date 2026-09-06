@@ -1,153 +1,235 @@
 # Argus installation instructions for coding agents
 
-You are responsible for completing the installation, not merely describing
-commands. Keep changes scoped to Argus and follow these rules:
+Complete the installation; do not merely print commands.
 
-- Argus does not require a separate Argus account. The selected backend must
-  be installed and authenticated through its official login flow.
+## Safety contract
+
+- Argus has no separate Argus account. Use one supported Agent CLI and its
+  official login flow.
 - Inspect before changing the machine.
-- Prefer the Agent CLI that is already running and authenticated.
-- Ask before using `sudo`, installing system packages, changing shell startup
-  files, or changing global Git or backend configuration.
-- Never request secrets in chat, print secrets, or write credentials into the
-  Argus repository. Use the backend's official interactive login flow.
-- Do not overwrite an existing Argus checkout or discard local modifications.
-- Stop and explain the exact blocker if a required action cannot be completed.
+- Ask before `sudo`, system package installation, shell startup edits, or global
+  configuration changes.
+- Never request passwords, tokens, or API keys in chat. Never place credentials
+  in the Argus checkout or shell history.
+- Prefer the Agent CLI already running this conversation.
+- Do not replace a dirty checkout or silently switch providers after a failure.
+- Use only the section for the detected operating system.
+- Running `argus doctor` is read-only. Only an explicit
+  `argus doctor --advisor <auto|backend>` authorizes the selected installed
+  Agent to inspect and repair Argus files, configuration, runtime state, and
+  required dependencies. Login or administrator blockers must be reported
+  rather than guessed.
 
-### 1. Inspect the environment
+Supported backend values:
 
-Determine the operating system and check:
-
-```bash
-git --version
-python3 --version
-node --version
-```
-
-Requirements:
-
-- Python 3.11 or newer
-- Node.js 22 or newer
-- Git
-- One supported Agent CLI
-
-Check which supported backends are available:
-
-```bash
-command -v copilot || true
-command -v codex || true
-command -v claude || true
-command -v pi || true
-command -v opencode || true
-command -v grok || true
-```
-
-Select the CLI hosting the current conversation when possible. Otherwise,
-prefer an already installed and authenticated backend. Supported Argus backend
-values are:
-
-| Agent CLI | Argus backend |
+| Agent CLI | Backend |
 |---|---|
 | GitHub Copilot CLI | `copilot` |
 | OpenAI Codex CLI | `codex` |
 | Claude Code | `claude` |
+| Cursor CLI | `cursor` |
 | Pi | `pi` |
 | OpenCode | `opencode` |
 | xAI Grok Build | `grok` |
+| Qoder CLI | `qoder` |
+| DeepSeek Harness | `dsh` |
 
-If prerequisites are missing, explain the proposed installation command and
-obtain approval before using a system package manager, `sudo`, or making a
-global installation. Follow the prerequisite project's official installation
-instructions rather than inventing an unofficial download source.
+Setup adopts a model from the selected CLI's own catalog when available and
+otherwise keeps its native default. Never assign an OpenAI model id to Claude
+Code, Pi, OpenCode, Grok, Qoder, or dsh merely because it is Argus's historical
+default.
 
-### 2. Confirm backend authentication
+## Windows 10/11
 
-Use a read-only status or version check first. If the selected CLI is not
-authenticated, start its official interactive login flow and let the user
-complete browser/device authorization directly. Do not ask the user to send
-credentials through chat.
+### Inspect
 
-If the current Agent CLI is clearly working through its normal authenticated
-session, do not force an unnecessary re-login.
+Use PowerShell:
 
-### 3. Install Argus
+```powershell
+[Environment]::OSVersion.VersionString
+py --version
+node --version
+Get-Command copilot,codex,claude,agent,cursor-agent,pi,opencode,grok,qodercli,dsh -ErrorAction SilentlyContinue
+```
 
-Choose a persistent installation directory with the user. If they have no
-preference, use `$HOME/Argus`.
+Require Python 3.11+ from python.org with **Add Python to PATH** selected,
+Node.js 22.12+, and one authenticated Agent CLI.
 
-For a new installation:
+### Install — no virtual environment
+
+```powershell
+py -m pip install --upgrade pip
+py -m pip install --upgrade --force-reinstall "argus-skill @ https://github.com/lbx154/Argus/archive/refs/heads/main.zip"
+$Scripts = py -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+$Argus = Join-Path $Scripts "argus.exe"
+if (-not (Test-Path $Argus)) { throw "Argus entry point not found at $Argus" }
+$env:Path = "$Scripts;$env:Path"
+& $Argus --version
+```
+
+Do not ask the user to create or activate a venv on Windows. A packaged Desktop
+installer may be used instead when a release provides one.
+
+Always retain `--force-reinstall` while installing the moving preview: its
+package version may stay unchanged when the archive contents change.
+
+### Configure and verify
+
+```powershell
+& $Argus --setup --non-interactive --backend <copilot|codex|claude|cursor|pi|opencode|grok|qoder|dsh>
+& $Argus doctor --deep --advisor auto
+& $Argus --status
+```
+
+`argus --setup` must finish its real Agent-turn smoke test. A package install or
+version command alone is not success. Using `$Argus` proves the newly installed
+entry point was tested instead of another copy earlier on PATH. If a later
+window cannot find plain `argus`, report `$Scripts` and ask before changing the
+user PATH; do not create a venv as a workaround.
+
+Windows supports Manager chat, pairing, Web/TUI, and terminal-scoped daemon
+control. Detached subagents remain POSIX/WSL2-only and must fail explicitly on
+native Windows.
+
+## macOS
+
+### Inspect
+
+```bash
+sw_vers
+uname -m
+uv --version
+node --version
+for cli in copilot codex claude agent cursor-agent pi opencode grok qodercli dsh; do command -v "$cli" || true; done
+```
+
+Require Node.js 22.12+, one authenticated Agent CLI, and uv. Install uv only with
+the user's approval and its official installer.
+
+### Install — uv-managed command, no manual venv
+
+```bash
+uv tool install --force --python 3.12 \
+  "argus-skill @ https://github.com/lbx154/Argus/archive/refs/heads/main.zip"
+ARGUS_BIN="$(uv tool dir --bin)/argus"
+test -x "$ARGUS_BIN"
+"$ARGUS_BIN" --version
+```
+
+### Configure and verify
+
+```bash
+"$ARGUS_BIN" --setup --non-interactive \
+  --backend <copilot|codex|claude|cursor|pi|opencode|grok|qoder|dsh>
+"$ARGUS_BIN" doctor --deep --advisor auto
+"$ARGUS_BIN" --status
+```
+
+Setup is complete only after the real Agent-turn smoke succeeds. Keep using
+`$ARGUS_BIN` in the current shell. With approval, run `uv tool update-shell` to
+make plain `argus` available in new terminals.
+
+With the explicit `--advisor auto` shown above, Doctor runs the installed
+Agent with tools enabled, applies Argus-scoped repairs, and then reruns
+deterministic verification. `argus doctor` without an advisor remains
+read-only; use `--advisor none --verify` for an explicit non-Agent verification
+run. Allow several minutes for an active repair because it performs a real
+Agent turn and may repair dependencies.
+
+## Linux
+
+### Inspect
+
+```bash
+uname -a
+python3 --version
+node --version
+git --version
+for cli in copilot codex claude agent cursor-agent pi opencode grok qodercli dsh; do command -v "$cli" || true; done
+```
+
+Require Python 3.11+, Node.js 22.12+, Git, the distribution's `python3-venv`
+package, and one authenticated Agent CLI.
+
+### Install — persistent source venv
+
+Choose a persistent directory. Default to `$HOME/Argus` only when it does not
+already contain unrelated data:
 
 ```bash
 git clone https://github.com/lbx154/Argus.git "$HOME/Argus"
 cd "$HOME/Argus"
 python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e .
+ARGUS_BIN="$HOME/Argus/.venv/bin/argus"
+"$ARGUS_BIN" --version
 ```
 
-If `$HOME/Argus` already exists:
+Private-preview collaborators may use the authorized private repository instead.
+If the checkout already exists, inspect `git status`; update only a clean branch
+with `git pull --ff-only`, then refresh the editable install.
 
-1. Verify that it is the Argus repository.
-2. Inspect `git status`.
-3. Never remove or overwrite local changes.
-4. If it is clean, update it with `git pull --ff-only`.
-5. Re-run `.venv/bin/python -m pip install -e .`.
-
-On Windows, use the platform-appropriate virtual-environment executable and
-activation command. Do not assume a POSIX shell.
-
-### 4. Configure the selected backend
-
-From the Argus checkout, run:
-
-```bash
-.venv/bin/argus --setup --non-interactive \
-  --backend <copilot|codex|claude|pi|opencode|grok> \
-  --accept-house-rules
-```
-
-Use the backend selected in steps 1-2. Do not silently switch to another
-provider after a failed readiness check. Diagnose the reported failure first,
-then either fix it or ask the user to choose another installed backend.
-
-### 5. Verify the installation
-
-Run:
-
-```bash
-.venv/bin/argus --doctor
-.venv/bin/argus --status
-```
-
-The task is complete only when `argus --doctor` reports that the installation
-and selected backend are ready. Do not claim success based only on a successful
-package installation.
-
-If the user wants `argus` available outside the checkout, offer a safe PATH or
-launcher option appropriate for their operating system. Do not edit shell
-startup files without approval.
-
-### 6. Report the result
-
-Tell the user:
-
-- the Argus installation directory;
-- the selected backend;
-- whether `argus --doctor` passed;
-- the exact command to start Argus;
-- any remaining manual action.
-
-Typical launch commands:
+### Configure and verify
 
 ```bash
 cd "$HOME/Argus"
-.venv/bin/argus
+"$ARGUS_BIN" --setup --non-interactive \
+  --backend <copilot|codex|claude|cursor|pi|opencode|grok|qoder|dsh>
+"$ARGUS_BIN" doctor --deep --advisor auto
+"$ARGUS_BIN" --status
 ```
 
-Web UI:
+Linux keeps the explicit venv because server Python/CUDA dependencies and
+long-running process ownership must remain reproducible. Never substitute a
+global `argus`; it may be stale. If venv creation reports missing `ensurepip`,
+install the distribution's `python3-venv` package and retry.
+
+## Confirm the backend model selector
+
+Setup validates the model it will send before reporting success. Also run
+`<exact-argus-executable> --config-help` and inspect each role's effective value
+and source.
+Backend catalog commands include `pi --list-models`, `opencode auth list`, and
+`qodercli --list-models`. If the selected id is not in that account's catalog,
+set `ARGUS_SKILL_MODEL` or a role-specific model knob before rerunning setup.
+Do not silently switch providers after a failed readiness check.
+
+## OpenAI-compatible endpoint
+
+Setup can configure Pi directly:
 
 ```bash
-cd "$HOME/Argus"
-.venv/bin/argus --web
+ARGUS_SETUP_API_KEY=... argus --setup --non-interactive \
+  --api-url https://api.example.com/v1 \
+  --api-model model-id
 ```
+
+On Windows use a PowerShell environment variable and backtick continuation.
+On macOS/Linux replace `argus` with the exact executable established above.
+Never paste the key into chat or commit it.
+
+## Upgrade and deterministic verification
+
+Use the same install command again on Windows/macOS, including
+`--force-reinstall`/`--force`, then run the exact executable with
+`doctor --advisor none --verify`. On Linux run
+`"$HOME/Argus/.venv/bin/argus" update`, followed by the same deterministic
+verification. Do not invoke a second Agent repair turn merely to prove an
+unchanged installation.
+
+## Completion report
+
+Report:
+
+- operating system and installation method;
+- exact executable used for Argus;
+- selected Agent CLI/backend;
+- effective model and configuration source for each role;
+- whether setup's real Agent turn passed;
+- whether `argus doctor --deep --advisor auto` passed;
+- exact launch command;
+- remaining manual login or PATH action.
+
+If setup or Doctor fails, report the failing stage, executable, concise error,
+and exact next command. Do not claim installation success.

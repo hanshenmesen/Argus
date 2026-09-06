@@ -27,6 +27,7 @@ from ..core.stop_kinds import (
     pause_status_for_stop_kind,
     stop_kind_from_external_interrupt,
 )
+from ..life.context_packet import render_mission_brief
 from .external_work import render_external_work_advisory
 from .round_signals import _review_event_payload
 from .round_state import (
@@ -50,30 +51,24 @@ log = logging.getLogger(__name__)
 
 
 def _previous_review_summary(state: RoundLoopState) -> str:
-    """Render the settled prior verdict as a compact re-review boundary."""
+    """Render the last three verdicts so repetition is visible to Reviewer."""
     if not state.rounds:
         return ""
-    review = state.rounds[-1].review
-    lines = [
-        f"status: {str(review.status or '').strip()}",
-        f"reason: {str(review.reason or '').strip()}",
-        f"next_action: {str(review.next_action or '').strip() or '(none)'}",
-    ]
-    frontier = review.frontier_report if isinstance(review.frontier_report, dict) else {}
-    for key in ("resolved_obligations", "remaining_work", "new_obligations"):
-        values = frontier.get(key)
-        if isinstance(values, list) and values:
-            lines.append(
-                f"{key}: "
-                + "; ".join(str(value).strip() for value in values if str(value).strip())
-            )
+    lines: list[str] = []
+    for record in state.rounds[-3:]:
+        review = record.review
+        status = " ".join(str(review.status or "").split()) or "unknown"
+        reason = " ".join(str(review.reason or "").split()) or "(no reason)"
+        lines.append(
+            f"Round {record.round_index} — {status}: {reason[:600]}"
+        )
     return "\n".join(lines)
 
 
 def _active_manager_directive_for_reviewer(
     supervised_config: "SupervisedConfig",
 ) -> list[str]:
-    """Load the same persistent operator override used by Planner/Engineer."""
+    """Load the Reviewer-trimmed projection from the one operator store."""
     candidates: list[Path] = []
     if supervised_config.engineer_log_path:
         candidates.append(Path(supervised_config.engineer_log_path).expanduser().parent)
@@ -81,7 +76,7 @@ def _active_manager_directive_for_reviewer(
         packet = Path(supervised_config.context_packet_path).expanduser()
         if len(packet.parents) >= 3:
             candidates.append(packet.parents[2])
-    from ..manager.directive import active_manager_directive_message
+    from ..core.operator_context import build_operator_context_block
 
     seen: set[Path] = set()
     for candidate in candidates:
@@ -92,7 +87,7 @@ def _active_manager_directive_for_reviewer(
         if root in seen:
             continue
         seen.add(root)
-        message = active_manager_directive_message(root)
+        message, _revision = build_operator_context_block("reviewer", root)
         if message:
             return [message]
     return []
@@ -121,6 +116,14 @@ class RoundReviewerMixin:
         on_event: Callable[[dict], None] | None,
     ) -> ReviewDecision:
         """Call the Reviewer once; direct project-wiki edits are durable output."""
+        operator_messages = _active_manager_directive_for_reviewer(
+            supervised_config
+        )
+        from ..core.operator_context import operator_context_revision_from_text
+
+        operator_context_revision = operator_context_revision_from_text(
+            "\n".join(operator_messages)
+        )
         reviewer_background_context = ""
         if supervised_config.background_subagent_advisory:
             try:
@@ -155,39 +158,85 @@ class RoundReviewerMixin:
                 "checkpoint. Verify the current Engineer summary and artifacts, then "
                 "return the verdict for this round."
             )
+        mission_brief = render_mission_brief(supervised_config.context_packet_path)
         reviewer_background_context = "\n\n".join(
             part
             for part in (
+                mission_brief,
                 capsule_block,
                 rotation_block,
                 reviewer_background_context,
+                *state.pending_secret_guard_notes,
+                process_ownership_note,
             )
             if part
         )
+        from ..reviewer._core import _parallel_final_review_passes
+
+        preliminary_review = _parallel_final_review_passes(
+            getattr(self.reviewer, "runner", self.reviewer),
+            replace(
+                self.reviewer_config,
+                working_dir=str(workdir),
+                artifact_root=str(workdir),
+                narrative_snapshot_root=(
+                    supervised_config.narrative_snapshot_root or None
+                ),
+                review_policy_context="\n".join(
+                    (objective, original_objective or objective, scope, *operator_messages)
+                ),
+            ),
+        )
+        if preliminary_review is not None:
+            enforcement = supervised_config.narrative_review_enforcement
+            if preliminary_review.backend_unavailable and enforcement == "blocking":
+                return preliminary_review
+            authority_note = (
+                "Shadow calibration only: these new semantic-loss and cold-read signals "
+                "cannot be the sole reason for a blocking verdict. Independently verify a "
+                "finding under the existing scientific, visual, language, or venue contract "
+                "before using it to continue the round."
+                if enforcement != "blocking"
+                else (
+                    "Enforcement is enabled: a substantiated scientific loss or reject-level "
+                    "cold-read failure may block certification."
+                )
+            )
+            reviewer_background_context = "\n\n".join(
+                part
+                for part in (
+                    reviewer_background_context,
+                    "## Independent final-paper passes\n"
+                    "These current host-provided read-only assessments are evidence for your integrated "
+                    "verdict. Resolve conflicts yourself; only your verdict controls the "
+                    "round and is persisted to paper/REVIEW.md. The host reuses PDF-only "
+                    "assessments only when their exact rendered input and policy match. "
+                    "Do not launch duplicate specialist passes or repeat a complete PDF "
+                    "inspection; use targeted checks for a concrete contradiction. Always "
+                    "independently check material changes to code, raw evidence, and claims. "
+                    + authority_note
+                    + "\n"
+                    + preliminary_review.reason,
+                )
+                if part
+            )
         started_at = time.monotonic()
         try:
             review = self.reviewer.evaluate(
+                operation="evaluate",
                 objective=objective,
                 original_objective=original_objective or objective,
-                operator_messages=_active_manager_directive_for_reviewer(
-                    supervised_config
-                ),
+                operator_messages=operator_messages,
                 round_index=round_index,
                 round_max=supervised_config.max_rounds,
                 session_id=supervised_config.session_id,
-                main_summary=(
-                    "\n\n".join(
-                        part
-                        for part in (
-                            engineer_message or "(no message)",
-                            *state.pending_secret_guard_notes,
-                            process_ownership_note,
-                        )
-                        if part
-                    )
-                ),
+                main_summary=engineer_message or "(no message)",
                 main_error=safe_fatal_error,
-                config=replace(self.reviewer_config, working_dir=str(workdir)),
+                config=replace(
+                    self.reviewer_config,
+                    working_dir=str(workdir),
+                    artifact_root=str(workdir),
+                ),
                 prev_review_summary=_previous_review_summary(state),
                 scope=scope,
                 checkpoint_path=str(checkpoint_path or ""),
@@ -195,10 +244,8 @@ class RoundReviewerMixin:
                 escalate_hint=escalate_hint,
                 engineer_log_path=supervised_config.engineer_log_path,
                 engineer_call_id=(
-                    str(getattr(engineer_result, "call_id", "") or "")
-                    if bool(
-                        getattr(engineer_result, "call_id_log_correlated", False)
-                    )
+                    str(engineer_result.call_id or "")
+                    if engineer_result.call_id_log_correlated
                     else ""
                 ),
                 preselected_skill_block=reviewer_skill_block,
@@ -219,10 +266,11 @@ class RoundReviewerMixin:
                 backend_unavailable=True,
                 backend_stop_kind="backend_unavailable",
             )
+        session_metadata_persisted = True
         if reviewer_session is not None:
             if reviewer_resume_id and not review.session_resumed:
                 reviewer_session.rotate("static_context_changed")
-            reviewer_session.complete(
+            session_metadata_persisted = reviewer_session.complete(
                 review,
                 decisive_output="\n".join(
                     part for part in (review.reason, review.next_action) if part
@@ -255,21 +303,28 @@ class RoundReviewerMixin:
                 "prompt_chars": prompt_chars,
                 "prompt_estimated_tokens": (prompt_chars + 3) // 4,
                 "capsule_path": str(reviewer_session.path or ""),
+                "metadata_persisted": session_metadata_persisted,
+                "persistence_warning": reviewer_session.persistence_error,
+                "operator_context_revision": operator_context_revision,
             })
         signal = review.session_signal if isinstance(review.session_signal, dict) else {}
         signal_kind = str(signal.get("kind") or "").strip()
         signal_target = str(signal.get("target") or "").strip()
         signal_detail = str(signal.get("detail") or "").strip()
-        if signal_kind and signal_target and supervised_config.role_session_policy != "fresh":
+        if signal_kind and signal_target:
             target_session = {
                 "engineer": state.engineer_session,
                 "reviewer": reviewer_session,
             }.get(signal_target)
             applied = False
-            if target_session is not None:
+            effective_policy = getattr(target_session, "policy", "fresh")
+            if target_session is not None and target_session.policy != "fresh":
                 target_session.signal(signal_kind, signal_detail)
                 applied = True
             elif signal_target == "planner" and supervised_config.role_session_dir:
+                # A planner capsule exists only for a resumable policy. Avoid
+                # materialising rotation metadata for a fresh-only backend.
+                effective_policy = supervised_config.role_session_policy
                 from ..core.role_session import signal_role_session_file
 
                 applied = signal_role_session_file(
@@ -281,7 +336,7 @@ class RoundReviewerMixin:
                 on_event({
                     "type": EventType.ROLE_SESSION_TURN,
                     "role": signal_target,
-                    "policy": supervised_config.role_session_policy,
+                    "policy": effective_policy,
                     "action": "rotated",
                     "rotation_reason": f"signal:{signal_kind}",
                     "round_index": round_index,
@@ -330,38 +385,18 @@ class RoundReviewerMixin:
                 "round_max": supervised_config.max_rounds,
                 "session_id": supervised_config.session_id,
             })
-        # Anti-livelock escalation hint: past the soft round limit, tell the
-        # reviewer to escalate an unresolvable EXTERNAL blocker to `blocked`
-        # (which ends the mission) rather than looping `continue` forever.
+        # State the harness rule before it can fire so the Reviewer knows that
+        # an explicit true progress judgment preserves productive long work.
         escalate_hint = ""
         if (
             supervised_config.soft_round_limit
             and round_index >= supervised_config.soft_round_limit
         ):
             escalate_hint = (
-                f"This mission has now run {round_index} rounds without "
-                "reaching `done`. If the binding constraint is an EXTERNAL "
-                "blocker the engineer cannot resolve by itself — infrastructure, "
-                "GPU quota / preemption, missing credentials, or a host that "
-                "stays unreachable after retries — return status=`blocked` with "
-                "a precise operator ask INSTEAD of `continue`. Do not keep "
-                "looping on an unresolvable external dependency.\n"
-                "This also applies to an INTERNAL blocker: if the last 2+ "
-                "rounds have independently re-derived the SAME root-cause "
-                "finding that a frozen upstream artifact/contract (e.g. plan, "
-                "run contract, curriculum, checklist) is defective and the fix "
-                "requires a Manager-owned stage rollback or edit this mission's "
-                "own scope forbids performing, do not keep re-verifying that "
-                "same finding. Return status=`blocked` with `reason` naming the "
-                "repeated finding and the exact stage/artifact that needs "
-                "Manager-owned repair, so the mission ends now and control "
-                "returns to the Planner/Manager instead of waiting for the "
-                "hard continuation boundary. At or beyond that boundary, set "
-                "planner_report.forward_progress explicitly: use true when the "
-                "task frontier is still advancing, even if a local metric has "
-                "temporarily regressed; use false for a genuine no-progress "
-                "round. Do not call productive work blocked merely because the "
-                "round count is high."
+                f"After round {supervised_config.soft_round_limit}, the harness "
+                "settles the mission as stalled when neither of the last two "
+                "Reviewer verdicts has `forward_progress=true`; genuine progress "
+                "continues normally."
             )
             if on_event and round_index == supervised_config.soft_round_limit:
                 on_event({
@@ -371,8 +406,8 @@ class RoundReviewerMixin:
                     "hard_escalate_rounds": supervised_config.hard_escalate_rounds,
                     "text": (
                         f"round {round_index} reached soft limit "
-                        f"{supervised_config.soft_round_limit}: reviewer asked to "
-                        "escalate external blockers to `blocked`"
+                        f"{supervised_config.soft_round_limit}: reviewer told the "
+                        "enforced two-verdict progress rule"
                     ),
                 })
         # Evaluate the reviewer, retrying ONLY the reviewer on an infra flake.
@@ -399,19 +434,16 @@ class RoundReviewerMixin:
                 state=state,
                 on_event=on_event,
             )
-            reviewer_fatal_error = str(
-                getattr(review, "backend_fatal_error", "") or "")
-            reviewer_exit_code = int(
-                getattr(review, "backend_exit_code", 0) or 0
-            )
+            reviewer_fatal_error = str(review.backend_fatal_error or "")
+            reviewer_exit_code = int(review.backend_exit_code or 0)
             reviewer_stop_kind = normalize_stop_kind(
-                getattr(review, "backend_stop_kind", None)
+                review.backend_stop_kind
             ) or stop_kind_from_external_interrupt(reviewer_fatal_error)
             reviewer_pause_status = pause_status_for_stop_kind(
                 reviewer_stop_kind
             )
             if (
-                getattr(review, "backend_unavailable", False)
+                review.backend_unavailable
                 and reviewer_stop_kind in NON_FAILURE_STOP_KINDS
                 and reviewer_pause_status
             ):
@@ -438,10 +470,7 @@ class RoundReviewerMixin:
                     review.reason,
                     None,
                 ))
-            if (
-                getattr(review, "backend_unavailable", False)
-                and reviewer_stop_kind == "permanent_error"
-            ):
+            if review.backend_unavailable and reviewer_stop_kind == "permanent_error":
                 state.rounds.append(RoundRecord(
                     round_index=round_index,
                     engineer_message=engineer_message,
@@ -458,7 +487,7 @@ class RoundReviewerMixin:
                     None,
                 ))
             if (
-                getattr(review, "backend_unavailable", False)
+                review.backend_unavailable
                 and (
                     reviewer_stop_kind == "operator_abort"
                     or fatal_error_looks_like_operator_abort_request(
@@ -472,17 +501,11 @@ class RoundReviewerMixin:
                 )
                 interrupted_review = replace(
                     interrupted_review,
-                    input_tokens=int(getattr(review, "input_tokens", 0) or 0),
-                    cached_input_tokens=int(
-                        getattr(review, "cached_input_tokens", 0) or 0
-                    ),
-                    output_tokens=int(getattr(review, "output_tokens", 0) or 0),
-                    reasoning_output_tokens=int(
-                        getattr(review, "reasoning_output_tokens", 0) or 0
-                    ),
-                    premium_requests=float(
-                        getattr(review, "premium_requests", 0.0) or 0.0
-                    ),
+                    input_tokens=int(review.input_tokens or 0),
+                    cached_input_tokens=int(review.cached_input_tokens or 0),
+                    output_tokens=int(review.output_tokens or 0),
+                    reasoning_output_tokens=int(review.reasoning_output_tokens or 0),
+                    premium_requests=float(review.premium_requests or 0.0),
                 )
                 if on_event:
                     on_event(_review_event_payload(
@@ -508,7 +531,7 @@ class RoundReviewerMixin:
                     None,
                 ))
             if (
-                getattr(review, "backend_unavailable", False)
+                review.backend_unavailable
                 and (
                     reviewer_stop_kind == "daemon_shutdown"
                     or fatal_error_looks_like_daemon_stop_request(
@@ -547,7 +570,7 @@ class RoundReviewerMixin:
             # a silent continuation. Use the same retry and escalation path as
             # Engineer backend failures. A genuine `blocked` verdict remains a
             # model decision and follows normal classification.
-            if not getattr(review, "backend_unavailable", False):
+            if not review.backend_unavailable:
                 break
             state.reviewer_backend_failure_streak += 1
             rb_threshold = max(
@@ -580,7 +603,10 @@ class RoundReviewerMixin:
                 })
             if (
                 state.reviewer_backend_failure_streak >= rb_threshold
-                or round_index >= supervised_config.max_rounds
+                or (
+                    supervised_config.max_rounds > 0
+                    and round_index >= supervised_config.max_rounds
+                )
             ):
                 # Failing loud: record this round (with the in-hand engineer
                 # output) and stop — do not run the completion gate blind.

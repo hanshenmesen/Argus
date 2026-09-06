@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from ..attachments import _windows_guard_directory_chain, _windows_guard_path
 from .context import ServerContext
 
 _MAX_ENTRIES = 6_000
@@ -57,7 +58,11 @@ class FinalReviewIn(BaseModel):
 
 
 def _allowed_bases() -> list[Path]:
-    configured = [item for item in os.getenv("ARGUS_V2_ALLOWED_ROOTS", "").split(":") if item.strip()]
+    configured = [
+        item
+        for item in os.getenv("ARGUS_V2_ALLOWED_ROOTS", "").split(os.pathsep)
+        if item.strip()
+    ]
     bases: list[Path] = []
     for value in configured:
         try:
@@ -94,7 +99,7 @@ def _inside(parent: Path, child: Path) -> bool:
 def _safe_root(raw: str) -> Path:
     resolved = _resolved_directory(raw)
     bases = _allowed_bases()
-    if not bases or not any(_inside(base, resolved) for base in bases):
+    if not any(_inside(base, resolved) for base in bases):
         raise HTTPException(status_code=400, detail="workspace root is outside the allowed data roots")
     return resolved
 
@@ -124,7 +129,7 @@ def _workspace_profiles(ctx: ServerContext, sid: str) -> list[dict[str, Any]]:
             continue
         add_profile({
             "id": f"project:{row_sid}",
-            "label": str(row.get("display_name") or row.get("label") or row_sid or root.name),
+            "label": str(row.get("display_name") or row.get("label") or row_sid),
             "path": str(root),
             "source": "project",
             "project_sid": row_sid,
@@ -218,6 +223,8 @@ def _open_confined_file(root: Path, raw_path: str) -> tuple[int, os.stat_result]
     relative = PurePosixPath(raw)
     if not raw or relative.is_absolute() or ".." in relative.parts or not relative.parts:
         raise HTTPException(status_code=400, detail="invalid workspace file path")
+    if os.name == "nt":
+        return _open_confined_file_windows(root, relative)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     current_fd = _open_workspace_root_fd(root)
@@ -276,6 +283,8 @@ def _read_confined_bytes(root: Path, path: str, max_bytes: int) -> bytes:
 def _atomic_write_confined(root: Path, directory: str, name: str, payload: bytes) -> str:
     if not name or "/" in name or "\\" in name or name in {".", ".."}:
         raise HTTPException(status_code=400, detail="invalid output filename")
+    if os.name == "nt":
+        return _atomic_write_confined_windows(root, directory, name, payload)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     current_fd = _open_workspace_root_fd(root)
@@ -316,6 +325,134 @@ def _atomic_write_confined(root: Path, directory: str, name: str, payload: bytes
     return PurePosixPath(directory, name).as_posix()
 
 
+def _windows_path_part(part: str, *, kind: str) -> str:
+    if (
+        not part
+        or part in {".", ".."}
+        or "/" in part
+        or "\\" in part
+        or ":" in part
+        or part.endswith((" ", "."))
+    ):
+        raise HTTPException(status_code=400, detail=f"invalid {kind}")
+    return part
+
+
+def _open_confined_file_windows(
+    root: Path,
+    relative: PurePosixPath,
+) -> tuple[int, os.stat_result]:
+    """Open a Windows workspace file while rejecting links and junctions.
+
+    Directory handles stay open without ``FILE_SHARE_DELETE`` until the file
+    descriptor is acquired, so a verified component cannot be swapped during
+    traversal. The returned descriptor pins the verified regular file after
+    the guards close.
+    """
+    with contextlib.ExitStack() as stack:
+        current = _windows_guard_directory_chain(root, stack)
+        for raw_part in relative.parts[:-1]:
+            part = _windows_path_part(raw_part, kind="workspace directory")
+            current = current / part
+            try:
+                stack.enter_context(_windows_guard_path(current, directory=True))
+            except (OSError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"workspace directory unavailable: {part}",
+                ) from exc
+        name = _windows_path_part(relative.parts[-1], kind="workspace file path")
+        target = current / name
+        try:
+            stack.enter_context(_windows_guard_path(target, directory=False))
+            descriptor = os.open(
+                target,
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOINHERIT", 0),
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="workspace file unavailable or symlinked",
+            ) from exc
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise HTTPException(
+                    status_code=400,
+                    detail="workspace path is not a regular file",
+                )
+            return descriptor, info
+        except Exception:
+            os.close(descriptor)
+            raise
+
+
+def _atomic_write_confined_windows(
+    root: Path,
+    directory: str,
+    name: str,
+    payload: bytes,
+) -> str:
+    name = _windows_path_part(name, kind="output filename")
+    parts = PurePosixPath(str(directory or "").replace("\\", "/")).parts
+    if not parts:
+        raise HTTPException(status_code=400, detail="invalid output directory")
+    temporary = f".{name}.tmp-{os.getpid()}-{time.time_ns()}"
+    descriptor: int | None = None
+    with contextlib.ExitStack() as stack:
+        current = _windows_guard_directory_chain(root, stack)
+        for raw_part in parts:
+            part = _windows_path_part(raw_part, kind="output directory")
+            child = current / part
+            try:
+                child.mkdir()
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=409, detail="output directory unavailable"
+                ) from exc
+            try:
+                stack.enter_context(_windows_guard_path(child, directory=True))
+            except (OSError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="output directory is symlinked or unavailable",
+                ) from exc
+            current = child
+        target = current / name
+        temporary_path = current / temporary
+        try:
+            descriptor = os.open(
+                temporary_path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOINHERIT", 0),
+            )
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            os.replace(temporary_path, target)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=409, detail="failed to write review manifest"
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            with contextlib.suppress(FileNotFoundError):
+                temporary_path.unlink()
+    return PurePosixPath(directory, name).as_posix()
+
+
 def _skip_dir(name: str) -> bool:
     return name in _SKIP_NAMES or name == ".venv" or name.startswith(".venv-")
 
@@ -351,12 +488,16 @@ def _scan_tree(root: Path) -> dict[str, Any]:
                 truncated = True
                 return
             try:
-                stat = child.lstat()
+                info = child.lstat()
             except OSError:
                 continue
             relative = child.relative_to(root).as_posix()
             suffix = child.suffix.lower()
-            if child.is_symlink():
+            is_reparse = bool(
+                int(getattr(info, "st_file_attributes", 0))
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            )
+            if child.is_symlink() or is_reparse:
                 kind = "symlink"
                 skipped = False
             elif child.is_dir():
@@ -371,8 +512,8 @@ def _scan_tree(root: Path) -> dict[str, Any]:
                 "path": relative,
                 "name": child.name,
                 "type": kind,
-                "size": int(stat.st_size) if kind != "directory" else 0,
-                "mtime": float(stat.st_mtime),
+                "size": int(info.st_size) if kind != "directory" else 0,
+                "mtime": float(info.st_mtime),
                 "extension": suffix if kind == "file" else "",
             }
             if skipped:
@@ -404,7 +545,7 @@ def _git(root: Path, *args: str, max_bytes: int = 2 * 1024 * 1024) -> str:
     argv = [
         "git",
         "-c", "core.fsmonitor=false",
-        "-c", "core.hooksPath=/dev/null",
+        "-c", f"core.hooksPath={os.devnull}",
         "-c", "diff.external=",
         "-c", "color.ui=false",
         "-C", str(root),
@@ -413,20 +554,14 @@ def _git(root: Path, *args: str, max_bytes: int = 2 * 1024 * 1024) -> str:
     process: subprocess.Popen[bytes] | None = None
     selector = selectors.DefaultSelector()
     payload = bytearray()
-    truncated = timed_out = False
+    truncated = False
     try:
         process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=safe_env)
         assert process.stdout is not None
         os.set_blocking(process.stdout.fileno(), False)
         selector.register(process.stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + 8.0
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                process.kill()
-                break
-            for key, _mask in selector.select(timeout=min(.1, remaining)):
+            for key, _mask in selector.select(timeout=.1):
                 try:
                     chunk = os.read(key.fileobj.fileno(), min(64 * 1024, max_bytes + 1 - len(payload)))
                 except BlockingIOError:
@@ -459,7 +594,7 @@ def _git(root: Path, *args: str, max_bytes: int = 2 * 1024 * 1024) -> str:
         return ""
     finally:
         selector.close()
-    if timed_out or process is None or (process.returncode not in {0, -9} and not truncated):
+    if process.returncode not in {0, -9} and not truncated:
         return ""
     text = bytes(payload[:max_bytes]).decode("utf-8", errors="replace")
     return text + ("\n… output truncated\n" if truncated else "")
@@ -485,7 +620,7 @@ def _github_status() -> dict[str, Any]:
         payload = json.loads(result.stdout or "{}")
         rows = payload.get("hosts", {}).get("github.com", [])
         active = next((row for row in rows if row.get("active")), rows[0] if rows else None)
-    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, AttributeError):
         active = None
     if not isinstance(active, dict):
         return {"authenticated": False, "host": "github.com", "login": "", "protocol": "", "scopes": []}
@@ -772,12 +907,11 @@ def register_workspace_v2_routes(app, ctx: ServerContext, server_mod) -> None:
         manuscript_path = body.manuscript_path or _latest_manuscript(workspace)
         if not manuscript_path:
             raise HTTPException(status_code=409, detail="no final manuscript was found in the approved project workspace")
-        if manuscript_path:
-            suffix = PurePosixPath(manuscript_path).suffix.lower()
-            if suffix not in {".tex", ".md", ".pdf"}:
-                raise HTTPException(status_code=415, detail="final manuscript must be TeX, Markdown, or PDF")
-            fd, _info = _open_confined_file(workspace, manuscript_path)
-            os.close(fd)
+        suffix = PurePosixPath(manuscript_path).suffix.lower()
+        if suffix not in {".tex", ".md", ".pdf"}:
+            raise HTTPException(status_code=415, detail="final manuscript must be TeX, Markdown, or PDF")
+        fd, _info = _open_confined_file(workspace, manuscript_path)
+        os.close(fd)
         created_at = time.time()
         request_id = f"fr-{time.time_ns()}"
         report_path = f"reviews/final_review_{request_id}.md"

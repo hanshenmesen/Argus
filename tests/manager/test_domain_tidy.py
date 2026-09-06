@@ -44,7 +44,7 @@ def _seed_proven_domain(tmp_path):
             ],
         },
     )
-    state = tmp_path / "research" / "PIPELINE_STATE.json"
+    state = tmp_path / ".argus" / "PIPELINE_STATE.json"
     payload = json.loads(state.read_text())
     payload.update({"current_stage": "simulate", "stages": {"scope": {"status": "done"}}})
     state.write_text(json.dumps(payload))
@@ -62,7 +62,8 @@ def test_proposes_only_when_proven(tmp_path, monkeypatch):
     # No PIPELINE_STATE → not proven → no proposal.
     assert dt.propose_promotions(tmp_path) == []
     # Mark a stage done → proven.
-    state = tmp_path / "research" / "PIPELINE_STATE.json"
+    state = tmp_path / ".argus" / "PIPELINE_STATE.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(
         json.dumps({"current_stage": "simulate", "stages": {"scope": {"status": "done"}}})
     )
@@ -152,7 +153,8 @@ def test_render_preserves_seed_plus_custom_items(tmp_path):
 
     # PIPELINE_STATE: vertical = robotics_sim (so seed_items_for resolves correctly)
     # and one stage done so the domain is "proven".
-    state = tmp_path / "research" / "PIPELINE_STATE.json"
+    state = tmp_path / ".argus" / "PIPELINE_STATE.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(
         json.dumps(
             {

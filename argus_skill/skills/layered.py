@@ -1,9 +1,4 @@
-"""Path-only layered Skill libraries.
-
-Project, workflow/domain, and global libraries remain separate filesystem roots.
-Agents receive those roots and search them directly; the runtime does not parse,
-match, rank, copy, or rewrite Skill documents.
-"""
+"""Layered Skill-library roots used by bounded recall and native discovery."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -33,10 +28,31 @@ class LayeredSkillStore:
         project_dir: Path,
         global_dir: Path,
         vertical_dir: Path | None = None,
+        native_project_dir: Path | None = None,
+        execution_project_root: Path | None = None,
     ) -> None:
         self.project = SkillStore(Path(project_dir))
         self.global_ = SkillStore(Path(global_dir))
         self.vertical = SkillStore(Path(vertical_dir)) if vertical_dir else None
+        native_project_path = (
+            Path(native_project_dir) if native_project_dir is not None else None
+        )
+        # Unlike managed stores, an Agent Skills root is discovery-only: never
+        # create it, and preserve the old root set when the directory is absent.
+        self._execution_project_root = (
+            Path(execution_project_root).resolve()
+            if execution_project_root is not None
+            else (
+                native_project_path.parent.parent.resolve()
+                if native_project_path is not None
+                else None
+            )
+        )
+        self._native_project_root = (
+            native_project_path.resolve()
+            if native_project_path is not None and native_project_path.is_dir()
+            else None
+        )
         self._project_root = self.project.skills_dir.resolve()
         self._global_root = self.global_.skills_dir.resolve()
         self._vertical_root = (
@@ -47,12 +63,26 @@ class LayeredSkillStore:
     def skills_dir(self) -> Path:
         return self.project.skills_dir
 
+    def native_project_roots(self) -> list[Path]:
+        """Return unscoped project roots for an Agent Skills native loader."""
+        root = self._native_project_root
+        project_root = self._execution_project_root
+        if root is None or project_root is None or not root.is_dir():
+            return []
+        try:
+            resolved_root = root.resolve(strict=True)
+            resolved_root.relative_to(project_root)
+            for child in root.rglob("*"):
+                child.resolve(strict=True).relative_to(project_root)
+        except (OSError, RuntimeError, ValueError):
+            return []
+        return [resolved_root]
+
     def library_roots(self) -> list[Path]:
-        roots = [self._project_root]
-        if self._vertical_root is not None:
-            roots.append(self._vertical_root)
-        if self._global_root not in roots:
-            roots.append(self._global_root)
+        roots = self.native_project_roots()
+        for root in (self._project_root, self._vertical_root, self._global_root):
+            if root is not None and root not in roots:
+                roots.append(root)
         return roots
 
     def layer_for_path(self, path: str | Path) -> str | None:
@@ -102,13 +132,26 @@ class LayeredSkillStore:
                 rows.append({**row, "layer": layer})
         return rows
 
+    def _is_native_project_path(self, path: str | Path) -> bool:
+        if self._native_project_root is None:
+            return False
+        try:
+            Path(path).resolve().relative_to(self._native_project_root)
+            return True
+        except ValueError:
+            return False
+
     def save(self, skill: Skill) -> Path:
         # New writes are project-local unless their explicit path already points
-        # into another configured root.
+        # into another configured root. Agent Skills roots remain read-only.
+        if skill.path and self._is_native_project_path(skill.path):
+            raise PermissionError("native project Skills are read-only")
         layer = self.layer_for_path(skill.path) if skill.path else LAYER_PROJECT
         return self.store_for_layer(layer or LAYER_PROJECT).save(skill)
 
     def archive_path(self, path: str | Path) -> Path:
+        if self._is_native_project_path(path):
+            raise PermissionError("native project Skills are read-only")
         layer = self.layer_for_path(path)
         if layer != LAYER_PROJECT:
             raise PermissionError("only project-local Skills may be archived here")

@@ -8,7 +8,9 @@ an unknown project 404s.
 """
 from __future__ import annotations
 
+import errno
 import json
+import os
 import queue
 import threading
 import time
@@ -23,7 +25,8 @@ from argus_skill.core.session import (
     read_session_meta,
     write_session_meta,
 )
-from argus_skill.life.memory import BacklogItem, LifeMemory
+from argus_skill.core.transcript import append_turn
+from argus_skill.life.memory import Backlog, BacklogItem, LifeMemory
 from argus_skill.manager import Manager, config_intent, dispatch, front_door
 from argus_skill.manager.domain_author import VerticalDecision
 from argus_skill.webapi import (
@@ -284,6 +287,9 @@ def test_followup_self_turn_disables_stateless_fast_reply(
     manager_state._STATES.clear()
     state = manager_state._chat_state_for(sid)
     state["turns"] = 1
+    append_turn(life, "operator", "Proceedings of the AMS 是什么期刊？")
+    append_turn(life, "argus", "它是美国数学会的综合性数学期刊。")
+    seen: dict[str, str] = {}
 
     def classify(mem, text, chat_state, **kwargs):
         chat_state["_frontdoor_self_mode"] = "reply"
@@ -291,11 +297,11 @@ def test_followup_self_turn_disables_stateless_fast_reply(
         return None, None, "simple"
 
     monkeypatch.setattr(config_intent, "_front_door_classify", classify)
-    monkeypatch.setattr(
-        front_door,
-        "manager_triage",
-        lambda *args, **kwargs: "Your name is Xiaobei.",
-    )
+    def triage(*args, **kwargs):
+        seen["body"] = args[1]
+        return "Your name is Xiaobei."
+
+    monkeypatch.setattr(front_door, "manager_triage", triage)
 
     result = manager_bridge.manager_message(
         sid,
@@ -304,6 +310,8 @@ def test_followup_self_turn_disables_stateless_fast_reply(
     )
 
     assert result == {"kind": "chat", "reply": "Your name is Xiaobei."}
+    assert "Proceedings of the AMS" in seen["body"]
+    assert "[CURRENT OPERATOR MESSAGE]\nWhat was my name?" in seen["body"]
     assert LifeMemory.open(life).backlog.all() == []
 
 
@@ -397,7 +405,7 @@ def test_explicit_authorization_persists_current_blocker_and_never_dispatches(
     identity = store.campaign_identity()
     evidence = workdir / "research" / "RESULT.json"
     evidence.parent.mkdir()
-    evidence.write_text('{"decision":"NO_GO"}', encoding="utf-8")
+    evidence.write_text('{"decision":"rejected"}', encoding="utf-8")
     validator = workdir / "tests" / "test_terminal_contract.py"
     validator.parent.mkdir()
     validator.write_text("def test_contract(): pass\n", encoding="utf-8")
@@ -447,6 +455,11 @@ def test_explicit_authorization_persists_current_blocker_and_never_dispatches(
         "validator_repair",
         "acceptance_retry",
     ]
+    assert result["reply"] == (
+        "Authorization saved for the current blocker. "
+        "The team can use it when the task resumes."
+    )
+    assert result["authorization_id"] not in result["reply"]
     event = store.get_authorization(result["authorization_id"])
     assert event is not None
     assert event["source_channel"] == "vscode"
@@ -556,20 +569,25 @@ def test_repeated_greeting_calls_frontdoor_every_time_without_cache(
         return None, None, "simple"
 
     monkeypatch.setattr(config_intent, "_front_door_classify", classify)
-    monkeypatch.setattr(
-        front_door,
-        "manager_triage",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("pure greeting must not make a second model call")
-        ),
-    )
+    triage_bodies: list[str] = []
+
+    def triage(mem, body, chat_state, **kwargs):
+        triage_bodies.append(body)
+        return "一切正常，任务仍在推进。"
+
+    monkeypatch.setattr(front_door, "manager_triage", triage)
 
     first = manager_bridge.manager_message(sid, "你好", global_root=tmp_path)
     second = manager_bridge.manager_message(sid, "你好", global_root=tmp_path)
 
-    expected = {"kind": "chat", "reply": "你好，我是 Argus Manager。"}
-    assert first == expected
-    assert second == expected
+    # Turn 1 has no prior context: the classifier's greeting reply is returned
+    # inline without a second model call.
+    assert first == {"kind": "chat", "reply": "你好，我是 Argus Manager。"}
+    # Turn 2 carries prior-turn context, so the greeting is answered by the
+    # persistent Manager rather than a replayed classifier reply.
+    assert second == {"kind": "chat", "reply": "一切正常，任务仍在推进。"}
+    assert len(triage_bodies) == 1
+    # The classifier ran on both turns — greeting replies are never cached.
     assert classify_calls == 2
 
 
@@ -684,6 +702,9 @@ def test_natural_pause_is_frontdoor_control_after_pending_question_manager_check
     assert result["control"] == "pause"
     assert result["pause_persisted"] is True
     assert result["item_id"] == running.id
+    assert "已暂停" in result["reply"]
+    assert "后台工作进程" in result["reply"]
+    assert "daemon" not in result["reply"]
     assert read_continuous_state(life).enabled is False
     assert (life / "running_item_abort.json").exists()
     stored = LifeMemory.open(life).backlog.all()
@@ -834,7 +855,15 @@ def test_frontdoor_classifier_failure_never_dispatches_unclassified_message(
         return None, None, "complex"
 
     monkeypatch.setattr(config_intent, "_front_door_classify", failed_classify)
-    monkeypatch.setattr(front_door, "manager_triage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        front_door,
+        "manager_triage",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "a failed classifier must not start another Manager turn"
+            )
+        ),
+    )
 
     result = manager_bridge.manager_message(
         sid,
@@ -844,6 +873,8 @@ def test_frontdoor_classifier_failure_never_dispatches_unclassified_message(
 
     assert result["kind"] == "chat"
     assert result["reply"].startswith("[not dispatched]")
+    assert "Manager backend" in result["reply"]
+    assert "argus doctor --deep" in result["reply"]
     assert LifeMemory.open(life).backlog.all() == []
 
 
@@ -927,6 +958,7 @@ def test_manager_steer_persists_high_priority_live_directive(
             "根据来源证据安排下一节点。"
         )
         chat_state["_frontdoor_lifetime"] = "standing"
+        chat_state["_frontdoor_operator_question_policy"] = "forbid"
         return None, "steer", "simple"
 
     monkeypatch.setattr(config_intent, "_front_door_classify", classify)
@@ -953,7 +985,7 @@ def test_manager_steer_persists_high_priority_live_directive(
         json.loads(line)
         for line in (life / "inbox.jsonl").read_text().splitlines()
     ]
-    assert "MANAGER STEERING" in inbox[-1]["text"]
+    assert "Operator steering (standing)" in inbox[-1]["text"]
     assert "检索最接近的前人研究" in inbox[-1]["text"]
     assert "发明新的数学工具" not in inbox[-1]["text"]
     from argus_skill.manager.directive import load_active_manager_directive
@@ -962,6 +994,7 @@ def test_manager_steer_persists_high_priority_live_directive(
     assert active is not None
     assert "检索最接近的前人研究" in active.text
     assert "发明新的数学工具" not in active.text
+    assert active.operator_question_policy == "forbid"
     from argus_skill.daemon.state import read_continuous_state
 
     continuous = read_continuous_state(life)
@@ -1051,6 +1084,43 @@ def test_manager_handoff_failure_persists_and_streams_error_reply(
         event.get("type") == "ui.argus" and event.get("text") == result["reply"]
         for event in events
     )
+
+
+def test_mission_write_failure_is_visible_and_keeps_pending_item(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sid = "s-mission-write-failure"
+    life = _make_project(tmp_path, sid)
+    target = life / "backlog.jsonl"
+    fragments: list[tuple[str, dict]] = []
+
+    def fail_save(backlog: Backlog, _items) -> None:
+        assert backlog.path == target
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(target))
+
+    monkeypatch.setattr(Backlog, "_save", fail_save)
+    result = manager_bridge.manager_message(
+        sid,
+        "preserve this mission",
+        global_root=tmp_path,
+        on_fragment=lambda kind, payload: fragments.append((kind, payload)),
+    )
+
+    assert result["kind"] == "error"
+    assert str(target) in result["reply"]
+    assert f"[Errno {errno.ENOSPC}] {os.strerror(errno.ENOSPC)}" in result["reply"]
+    assert any(
+        kind == "delta" and payload.get("text") == result["reply"]
+        for kind, payload in fragments
+    )
+    pending = manager_state._STATES[sid]["_pending_missions"][-1]
+    assert len(pending) == 1
+    assert pending[0].status == "pending"
+    assert pending[0].original_objective == "preserve this mission"
+    assert result["item"]["id"] == pending[0].id
+    assert result["item"]["status"] == "pending"
+    assert LifeMemory.open(life).backlog.all() == []
 
 
 def test_active_mission_team_message_uses_continuous_dispatch(
@@ -1470,7 +1540,7 @@ def test_manager_decided_math_vertical_web_enqueue_enters_backlog(
     assert len(backlog) == 1
     assert backlog[0].objective == objective
     state = json.loads(
-        (life / "research" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
+        (life / ".argus" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
     )
     assert state["vertical"] == "math"
     assert state["research_target_level"] == "exploratory"
@@ -1542,8 +1612,9 @@ def test_explicit_pending_answer_continues_without_a_model_call(
     assert "Inherited blocked mission objective" in continuation.objective
     assert continuation.iterate is False
     assert continuation.tags == [
-        "paper", "operator-reply", "manager-approved",
+        "paper", "operator-reply", "manager-approved", "review:required",
     ]
+    assert continuation.manager_decision == {"routed": True}
     assert "MANAGER OPERATOR-ANSWER DECISION" in (
         life / "inbox.jsonl"
     ).read_text(encoding="utf-8")
@@ -1640,7 +1711,7 @@ def test_manager_message_resolves_single_pending_question(
 ) -> None:
     life = _make_project(tmp_path)
     blocked = BacklogItem.new(title="Choose GPU", objective="Run the matrix")
-    blocked.status = "failed"
+    blocked.status = "paused_operator"
     blocked.pending_question = "Which GPU may I use?"
     LifeMemory.open(life).backlog.add(blocked)
     monkeypatch.setattr(
@@ -1674,7 +1745,7 @@ def test_non_answer_message_falls_through_without_clearing_pending_question(
 ) -> None:
     life = _make_project(tmp_path)
     blocked = BacklogItem.new(title="Choose GPU", objective="Run the matrix")
-    blocked.status = "failed"
+    blocked.status = "paused_operator"
     blocked.pending_question = "Which GPU may I use?"
     LifeMemory.open(life).backlog.add(blocked)
     monkeypatch.setattr(
@@ -1706,7 +1777,7 @@ def test_manager_keeps_pending_question_when_answer_is_insufficient(
 ) -> None:
     life = _make_project(tmp_path)
     blocked = BacklogItem.new(title="Choose GPU", objective="Run the matrix")
-    blocked.status = "failed"
+    blocked.status = "paused_operator"
     blocked.pending_question = "Which GPU may I use?"
     LifeMemory.open(life).backlog.add(blocked)
     monkeypatch.setattr(
@@ -1745,6 +1816,29 @@ def _parse_sse(text: str) -> list[dict]:
     return out
 
 
+def test_turn_emitter_reports_the_role_that_owns_a_phase(tmp_path: Path) -> None:
+    from argus_skill.webapi.manager_dispatch import _TurnEmitter
+
+    frames: list[tuple[str, dict]] = []
+    emitter = _TurnEmitter(
+        life_dir=tmp_path,
+        turn_id="turn-phase",
+        fragment=lambda kind, payload: frames.append((kind, payload)),
+    )
+
+    emitter.phase("Planner is decomposing and signing off the task…", role="planner")
+
+    assert frames == [
+        (
+            "phase",
+            {
+                "role": "planner",
+                "label": "Planner is decomposing and signing off the task…",
+            },
+        )
+    ]
+
+
 def test_turn_emitter_schedules_learning_only_for_chat(tmp_path: Path) -> None:
     from argus_skill.webapi.manager_dispatch import _TurnEmitter
 
@@ -1760,6 +1854,40 @@ def test_turn_emitter_schedules_learning_only_for_chat(tmp_path: Path) -> None:
     emitter.respond("queued", {"kind": "task"})
 
     assert reviewed == ["answer"]
+
+
+def test_turn_emitter_persists_solo_delivery_metadata(tmp_path: Path) -> None:
+    from argus_skill.webapi.manager_dispatch import _TurnEmitter
+
+    delivery = {
+        "delivery_id": "delivery:solo:task_completed",
+        "primary_target": {"path": "result.txt"},
+    }
+    emitter = _TurnEmitter(
+        life_dir=tmp_path,
+        turn_id="turn-solo",
+        fragment=lambda *_args: None,
+    )
+
+    emitter.journal_and_respond(
+        "Created result.txt.",
+        {
+            "kind": "chat",
+            "mission_result": True,
+            "success": True,
+            "delivery_id": delivery["delivery_id"],
+            "delivery": delivery,
+        },
+    )
+
+    turn = json.loads(
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    event = json.loads(
+        (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert turn["delivery"] == delivery
+    assert event["delivery"] == delivery
 
 
 def test_manager_stream_heartbeat_uses_real_silence_and_stops_on_done() -> None:
@@ -1786,6 +1914,40 @@ def test_manager_stream_heartbeat_uses_real_silence_and_stops_on_done() -> None:
     assert [frame["type"] for frame in frames] == ["phase", "delta", "phase"]
     assert frames[0]["heartbeat"] is True and frames[0]["quiet_s"] == 10
     assert frames[2]["quiet_s"] == 10  # reset by the genuine delta at t=111
+
+
+def test_manager_stream_heartbeat_preserves_the_active_phase_role() -> None:
+    class _FakeQueue:
+        def __init__(self) -> None:
+            self.values = [
+                {
+                    "type": "phase",
+                    "role": "planner",
+                    "label": "Planner is decomposing and signing off the task…",
+                },
+                queue.Empty,
+                None,
+            ]
+
+        def get(self, timeout=None):
+            value = self.values.pop(0)
+            if value is queue.Empty:
+                raise queue.Empty
+            return value
+
+    ticks = iter([100.0, 101.0, 111.0])
+    frames = list(
+        server._iter_manager_stream_items(
+            _FakeQueue(),
+            heartbeat_s=10.0,
+            clock=lambda: next(ticks),
+        )
+    )
+
+    assert frames[1]["heartbeat"] is True
+    assert frames[1]["role"] == "planner"
+    assert frames[1]["label"].startswith("Planner · waiting")
+    assert frames[1]["quiet_s"] == 10
 
 
 def test_manager_stream_heartbeat_defaults_to_five_seconds(monkeypatch) -> None:
@@ -1897,6 +2059,71 @@ def test_message_stream_standing_task_starts_continuous_executor(
     assert spawned == {"sid": "s-msgtest0", "resume_continuous": True}
 
 
+def test_message_stream_keeps_startup_exception_in_diagnostic(
+    client: TestClient, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "argus_skill.webapi.manager_bridge.manager_message",
+        lambda sid, text, *, global_root=None, on_fragment=None, **kwargs: {
+            "kind": "task",
+            "reply": None,
+            "item": {"id": "x1", "title": "repair parser"},
+            "daemon_alive": False,
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "start_project_daemon",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("private startup traceback")
+        ),
+    )
+
+    response = client.post(
+        "/api/projects/s-msgtest0/message/stream",
+        json={"text": "repair the parser"},
+    )
+
+    result = _parse_sse(response.text)[-1]["result"]
+    assert result["daemon"]["error"] == "The background worker could not start."
+    assert result["daemon"]["diagnostic"] == (
+        "RuntimeError: private startup traceback"
+    )
+    assert "traceback" not in result["reply"]
+
+
+def test_message_stream_keeps_ack_exception_in_diagnostic(
+    client: TestClient, monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "argus_skill.webapi.manager_bridge.manager_message",
+        lambda sid, text, *, global_root=None, on_fragment=None, **kwargs: {
+            "kind": "task",
+            "reply": None,
+            "item": {"id": "x1", "title": "repair parser"},
+            "daemon_alive": True,
+        },
+    )
+    monkeypatch.setattr(
+        "argus_skill.webapi.manager_pending_question.record_task_dispatch_ack",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("private transcript path")
+        ),
+    )
+
+    response = client.post(
+        "/api/projects/s-msgtest0/message/stream",
+        json={"text": "repair the parser"},
+    )
+
+    result = _parse_sse(response.text)[-1]["result"]
+    assert result["ack_error"] == (
+        "The task was queued, but its confirmation could not be saved."
+    )
+    assert result["ack_diagnostic"] == "RuntimeError: private transcript path"
+    assert "private transcript path" not in result["ack_error"]
+
+
 def test_message_stream_error_frame(client: TestClient, monkeypatch) -> None:
     """A triage crash surfaces as an ``error`` frame, not a wedged stream."""
     def _boom(sid, text, *, global_root=None, on_fragment=None, cancelled=None):
@@ -1907,7 +2134,9 @@ def test_message_stream_error_frame(client: TestClient, monkeypatch) -> None:
     assert r.status_code == 200
     frames = _parse_sse(r.text)
     assert frames[-1]["type"] == "error"
-    assert "kaboom" in frames[-1]["error"]
+    assert frames[-1]["error"] == "I couldn't finish handling that request."
+    assert frames[-1]["diagnostic"] == "RuntimeError: kaboom"
+    assert "kaboom" not in frames[-1]["error"]
 
 
 def test_message_stream_empty_400(client: TestClient) -> None:
@@ -2255,6 +2484,35 @@ def test_web_daemon_config_migrates_legacy_daemon_workdir(
     assert cfg.project_workdir == workspace.resolve()
     assert meta is not None
     assert meta.workdir == str(workspace.resolve())
+
+
+def test_web_daemon_config_repairs_incomplete_session_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sid = "incomplete-workdir"
+    life_dir = tmp_path / "projects" / sid
+    workspace = tmp_path / "workspace"
+    life_dir.mkdir(parents=True)
+    workspace.mkdir()
+    write_session_meta(
+        tmp_path,
+        SessionMeta(id=sid, display_name="Named before launch", created=123.0),
+    )
+    monkeypatch.setattr(
+        server,
+        "read_daemon_status",
+        lambda _path: SimpleNamespace(project_workdir=str(workspace)),
+    )
+
+    cfg = server._worker_config_from_env(life_dir, tmp_path)
+    meta = read_session_meta(tmp_path, sid)
+
+    assert cfg.project_workdir == workspace.resolve()
+    assert meta is not None
+    assert meta.workdir == str(workspace.resolve())
+    assert meta.display_name == "Named before launch"
+    assert meta.created == 123.0
 
 
 def test_web_daemon_config_refuses_legacy_session_without_workdir(

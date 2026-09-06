@@ -1,0 +1,8 @@
+comparison,evidence_type,labor_rate_usd_per_hour,active_labor_share,fresh_total_cost_usd,mission_total_cost_usd,savings_percent,limitation
+mission_vs_fresh,measured_model_cost,0,0,0.028598,0.029934,-4.672,"Model cost only; excludes labor"
+mission_vs_fresh,scenario,25,0.25,0.351371,0.305635,13.016,"Assumes active labor equals 25% of wall time; labor was not measured"
+mission_vs_fresh,scenario,50,0.25,0.674143,0.581337,13.767,"Assumes active labor equals 25% of wall time; labor was not measured"
+mission_vs_fresh,scenario,100,0.25,1.319688,1.132740,14.166,"Assumes active labor equals 25% of wall time; labor was not measured"
+mission_vs_fresh,scenario,25,1,1.319688,1.132740,14.166,"Assumes a human is occupied for the full wall time; labor was not measured"
+mission_vs_fresh,scenario,50,1,2.610779,2.235545,14.372,"Assumes a human is occupied for the full wall time; labor was not measured"
+mission_vs_fresh,scenario,100,1,5.192959,4.441156,14.477,"Assumes a human is occupied for the full wall time; labor was not measured"

@@ -1,22 +1,17 @@
-"""Manager front-door parsers and runtime calls.
-
-Prompt builders are re-exported from :mod:`argus_skill.roles.prompts.manager`
-for source compatibility.
-"""
+"""Manager front-door parsers, runtime calls, and active prompt imports."""
 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, cast
 
+from ..core.role_decision import latest_role_decision
 from ..roles.prompts.manager import (
     _IDENTITY_GUARD as _PROMPT_IDENTITY_GUARD,
 )
 from ..roles.prompts.manager import (
-    build_chat_prompt,
-    build_classify_prompt,
-    build_config_intent_prompt,
     build_front_door_prompt,
     build_route_prompt,
     build_simple_prompt,
@@ -24,6 +19,16 @@ from ..roles.prompts.manager import (
 )
 
 _IDENTITY_GUARD = _PROMPT_IDENTITY_GUARD
+log = logging.getLogger(__name__)
+
+
+def _routing_diagnostic(
+    message: str,
+    failure_sink: Callable[[str], None] | None,
+) -> None:
+    log.warning("Manager front-door diagnostic: %s", message)
+    if callable(failure_sink):
+        failure_sink(message)
 
 
 def _route_from_token(token: str) -> str:
@@ -48,42 +53,135 @@ def classify_route(
         return "complex"
     if int(getattr(result, "exit_code", 0) or 0) != 0:
         return "complex"
-    return _route_from_token(_first_alpha_token(_extract_answer(result)))
+    return _route_from_token(_one_word_answer(result, "route"))
 
 
-def classify_is_conversational(
-    text: str,
-    *,
-    run_exec: Callable[[str], Any],
-) -> bool:
-    """Is ``text`` a conversational turn (greeting / capability question / ack)
-    rather than a real task to execute?
+#: The front-door decision fields, in the order the Manager contract lists them.
+_FRONT_DOOR_FIELDS = (
+    "intake_type",
+    "intake_scope",
+    "intake_roles",
+    "preference_kind",
+    "preference_value",
+    "revoke_revision",
+    "config",
+    "control",
+    "authorization",
+    "steer_directive",
+    "operator_question_policy",
+    "route",
+    "self_mode",
+    "reply",
+    "lifetime",
+    "greeting",
+    "name",
+)
 
-    Biases hard toward ``False`` (TASK) — the safe default. Empty input, a
-    classify error, a non-zero exit, or any answer that is not exactly ``CHAT``
-    all resolve to TASK, so a real task is never silently answered as chat
-    instead of being carried out.
+
+def _answer_text(result: Any) -> str:
+    """The model's last plain message."""
+    message = getattr(result, "last_agent_message", None)
+    if not message:
+        messages = getattr(result, "agent_messages", None) or []
+        message = messages[-1] if messages else ""
+    return str(message or "")
+
+
+def _classifier_failure_detail(result: Any) -> str:
+    """Return bounded, redacted runner evidence for a failed front-door call.
+
+    A bare ``classifier backend failed`` hid actionable process failures such
+    as an npm ``codex.cmd`` wrapper whose GUI-host PATH did not contain Node.
+    Keep the fail-closed routing behavior, but retain enough local stderr for
+    an operator to repair the configured runner without exposing credentials.
     """
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return False
+    exit_code = getattr(result, "exit_code", "unknown")
+    fragments: list[str] = []
+    fatal = str(getattr(result, "fatal_error", "") or "").strip()
+    if fatal:
+        fragments.append(fatal)
+    raw_stderr = getattr(result, "stderr_lines", None) or []
+    if isinstance(raw_stderr, (str, bytes)):
+        raw_stderr = [raw_stderr]
     try:
-        result = run_exec(build_classify_prompt(cleaned))
-    except Exception:  # noqa: BLE001
-        return False
-    if int(getattr(result, "exit_code", 0) or 0) != 0:
-        return False
-    return _first_alpha_token(_extract_answer(result)).upper() == "CHAT"
+        stderr = "\n".join(
+            str(line, errors="replace") if isinstance(line, bytes) else str(line)
+            for line in raw_stderr
+            if str(line).strip()
+        ).strip()
+    except TypeError:
+        stderr = str(raw_stderr or "").strip()
+    if stderr and not fatal:
+        # ``fatal_error`` is the runner's authoritative summary and retains the
+        # remote contract verbatim. Raw stderr is a bounded fallback for launch
+        # failures (for example an npm wrapper that cannot find Node).
+        fragments.append(stderr)
+    detail = " | ".join(fragments)
+    if detail:
+        try:
+            from ..core.secret_guard import known_secret_values, redact_secrets_text
+            from ..tools.capability_vault import read_auth_json_key
+
+            # Provider stderr can echo a raw Codex API key without an
+            # `api_key=` label.  Read it only to redact the exact value before
+            # this text reaches the cockpit; never render or persist it here.
+            auth_key = read_auth_json_key()
+            detail = redact_secrets_text(
+                detail,
+                known_values=(*known_secret_values(), auth_key),
+            )
+        except Exception:  # noqa: BLE001 — diagnostics must never alter routing
+            pass
+        detail = " ".join(detail.split())[:480]
+    if fatal and detail:
+        return detail
+    return (
+        f"classifier backend failed (exit {exit_code}): {detail}"
+        if detail
+        else f"classifier backend failed (exit {exit_code})"
+    )
 
 
+def _front_door_fields(result: Any) -> dict[str, str]:
+    """Read the front-door fields, preferring the structured decision.
+
+    A structured decision is used as it stands. This module used to render one
+    back into ``KEY: VALUE`` lines and re-read them, which handed every field
+    the power to forge the fields below it: a two-line ``steer_directive`` could
+    publish its own ``CONTROL: ABORT``, and the reader takes the first match.
+    A model that answered in plain prose is still read line by line, because
+    there the lines are all there is.
+    """
+    decision = latest_role_decision(result, "manager")
+    if isinstance(decision, dict):
+        return {
+            name: str(decision.get(name, "") or "").strip()
+            for name in _FRONT_DOOR_FIELDS
+        }
+    from ..core.role_reply import read_key_values
+
+    values = read_key_values(
+        _answer_text(result),
+        (name.upper() for name in _FRONT_DOOR_FIELDS),
+    )
+    return {
+        name: str(values.get(name.upper()) or "").strip()
+        for name in _FRONT_DOOR_FIELDS
+    }
 
 
-def _extract_answer(result: Any) -> str:
-    msg = getattr(result, "last_agent_message", None)
-    if not msg:
-        msgs = getattr(result, "agent_messages", None) or []
-        msg = msgs[-1] if msgs else ""
-    return str(msg or "")
+def _one_word_answer(result: Any, *names: str) -> str:
+    """Read a one-word verdict from the named fields, else from the message.
+
+    The route and steer gates ask for a bare word and define no decision
+    schema, so the message is the normal channel; the named field is read first
+    for a model that answers those gates structurally anyway.
+    """
+    fields = _front_door_fields(result)
+    for name in names:
+        if token := _first_alpha_token(fields.get(name, "")):
+            return token
+    return _first_alpha_token(_answer_text(result))
 
 
 def _first_alpha_token(text: str) -> str:
@@ -102,8 +200,8 @@ def _first_alpha_token(text: str) -> str:
 # take a role list; global knobs do not. This is the ONE place natural-language
 # config changes are recognized — no keyword/regex handlers (an LLM decides
 # intent from any wording, and a bare mention of a model/backend is NOT a
-# switch). Mirrors classify_is_conversational/route: one low-reasoning call,
-# biased hard toward None so real work is never swallowed as a config change.
+# switch). The merged front-door call is biased hard toward None so real work
+# is never swallowed as a config change.
 
 _CONFIG_ROLE_KNOBS = frozenset({"backend", "model", "effort"})
 _CONFIG_GLOBAL_KNOBS = frozenset(
@@ -132,7 +230,15 @@ class ConfigIntent:
 
 
 ControlIntent = Literal["abort", "pause", "no_dispatch", "steer"]
-SelfModeIntent = Literal["reply", "inspect"]
+SelfModeIntent = Literal[
+    "reply",
+    "inspect",
+    "micro",
+    "implement",
+    "debug",
+    "review",
+    "synthesize",
+]
 ConfigDecision = ConfigIntent | tuple[ConfigIntent, ...] | None
 LifetimeIntent = Literal["bounded", "bounded_increment", "standing"]
 AuthorizationAction = Literal[
@@ -142,6 +248,7 @@ AuthorizationAction = Literal[
     "artifact_refresh",
     "resume_blocked_work",
 ]
+OperatorQuestionPolicy = Literal["allow", "forbid", "unchanged"]
 _AUTHORIZATION_ACTIONS = {
     "validator_repair",
     "acceptance_retry",
@@ -174,9 +281,7 @@ def _greeting_reply(message: str) -> str:
 def _parse_config_line(line: str) -> "ConfigIntent | None":
     """Parse ONE ``SET <knob> <roles> <value>`` line into a ``ConfigIntent``.
 
-    Returns ``None`` for ``NONE`` / empty / malformed. Shared by
-    ``classify_config_intent`` and ``classify_front_door`` so the two paths can
-    never drift on what counts as a valid config write."""
+    Returns ``None`` for ``NONE`` / empty / malformed."""
     line = (line or "").strip()
     if not line or line.upper() == "NONE":
         return None
@@ -232,45 +337,16 @@ def _parse_config_decision(line: str | None) -> ConfigDecision:
     return intents[0] if len(intents) == 1 else tuple(intents)
 
 
-def classify_config_intent(
-    text: str,
-    *,
-    run_exec: Callable[[str], Any],
-) -> ConfigDecision:
-    """Does this free text ask to change one of Argus's own runtime knobs?
-
-    Intent recognition, not keyword matching: one low-reasoning model call
-    decides — never a substring/regex guess — so a genuine request phrased in
-    ANY wording is caught, and a message that merely mentions a model/backend/
-    setting (or names one as part of a real task) is not misread as a config
-    change. Biases hard toward ``None`` on any ambiguity, error, or malformed
-    answer, so the message then flows through the normal chat/task path — the
-    safe default, mirroring ``classify_is_conversational``/``classify_route``.
-    """
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return None
-    try:
-        result = run_exec(build_config_intent_prompt(cleaned))
-    except Exception:  # noqa: BLE001
-        return None
-    if int(getattr(result, "exit_code", 0) or 0) != 0:
-        return None
-    answer = _extract_answer(result).strip()
-    line = next((ln.strip() for ln in answer.splitlines() if ln.strip()), "")
-    return _parse_config_decision(line)
-
-
-def _line_after_prefix(answer: str, prefix: str) -> "str | None":
-    """First line whose stripped form starts (case-insensitively) with
-    ``prefix``, returned with the prefix removed and stripped. ``None`` when no
-    such line exists — the caller then applies that axis's safe default."""
-    up = prefix.upper()
-    for ln in str(answer or "").splitlines():
-        s = ln.strip()
-        if s.upper().startswith(up):
-            return s[len(prefix) :].strip()
-    return None
+def _plain_reply(value: str) -> str:
+    """Unwrap a reply that arrived as the JSON string the old renderer wrote."""
+    if len(value) > 1 and value.startswith('"') and value.endswith('"'):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return value
+        if isinstance(decoded, str):
+            return decoded.strip()
+    return value
 
 
 def _parse_authorization_line(line: str | None) -> tuple[str, ...]:
@@ -298,7 +374,9 @@ def classify_front_door(
     reply_sink: Callable[[str], None] | None = None,
     greeting_sink: Callable[[str], None] | None = None,
     steering_sink: Callable[[str], None] | None = None,
+    operator_question_policy_sink: Callable[[OperatorQuestionPolicy], None] | None = None,
     authorization_sink: Callable[[tuple[str, ...]], None] | None = None,
+    intake_sink: Callable[[dict[str, Any]], None] | None = None,
     failure_sink: Callable[[str], None] | None = None,
     active_mission: bool = False,
 ) -> "tuple[ConfigDecision, ControlIntent | None, str]":
@@ -320,23 +398,11 @@ def classify_front_door(
         return None, None, "complex"
     if int(getattr(result, "exit_code", 0) or 0) != 0:
         if callable(failure_sink):
-            failure_sink("classifier backend failed")
+            failure_sink(_classifier_failure_detail(result))
         return None, None, "complex"
-    answer = _extract_answer(result)
-    config_line = _line_after_prefix(answer, "CONFIG:")
-    control_line = _line_after_prefix(answer, "CONTROL:")
-    authorization_line = _line_after_prefix(answer, "AUTHORIZATION:")
-    steering_line = _line_after_prefix(answer, "STEER_DIRECTIVE:")
-    route_line = _line_after_prefix(answer, "ROUTE:")
-    self_mode_line = _line_after_prefix(answer, "SELF_MODE:")
-    reply_line = _line_after_prefix(answer, "REPLY:")
-    lifetime_line = _line_after_prefix(answer, "LIFETIME:")
-    greeting_line = _line_after_prefix(answer, "GREETING:")
-    name_line = _line_after_prefix(answer, "NAME:")
-    intent = _parse_config_decision(config_line)
-    control_token = (
-        str(control_line or "").strip().upper().replace("-", "_")
-    )
+    fields = _front_door_fields(result)
+    intent = _parse_config_decision(fields["config"])
+    control_token = fields["control"].upper().replace("-", "_")
     control: ControlIntent | None
     if control_token.startswith("ABORT"):
         control = "abort"
@@ -363,22 +429,30 @@ def classify_front_door(
         else:
             if int(getattr(confirmation, "exit_code", 0) or 0) != 0:
                 control = None
-            elif _first_alpha_token(_extract_answer(confirmation)).upper() != "STEER":
+            elif _one_word_answer(confirmation, "control").upper() != "STEER":
                 control = None
-    route_token = _first_alpha_token(route_line) if route_line is not None else ""
+    route_token = _first_alpha_token(fields["route"])
     if not route_token or route_token.upper() not in {
         "SELF",
         "SIMPLE",
         "TEAM",
         "COMPLEX",
     }:
-        if callable(failure_sink):
-            failure_sink("classifier returned no valid route")
-        return intent, None, "complex"
-    route = _route_from_token(route_token)
+        if control in {"abort", "pause", "no_dispatch", "steer"}:
+            _routing_diagnostic(
+                "route token invalid; control preserved "
+                f"(token={route_token or '<missing>'!r}, control={control!r})",
+                failure_sink,
+            )
+            route = "simple"
+        else:
+            _routing_diagnostic("classifier returned no valid route", failure_sink)
+            return intent, None, "complex"
+    else:
+        route = _route_from_token(route_token)
     if control in {"abort", "pause", "no_dispatch", "steer"}:
         route = "simple"
-    authorization = _parse_authorization_line(authorization_line)
+    authorization = _parse_authorization_line(fields["authorization"])
     if authorization:
         route = "simple"
         if callable(authorization_sink):
@@ -388,34 +462,41 @@ def classify_front_door(
                 pass
     self_mode: SelfModeIntent | None = None
     if route == "simple":
-        self_mode_token = _first_alpha_token(self_mode_line or "").upper()
-        self_mode = "reply" if self_mode_token == "REPLY" else "inspect"
+        self_mode_token = _first_alpha_token(fields["self_mode"]).upper()
+        self_mode = {
+            "REPLY": "reply",
+            "MICRO": "micro",
+            "IMPLEMENT": "implement",
+            "DEBUG": "debug",
+            "REVIEW": "review",
+            "SYNTHESIZE": "synthesize",
+        }.get(self_mode_token, "inspect")
     if callable(self_mode_sink) and self_mode is not None:
         try:
             self_mode_sink(self_mode)
         except Exception:  # noqa: BLE001 - advisory metadata never owns routing
             pass
-    if (
+    reply = _plain_reply(fields["reply"])
+    reply_eligible = (
         callable(reply_sink)
         and route == "simple"
         and self_mode == "reply"
         and intent is None
         and control in {None, "no_dispatch"}
         and not authorization
-        and reply_line
-        and reply_line.strip().upper() != "NONE"
-    ):
+        and reply.upper() != "NONE"
+        and len(reply) > 0
+    )
+    if reply_eligible:
         try:
-            parsed_reply = json.loads(reply_line)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            parsed_reply = None
-        if isinstance(parsed_reply, str) and 0 < len(parsed_reply.strip()) <= 1600:
-            try:
-                reply_sink(parsed_reply.strip())
-            except Exception:  # noqa: BLE001 - optional fast reply only
-                pass
+            reply_sink(reply)
+        except Exception as exc:  # noqa: BLE001 - optional fast reply only
+            _routing_diagnostic(
+                f"reply sink failed ({type(exc).__name__}: {exc})",
+                failure_sink,
+            )
     lifetime: LifetimeIntent | None = None
-    lifetime_parts = str(lifetime_line or "").strip().split(maxsplit=1)
+    lifetime_parts = fields["lifetime"].split(maxsplit=1)
     lifetime_token = (
         lifetime_parts[0].replace("-", "_").upper()
         if lifetime_parts
@@ -445,7 +526,7 @@ def classify_front_door(
             lifetime_sink(lifetime)
         except Exception:  # noqa: BLE001 - advisory metadata never owns routing
             pass
-    greeting_token = str(greeting_line or "").strip().upper()
+    greeting_token = fields["greeting"].upper()
     if (
         callable(greeting_sink)
         and greeting_token == "GREETING"
@@ -457,23 +538,89 @@ def classify_front_door(
             greeting_sink(_greeting_reply(cleaned))
         except Exception:  # noqa: BLE001 - optional one-call greeting path only
             pass
-    steering = str(steering_line or "").strip()
+    steering = fields["steer_directive"]
     steering_token = steering.rstrip(".。!！").upper()
-    if (
+    steering_eligible = (
         callable(steering_sink)
         and control == "steer"
         and steering
         and steering_token not in {"NONE", "N/A", "NA", "NULL"}
-        and len(steering) <= 1600
-    ):
+    )
+    if steering_eligible:
         try:
             steering_sink(steering)
+        except Exception as exc:  # noqa: BLE001 - advisory metadata never owns routing
+            _routing_diagnostic(
+                f"steering sink failed ({type(exc).__name__}: {exc})",
+                failure_sink,
+            )
+    question_policy = fields["operator_question_policy"].strip().lower()
+    if (
+        callable(operator_question_policy_sink)
+        and control == "steer"
+        and question_policy in {"allow", "forbid", "unchanged"}
+    ):
+        try:
+            operator_question_policy_sink(
+                cast(OperatorQuestionPolicy, question_policy)
+            )
         except Exception:  # noqa: BLE001 - advisory metadata never owns routing
             pass
-    if callable(name_sink) and name_line:
+    if callable(name_sink) and (name := fields["name"]):
         try:
-            name_sink(name_line)
+            name_sink(name)
         except Exception:  # noqa: BLE001 - cosmetic metadata never owns routing
+            pass
+    intake_type = fields["intake_type"].strip().lower()
+    if intake_type not in {
+        "ephemeral",
+        "objective_amendment",
+        "standing_directive",
+        "preference",
+        "credential_grant",
+        "revocation",
+    }:
+        if intent is not None:
+            intake_type = "preference"
+        elif control == "steer" or route == "complex":
+            intake_type = "objective_amendment"
+        else:
+            intake_type = "ephemeral"
+    intake_scope = fields["intake_scope"].strip().lower()
+    if intake_scope not in {"mission", "project", "global"}:
+        intake_scope = "mission" if intake_type == "objective_amendment" else "project"
+    raw_roles = fields["intake_roles"].strip().lower()
+    if raw_roles == "all" or not raw_roles:
+        intake_roles: str | tuple[str, ...] = "all"
+    else:
+        intake_roles = tuple(
+            dict.fromkeys(
+                role.strip()
+                for role in raw_roles.split(",")
+                if role.strip() in {"manager", "planner", "engineer", "reviewer", "teammate"}
+            )
+        ) or "all"
+    preference_kind = fields["preference_kind"].strip().lower()
+    if preference_kind not in {"autonomy", "interaction", "workflow"}:
+        preference_kind = "workflow"
+    try:
+        revocation_target = int(fields["revoke_revision"])
+    except (TypeError, ValueError):
+        revocation_target = 0
+    if callable(intake_sink):
+        try:
+            intake_sink({
+                "kind": intake_type,
+                "scope": intake_scope,
+                "applies_to_roles": intake_roles,
+                "preference_kind": preference_kind,
+                "preference_value": (
+                    "" if fields["preference_value"].upper() == "NONE"
+                    else fields["preference_value"]
+                ),
+                "target_revision": revocation_target,
+            })
+        except Exception:  # noqa: BLE001 - intake metadata never owns routing
             pass
     return intent, control, route
 
@@ -485,14 +632,10 @@ __all__ = [
     "SelfModeIntent",
     "LifetimeIntent",
     "AuthorizationAction",
-    "classify_is_conversational",
+    "OperatorQuestionPolicy",
     "classify_route",
-    "classify_config_intent",
     "classify_front_door",
-    "build_classify_prompt",
     "build_route_prompt",
-    "build_config_intent_prompt",
     "build_front_door_prompt",
-    "build_chat_prompt",
     "build_simple_prompt",
 ]

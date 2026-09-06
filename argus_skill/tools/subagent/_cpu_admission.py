@@ -13,7 +13,9 @@ try:
 except ImportError:  # pragma: no cover - Windows has no detached subagent support
     fcntl = None  # type: ignore[assignment]
 
-_ACTIVE_CPU_LEASE_STATES = frozenset({"starting", "preflight", "running"})
+_ACTIVE_CPU_LEASE_STATES = frozenset({
+    "starting", "preflight", "waiting_resource", "running",
+})
 _STARTING_LEASE_GRACE_SECONDS = 60.0
 _PROCESS_LOCK = threading.Lock()
 
@@ -93,11 +95,8 @@ def leased_cpu_ids(
     for task in tasks:
         if not _task_lease_is_active(task, is_pid_alive=is_pid_alive, now=checked_at):
             continue
-        raw = task.get("cpu_ids")
-        if raw in (None, ""):
-            continue
         try:
-            leased.update(_normalized_cpu_ids(raw, field="active task cpu_ids"))
+            leased.update(_normalized_cpu_ids(task.get("cpu_ids"), field="active task cpu_ids"))
         except CpuAdmissionError as exc:
             task_id = str(task.get("task_id") or "<unknown>")
             raise CpuAdmissionError(

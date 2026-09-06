@@ -117,14 +117,16 @@ def test_the_history_record_stays_small(tmp_path: Path) -> None:
 def test_no_consumer_reads_the_prompt_off_an_event_row() -> None:
     # Reverse assertion. Moving the field is only safe while nothing reads it;
     # if a reader appears, this fails and the split has to be revisited.
-    import subprocess
-
     repo = Path(__file__).resolve().parents[1]
-    hits = subprocess.run(
-        ["grep", "-rn", '--include=*.py', 'get("prompt")', str(repo / "argus_skill")],
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
+    hits = [
+        f"{path}:{line_number}:{line}"
+        for path in (repo / "argus_skill").rglob("*.py")
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        )
+        if 'get("prompt")' in line
+    ]
     offenders = [
         line
         for line in hits
@@ -142,6 +144,12 @@ def test_the_prompt_is_redacted_on_its_way_to_the_raw_transcript(
     ``redact_secrets_record``, but that is exactly the kind of thing worth
     asserting rather than assuming: the new write is the one that carries the
     verbatim prompt, so it is the one a leaked key would ride out on.
+
+    The secret is supplied as a *known* value, which is how production reaches
+    this path: `known_secret_values()` collects the configured environment and
+    vault credentials and redacts them by exact match. Guessing a credential
+    from the shape of its value was deliberately removed, so a bare token shape
+    is no longer what proves the guard runs — an actual known secret is.
     """
     from argus_skill.adapters.agent_cli_backend._exec_spawn import log_start_record
     from argus_skill.adapters.agent_cli_backend._io_log import AgentIOLogger
@@ -153,7 +161,7 @@ def test_the_prompt_is_redacted_on_its_way_to_the_raw_transcript(
         def __init__(self) -> None:
             self._runner = SimpleNamespace(backend="copilot")
             self._io_logger = AgentIOLogger()
-            self._known_secret_values = ()
+            self._known_secret_values = (secret,)
 
         def _log_agent_io(self, path, row) -> None:
             self._io_logger.log(path, row, known_secret_values=self._known_secret_values)

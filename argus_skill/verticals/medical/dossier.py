@@ -117,11 +117,32 @@ def _append_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _scope_matches(existing: Mapping[str, Any], scope: MedicalScope) -> bool:
-    return (
-        str(existing.get("target") or "").strip().casefold() == scope.target.casefold()
-        and str(existing.get("disease") or "").strip().casefold()
-        == scope.disease.casefold()
-    )
+    expected = scope.to_dict()
+    for field, expected_value in expected.items():
+        existing_value = existing.get(field)
+        if field in {"target", "disease"}:
+            if str(existing_value or "").strip().casefold() != str(
+                expected_value
+            ).casefold():
+                return False
+            continue
+        if field in {"target_aliases", "disease_aliases"}:
+            existing_aliases = tuple(
+                str(value).strip().casefold()
+                for value in (existing_value or ())
+                if str(value).strip()
+            )
+            expected_aliases = tuple(
+                str(value).strip().casefold()
+                for value in expected_value
+                if str(value).strip()
+            )
+            if existing_aliases != expected_aliases:
+                return False
+            continue
+        if str(existing_value or "").strip() != str(expected_value or "").strip():
+            return False
+    return True
 
 
 def _fixture_batch(
@@ -295,7 +316,7 @@ def build_target_disease_dossier(
             existing_scope, scope
         ):
             raise ValueError(
-                "existing medical scope uses a different target or disease; "
+                "existing medical scope differs from the requested scope; "
                 "use a separate Argus project"
             )
     scope_payload = {"schema_version": 1, **scope.to_dict()}
@@ -463,7 +484,7 @@ def validate_dossier(project_root: Path | str) -> tuple[str, ...]:
                     issues.append(
                         f"evidence.jsonl line {index}: raw_artifact does not exist"
                     )
-        except (json.JSONDecodeError, ValueError) as exc:
+        except ValueError as exc:
             issues.append(f"evidence.jsonl is invalid: {exc}")
 
     matrix_path = medical / "evidence_matrix.csv"
@@ -516,7 +537,7 @@ def validate_dossier(project_root: Path | str) -> tuple[str, ...]:
                         issues.append(
                             f"queries.jsonl line {index}: raw artifact does not exist"
                         )
-        except (json.JSONDecodeError, ValueError) as exc:
+        except ValueError as exc:
             issues.append(f"queries.jsonl is invalid: {exc}")
     return tuple(issues)
 
@@ -572,7 +593,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             retrieved_at=args.retrieved_at or None,
             live=args.live,
         )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         print(f"medical dossier failed: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

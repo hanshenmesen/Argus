@@ -19,10 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows fallback
-    fcntl = None  # type: ignore[assignment]
+import portalocker
 
 CONTROL_DIRNAME = "campaign-control"
 HEAD_FILENAME = "HEAD.json"
@@ -128,7 +125,7 @@ def objective_sha256(objective: str) -> str:
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -299,13 +296,13 @@ class CampaignControlStore:
     def locked(self):
         self.state_root.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+b") as handle:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            # Deliberately blocking: control-state mutations fail closed and
+            # historically waited for the current immutable revision commit.
+            portalocker.lock(handle, portalocker.LOCK_EX)
             try:
                 yield
             finally:
-                if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                portalocker.unlock(handle)
 
     def campaign_identity(
         self,
@@ -372,7 +369,7 @@ class CampaignControlStore:
             and current.campaign_epoch == identity.campaign_epoch
         )
         previous = self.read_snapshot(current) if same_campaign else None
-        revision = (current.state_revision + 1) if same_campaign and current else 1
+        revision = (current.state_revision + 1) if same_campaign else 1
         snapshot: dict[str, Any] = {
             "version": CONTROL_VERSION,
             "campaign_id": identity.campaign_id,
@@ -470,6 +467,33 @@ class CampaignControlStore:
             reason=reason,
         )
         return head
+
+    def clear_wait_for_new_evidence_if_current(
+        self,
+        *,
+        identity: CampaignIdentity,
+        expected_head: ControlHead | None,
+        stage_projection: dict[str, Any],
+        terminal_evidence: Iterable[dict[str, Any]],
+        reason: str,
+    ) -> ControlHead | None:
+        """Publish one verdict only if its campaign and control revision remain current.
+
+        The caller holds the Manager pipeline lock to serialize objective changes.
+        """
+        with self.locked():
+            if self.campaign_identity() != identity or self.read_head() != expected_head:
+                return None
+            head, _ = self._next_revision_unlocked(
+                identity=identity,
+                updates={
+                    "active_wait": None,
+                    "stage_projection": dict(stage_projection),
+                    "terminal_evidence": [dict(row) for row in terminal_evidence],
+                },
+                reason=reason,
+            )
+            return head
 
     def clear_wait_if_current(
         self,
@@ -726,7 +750,7 @@ class CampaignControlStore:
                 return capability
 
             if latest.get("event") == "claimed":
-                return dict(raw) if active_matches else None
+                return dict(raw)
 
             if latest.get("event") != "acceptance_started":
                 return None

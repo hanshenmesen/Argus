@@ -29,6 +29,7 @@ describe('operator decision cards', () => {
       [{ id: 'legacy', title: 'Legacy', pending_question: 'What now?' }],
     );
     expect(rows.map((row) => row.id)).toEqual(['decision-item-1', 'legacy-legacy']);
+    expect(rows[0].options[1].requires_note).toBe(true);
     expect(rows[1].legacy).toBe(true);
   });
 
@@ -70,9 +71,10 @@ describe('operator decision cards', () => {
       />,
     );
 
-    expect(row.options).toEqual([]);
+    expect(row.options.map((option) => option.id)).toEqual(['custom']);
     expect(row.evidence).toEqual([]);
     expect(html).toContain('Send answer');
+    expect(html).toContain('Write my own answer');
     expect(html).not.toContain('按建议继续');
     expect(html).not.toContain('保留当前结果并停止');
   });
@@ -91,5 +93,28 @@ describe('operator decision cards', () => {
     expect(html).toContain('Provider log');
     expect(html).toContain('Use local fallback');
     expect(html).toContain('Stop this campaign');
+  });
+
+  it('keeps note-required choices clickable so validation can explain the requirement', () => {
+    const html = renderToStaticMarkup(
+      <PendingReplyDialog
+        reply={{
+          ...card,
+          options: [{
+            id: 'needs-note',
+            label: 'Use another format',
+            description: 'Describe the format.',
+            requires_note: true,
+          }],
+        }}
+        open
+        busy={false}
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain('Use this option');
+    expect(html).not.toContain('disabled=""');
   });
 });

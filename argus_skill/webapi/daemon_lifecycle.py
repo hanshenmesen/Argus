@@ -26,18 +26,21 @@ from ..core.session import (
     read_session_meta,
     resolve_session_workdir,
     session_lifecycle_lock,
+    session_workdir_is_bound,
     update_session_meta,
     write_session_meta,
 )
 from ..daemon.life_worker import (
     LifeWorkerConfig,
     _acquire_daemon_spawn_lock,
+    _launcher_failure_message,
     _release_daemon_spawn_lock,
     _workspace_start_error,
 )
 from ..life.memory import LifeMemory
 from ..life.role_activity import role_activity
 from . import project_state
+from ._server_module import server_module as _srv
 
 log = logging.getLogger(__name__)
 
@@ -47,18 +50,6 @@ _daemon_dict = project_state.daemon_dict
 _DAEMON_ADMISSION_FILE = project_state.DAEMON_ADMISSION_FILE
 project_life_dir = project_state.project_life_dir
 list_projects = project_state.list_projects
-
-
-def _srv():
-    """Lazily resolve the ``server`` module so tests that monkeypatch
-    ``server.<dep>`` (e.g. ``read_daemon_status``, ``spawn_detached_daemon``,
-    ``stop_daemon``, ``runtime_identity``, ``daemon_command_execution_lock``,
-    ``_max_active_daemons``, ``_active_daemon_count``) still take effect for
-    this module's internal calls, matching pre-split monkeypatch semantics.
-    """
-    from . import server
-
-    return server
 
 
 def _worker_config_from_env(life_dir: Path, global_root: Path) -> LifeWorkerConfig:
@@ -79,7 +70,7 @@ def _worker_config_from_env(life_dir: Path, global_root: Path) -> LifeWorkerConf
         global_root=global_root,
     )
     meta = read_session_meta(global_root, life_dir.name)
-    if meta is None:
+    if not session_workdir_is_bound(meta):
         prior = _srv().read_daemon_status(life_dir).project_workdir
         project_workdir = migrate_legacy_session_workdir(
             global_root,
@@ -96,7 +87,11 @@ def _worker_config_from_env(life_dir: Path, global_root: Path) -> LifeWorkerConf
         # All four roles use the same persisted execution root. Internal daemon
         # state remains under life_dir regardless of where project work happens.
         project_workdir=project_workdir,
-        backend=resolve_role_backend(""),
+        # default="codex": the cockpit autostart has no --backend flag to
+        # honour, so the chain is the operator's ONLY channel here; codex
+        # matches LifeWorkerConfig's own dataclass default, which is what this
+        # field held before when nothing was configured.
+        backend=resolve_role_backend("", default="codex"),
         engineer_model=resolve_role_model(
             "engineer", role_env="ARGUS_SKILL_ENGINEER_MODEL",
         ),
@@ -111,12 +106,39 @@ def _worker_config_from_env(life_dir: Path, global_root: Path) -> LifeWorkerConf
         ),
         global_daily_cap_usd=budget.global_daily_cap_usd,
         planner_task_iteration_max_cycles=int(
-            os.environ.get("ARGUS_SKILL_PLANNER_TASK_ITERATION_MAX_CYCLES", "6")
+            os.environ.get("ARGUS_SKILL_PLANNER_TASK_ITERATION_MAX_CYCLES", "0")
         ),
     )
 
 
 _UNFINISHED_BACKLOG_STATUSES = {"pending", "running", "in_progress", "claimed"}
+_TRANSIENT_WINDOWS_SPAWN_MARKERS = (
+    "winerror 32",
+    "winerror 33",
+    "sharing violation",
+    "lock violation",
+    "resource temporarily unavailable",
+)
+
+
+def _running_on_windows() -> bool:
+    """Return the host platform without requiring tests to mutate global ``os``."""
+    return os.name == "nt"
+
+
+def _retryable_windows_spawn_failure(rc: int, diagnostic: str) -> bool:
+    """Retry only an unexpected, explicitly transient Windows bootstrap error.
+
+    Exit codes 2 and 3 are deliberate admission/workspace failures.  An rc=1
+    can also be deterministic (bad auth, a missing module, or invalid startup
+    code), so blindly replaying every rc=1 would repeat login prompts and other
+    side effects.  The bounded retry is reserved for the Win32 sharing/locking
+    failures that can clear between two CreateProcess attempts.
+    """
+    if not _running_on_windows() or rc != 1:
+        return False
+    lowered = diagnostic.casefold()
+    return any(marker in lowered for marker in _TRANSIENT_WINDOWS_SPAWN_MARKERS)
 
 
 def list_running_daemons(
@@ -131,7 +153,7 @@ def list_running_daemons(
             continue
         life_dir = core_paths.session_state_root(sid, root=root)
         try:
-            items = LifeMemory.open(life_dir).backlog.all()
+            items = LifeMemory.open(life_dir).backlog.active()
         except Exception:  # noqa: BLE001
             items = []
         unfinished = [
@@ -235,6 +257,11 @@ def start_project_daemon(
             "error": f"daemon workdir is unavailable: {exc}",
             "daemon": _daemon_dict(_srv().read_daemon_status(life_dir)),
         }
+    # Web project workers are finite unless they adopt a persisted campaign
+    # that is explicitly both enabled and open-ended. Otherwise the dataclass's
+    # CLI-oriented 7x24 default would keep a drained task process alive forever,
+    # including one started with the cockpit's Resume button.
+    config.continuous_open_ended = False
     if resume_continuous:
         continuous = _srv().read_continuous_state(life_dir)
         if (
@@ -287,13 +314,43 @@ def start_project_daemon(
             ),
             "daemon": _daemon_dict(_srv().read_daemon_status(life_dir)),
         }
+    startup_diagnostic = ""
+    startup_recovery_diagnostic = ""
     try:
         rc = _srv().spawn_detached_daemon(config, quiet=True)
+        startup_diagnostic = config.last_spawn_error.strip()
+        if _retryable_windows_spawn_failure(rc, startup_diagnostic):
+            # The first launcher can finish just as its runtime publishes
+            # status. Never create a second worker if that happened; otherwise
+            # retry one known-transient Win32 sharing/lock failure exactly once.
+            after_first = _srv().read_daemon_status(life_dir)
+            if after_first.alive:
+                startup_recovery_diagnostic = startup_diagnostic
+                startup_diagnostic = ""
+                rc = 0
+            else:
+                log.warning(
+                    "retrying one transient Windows executor startup for session %s: %s",
+                    sid,
+                    startup_diagnostic,
+                )
+                rc = _srv().spawn_detached_daemon(config, quiet=True)
+                second_diagnostic = config.last_spawn_error.strip()
+                if rc == 0:
+                    startup_recovery_diagnostic = startup_diagnostic
+                    startup_diagnostic = ""
+                else:
+                    startup_diagnostic = second_diagnostic or startup_diagnostic
     except Exception as exc:  # noqa: BLE001 — return an actionable API result
+        log.exception("background executor raised during startup for session %s", sid)
         return {
             "rc": 2,
             "already_alive": False,
-            "error": f"background executor failed to start: {type(exc).__name__}: {exc}",
+            "error": (
+                "The background worker could not start. "
+                "Check the startup diagnostic and try again."
+            ),
+            "startup_diagnostic": f"{type(exc).__name__}: {exc}",
             "daemon": _daemon_dict(_srv().read_daemon_status(life_dir)),
         }
     result = {
@@ -301,9 +358,30 @@ def start_project_daemon(
         "already_alive": False,
         "daemon": _daemon_dict(_srv().read_daemon_status(life_dir)),
     }
+    if startup_diagnostic:
+        result["startup_diagnostic"] = startup_diagnostic
+    if startup_recovery_diagnostic:
+        result["startup_retried"] = True
     if rc == 3:
-        result["error"] = _workspace_start_error(config) or (
+        # ``startup_diagnostic`` first, because rc=3 is an admission refusal and
+        # the refusal itself names what is holding the directory — the owning
+        # pid, its session and project, and the three ways out. The generic
+        # strings below say only that *something* owns it, which is the half of
+        # the answer the operator cannot act on. ``_launcher_failure_message``
+        # keeps a framework-formatted refusal whole rather than collapsing it to
+        # its last line, which for the lease message left "- or start this
+        # objective in a different directory" and nothing else.
+        result["error"] = (
+            _launcher_failure_message(startup_diagnostic, rc)
+            if startup_diagnostic
+            else ""
+        ) or _workspace_start_error(config) or (
             "workdir changed or is already owned by another active session"
+        )
+        log.error(
+            "background executor rejected session %s: %s",
+            sid,
+            startup_diagnostic or result["error"],
         )
         return result
     if rc != 0:
@@ -319,7 +397,16 @@ def start_project_daemon(
                 ),
                 "daemon": _daemon_dict(_srv().read_daemon_status(life_dir)),
             }
-        result["error"] = f"background executor failed to start (rc={rc})"
+        result["error"] = (
+            "The background worker could not start. "
+            "Check the startup diagnostic and try again."
+        )
+        log.error(
+            "background executor failed to start for session %s (rc=%s): %s",
+            sid,
+            rc,
+            startup_diagnostic or "no launcher diagnostic was captured",
+        )
     else:
         _clear_daemon_admission(life_dir)
     return result
@@ -333,7 +420,7 @@ def _write_parked_state(
     previous_pid: int | None,
 ) -> None:
     try:
-        items = LifeMemory.open(victim_dir).backlog.all()
+        items = LifeMemory.open(victim_dir).backlog.active()
         unfinished = [
             {
                 "id": item.id,
@@ -676,5 +763,14 @@ def stop_project_daemon(
     life_dir = project_life_dir(sid, global_root=global_root)
     if life_dir is None:
         return None
-    rc = _srv().stop_daemon(life_dir, drain=drain, force=force)
-    return {"rc": rc}
+    # An explicit UI force-stop is the Codex-style interrupt path: give the
+    # verified daemon one second to honor its control marker, then terminate
+    # only that captured process tree. Ordinary stop/drain semantics are
+    # unchanged and remain available to lifecycle/upgrade flows.
+    rc = _srv().stop_daemon(
+        life_dir,
+        timeout=1.0 if force else 10.0,
+        drain=drain,
+        force=force,
+    )
+    return {"rc": rc, "forced": force}

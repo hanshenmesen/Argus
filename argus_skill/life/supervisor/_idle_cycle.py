@@ -18,7 +18,7 @@ from ._constants import (
 )
 
 log = logging.getLogger(__name__)
-_DAEMON_IDLE_EXIT_DEFAULT_MINUTES = 30.0
+_DAEMON_IDLE_EXIT_DEFAULT_MINUTES = 0.0
 def _idle_exit_seconds() -> float:
     """Idle wall-clock (s) before a continuous daemon auto-exits; 0 = never."""
     raw = os.environ.get("ARGUS_SKILL_DAEMON_IDLE_EXIT_MIN", "").strip()
@@ -34,6 +34,55 @@ def _idle_exit_seconds() -> float:
 class IdleCycleMixin:
     def _artifact_root(self) -> Path:
         raise NotImplementedError
+
+    def _runtime_failure_circuit_block(
+        self,
+        *,
+        item: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Hold dispatch while the same loaded runtime owns an open circuit."""
+        item_tags = {
+            str(tag).strip().lower()
+            for tag in (getattr(item, "tags", None) or [])
+            if str(tag).strip()
+        }
+        if item_tags & {"framework_maintenance", "runtime_failure_canary"}:
+            return None
+        try:
+            from ..runtime_failure_circuit import active_runtime_failure_circuit
+
+            circuit = active_runtime_failure_circuit(self.memory.root)
+        except Exception:  # noqa: BLE001 - a corrupt advisory file must not crash host
+            log.exception("failed to inspect runtime failure circuit")
+            return None
+        if circuit is None:
+            return None
+        fingerprint = str(circuit.get("fingerprint") or "")
+        reason = (
+            "runtime failure circuit is open; install or canary a changed Argus "
+            f"runtime before dispatching more work ({fingerprint})"
+        )
+        if self._should_journal_idle_repeat("runtime_failure_circuit"):
+            self._emit({
+                "type": EventType.LIFE_RUNTIME_FAILURE_CIRCUIT_BLOCKED,
+                "item_id": str(getattr(item, "id", "") or ""),
+                "fingerprint": fingerprint,
+                "exception_type": circuit.get("exception_type"),
+                "callsite": circuit.get("callsite"),
+                "normalized_error": circuit.get("normalized_error"),
+                "occurrence_count": circuit.get("occurrence_count"),
+                "runtime_identity": circuit.get("runtime_identity"),
+                "operator_alert": True,
+                "reason": reason,
+            })
+            self._emit_status(reason)
+        return {
+            "status": "infra_blocked",
+            "item_id": str(getattr(item, "id", "") or ""),
+            "reason": reason,
+            "fingerprint": fingerprint,
+            "recoverable": True,
+        }
 
     def _drain_user_inbox(self, *, max_messages: int = 10) -> list[str]:
         """Pull all pending operator nudges from the configured inbox.
@@ -59,6 +108,22 @@ class IdleCycleMixin:
             if text:
                 out.append(text)
         if out:
+            try:
+                from ...manager.directive import record_operator_messages
+
+                # Persistence must not depend on routing: a message that cannot
+                # be classified right now is still recorded as plain steering.
+                try:
+                    manager = self._bound_manager()
+                except Exception:  # noqa: BLE001
+                    manager = None
+                record_operator_messages(
+                    self.memory.root,
+                    out,
+                    manager=manager,
+                )
+            except Exception:  # noqa: BLE001 - inbox delivery remains fail-soft
+                log.exception("could not persist operator steering ledger")
             self._emit({
                 "type": EventType.LIFE_INBOX_DRAINED,
                 "count": len(out),
@@ -114,7 +179,7 @@ class IdleCycleMixin:
         # In continuous mode, max_missions is not a hard cap — the
         # planner generates new work indefinitely until it declares
         # the project done. Only the host-global daily budget is enforced.
-        if not self.config.continuous:
+        if not self.config.continuous and self.config.budget.max_missions > 0:
             if self._missions_started >= self.config.budget.max_missions:
                 # Suppress the cap message when there's no held-back work.
                 # Treats "you asked for one mission, you got one" as silent
@@ -194,9 +259,21 @@ class IdleCycleMixin:
         """
         if not getattr(self.config, "continuous", False):
             return ""
-        cap = _idle_exit_seconds()
         idle_since = getattr(self, "_idle_since", None)
-        if cap <= 0 or idle_since is None:
+        if idle_since is None:
+            return ""
+        messages = self._drain_user_inbox()
+        if messages:
+            carryover = getattr(self, "_operator_guidance_carryover", None)
+            if carryover is None:
+                carryover = []
+                self._operator_guidance_carryover = carryover
+            carryover.extend(messages)
+            self._reset_idle_backoff()
+            self._emit_status("operator guidance woke the idle Planner")
+            return ""
+        cap = _idle_exit_seconds()
+        if cap <= 0:
             return ""
         if time.monotonic() - idle_since >= cap:
             return "idle_timeout"
@@ -236,7 +313,7 @@ class IdleCycleMixin:
                     str(getattr(item, "title", "")),
                     str(getattr(item, "status", "")),
                 )
-                for item in self.memory.backlog.all()
+                for item in self.memory.backlog.active()
             )
         except Exception:  # noqa: BLE001
             backlog = []

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from ..core.model_visible_text import (
     contains_integrity_judgment,
     has_material_blocker,
     sanitize_model_judgment_text,
+    sanitize_model_visible_text,
 )
 from ..core.models import ReviewDecision
 from ..core.operator_decision import (
@@ -64,6 +65,38 @@ def _planner_report(
     if authority in _AUTHORITY_IMPACTS:
         report["authority_impact"] = authority
     return report
+
+
+def _planner_report_from_payload(parsed: Mapping[str, Any]) -> dict[str, Any]:
+    """Read the plan fields from either shape the Reviewer has been shown.
+
+    The decision event documented in the prompt is flat — ``plan_signal``,
+    ``plan_challenge``, ``plan_alternative`` sit beside ``status`` — while
+    older schema-constrained output nested the same fields under
+    ``planner_report``. Reading only the nested shape silently discarded every
+    plan challenge the current prompt asks the Reviewer to raise, so a campaign
+    could close round after locally correct round with no way to say that the
+    plan itself had become the obstacle.
+    """
+    nested = parsed.get("planner_report")
+    sources = (nested, parsed) if isinstance(nested, dict) else (parsed,)
+
+    def field(*names: str) -> Any:
+        # Fill only absent fields from the flat event. Explicit nested values,
+        # including false, empty strings and None, remain authoritative.
+        for source in sources:
+            for name in names:
+                if name in source:
+                    return source[name]
+        return None
+
+    return _planner_report(
+        forward_progress=field("forward_progress"),
+        plan_signal=field("plan_signal"),
+        challenge=field("challenge", "plan_challenge"),
+        alternative=field("alternative", "plan_alternative"),
+        authority_impact=field("authority_impact"),
+    )
 
 
 def _frontier_report(value: Any) -> dict[str, Any]:
@@ -137,29 +170,48 @@ def _session_signal(value: Any) -> dict[str, str]:
 
 
 def _apply_model_judgment_policy(decision: ReviewDecision) -> ReviewDecision:
-    """Ensure opaque integrity identifiers cannot become Reviewer blockers."""
+    """Ignore hash-only blockers without overruling substantive judgment."""
     original_reason = str(decision.reason or "")
     original_next_action = str(decision.next_action or "")
-    integrity_judgment = contains_integrity_judgment(original_reason + "\n" + original_next_action)
-    decision.reason = sanitize_model_judgment_text(original_reason)
-    decision.next_action = sanitize_model_judgment_text(original_next_action)
+    original_judgment = original_reason + "\n" + original_next_action
+    integrity_judgment = contains_integrity_judgment(original_judgment)
+    material_blocker = has_material_blocker(original_judgment)
+
+    def sanitize_without_gutting_material_paragraphs(value: str) -> str:
+        kept: list[str] = []
+        for paragraph in value.splitlines():
+            sanitized = sanitize_model_judgment_text(paragraph)
+            if not sanitized and paragraph.strip() and has_material_blocker(paragraph):
+                # Redact opaque values, but retain a paragraph whose engineering
+                # meaning would otherwise disappear with its integrity wording.
+                sanitized = sanitize_model_visible_text(paragraph).strip()
+            if sanitized:
+                kept.append(sanitized)
+        return "\n".join(kept)
+
+    decision.reason = sanitize_without_gutting_material_paragraphs(original_reason)
+    decision.next_action = sanitize_without_gutting_material_paragraphs(
+        original_next_action
+    )
     decision.operator_question = sanitize_model_judgment_text(decision.operator_question)
     if (
-        decision.status != "done"
+        decision.status == "blocked"
         and integrity_judgment
         and not decision.operator_question
         and not decision.next_action
-        and not has_material_blocker(decision.reason)
+        and not material_blocker
     ):
-        decision.status = "done"
-        decision.reason = decision.reason or (
-            "No model-relevant blocker remains after ignoring machine-only integrity metadata."
+        decision.status = "continue"
+        policy_note = (
+            "Policy note: machine-only integrity metadata does not by itself "
+            "justify blocking the project."
         )
+        decision.reason = "\n".join(filter(None, (decision.reason, policy_note)))
     elif not decision.reason:
-        decision.reason = (
-            "The Reviewer cited only machine-only integrity metadata and did not "
-            "identify a semantic blocker."
-        )
+        # Preserve the Reviewer's text whenever possible. This fallback only
+        # covers a non-blocked verdict whose entire rationale was an opaque
+        # integrity assertion.
+        decision.reason = sanitize_model_visible_text(original_reason).strip()
     frontier = decision.frontier_report
     if isinstance(frontier, dict):
         change = str(frontier.get("change") or "")
@@ -170,26 +222,13 @@ def _apply_model_judgment_policy(decision: ReviewDecision) -> ReviewDecision:
             for key in ("cause", "scope", "budget", "recovery_test", "exit_trigger")
         )
         if change == "bounded_regression" and not envelope_complete:
-            decision.status = "replan_requested"
             decision.reason += (
-                " The reported regression has no complete cause, scope, budget, "
-                "recovery test, and exit trigger, so it cannot be accepted as bounded."
+                " Note: the bounded-regression report omitted one or more of cause, "
+                "scope, budget, recovery test, and exit trigger."
             )
-            decision.next_action = (
-                "Replan with a complete regression envelope or restore the prior frontier."
-            )
-            decision.planner_report.update({
-                "forward_progress": False,
-                "plan_signal": "reconsider",
-                "challenge": "The proposed regression was not bounded.",
-                "alternative": "Bound the repair debt or choose a route without it.",
-                "authority_impact": "technical",
-            })
         elif change == "expanding_regression" and decision.status == "done":
-            decision.status = "replan_requested"
-            decision.next_action = (
-                decision.next_action
-                or "Diagnose the expanding regression and revise or abandon the route."
+            decision.reason += (
+                " Note: the same verdict reports an expanding regression."
             )
     return decision
 
@@ -250,52 +289,59 @@ def parse_decision_text(
     if named is not None:
         return named
     for parsed in _candidate_json_objects(cleaned):
-        status = str(parsed.get("status") or "").strip().lower()
-        reason = parsed.get("reason")
-        next_action = parsed.get("next_action")
-        operator_question = parsed.get("operator_question")
-        raw_planner_report = parsed.get("planner_report")
-        if status not in _STATUSES:
-            continue
-        if not isinstance(reason, str) or not reason.strip():
-            continue
-        if not isinstance(next_action, str):
-            continue
-        if operator_question is not None and not isinstance(operator_question, str):
-            continue
-        return _apply_model_judgment_policy(
-            ReviewDecision(
-                status=status,
-                reason=reason.strip(),
-                next_action=next_action.strip(),
-                operator_question=str(operator_question or "").strip(),
-                operator_options=normalize_agent_options(
-                    option
-                    for option in (parsed.get("operator_options") or [])
-                    if isinstance(option, dict)
-                ),
-                checkpoint_recommended=bool(parsed.get("checkpoint_recommended", False)),
-                research_result=normalize_research_result(
-                    parsed.get("research_result")
-                ),
-                planner_report=(
-                    _planner_report(
-                        forward_progress=raw_planner_report.get("forward_progress"),
-                        plan_signal=raw_planner_report.get("plan_signal"),
-                        challenge=raw_planner_report.get("challenge"),
-                        alternative=raw_planner_report.get("alternative"),
-                        authority_impact=raw_planner_report.get("authority_impact"),
-                    )
-                    if isinstance(raw_planner_report, dict)
-                    else {}
-                ),
-                frontier_report=_frontier_report(parsed.get("frontier_report")),
-                session_signal=_session_signal(parsed.get("session_signal")),
-            )
-        )
+        decision = decision_from_payload(parsed)
+        if decision is not None:
+            return decision
     return None
 
 
+def decision_from_payload(payload: Mapping[str, Any]) -> ReviewDecision | None:
+    """Build a verdict from an already-structured Reviewer payload.
+
+    This is what the Reviewer's decision event carries, so the runtime reads it
+    here rather than serialising it back to JSON text and parsing that. The
+    round trip was how the flat event shape came to be dropped: the reader on
+    the far side only ever looked for a nested ``planner_report``.
+
+    ``None`` when a control field is missing or invalid; the caller then treats
+    the turn as having produced no verdict rather than inventing one.
+    """
+    status = str(payload.get("status") or "").strip().lower()
+    reason = payload.get("reason")
+    next_action = payload.get("next_action")
+    operator_question = payload.get("operator_question")
+    if status not in _STATUSES:
+        return None
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    if not isinstance(next_action, str):
+        return None
+    if operator_question is not None and not isinstance(operator_question, str):
+        return None
+    raw_options = payload.get("operator_options")
+    option_values = raw_options if isinstance(raw_options, (list, tuple)) else ()
+    return _apply_model_judgment_policy(
+        ReviewDecision(
+            status=status,
+            reason=reason.strip(),
+            next_action=next_action.strip(),
+            operator_question=str(operator_question or "").strip(),
+            operator_options=normalize_agent_options(option_values),
+            checkpoint_recommended=bool(payload.get("checkpoint_recommended", False)),
+            research_result=normalize_research_result(
+                payload.get("research_result")
+            ),
+            planner_report=_planner_report_from_payload(payload),
+            frontier_report=_frontier_report(payload.get("frontier_report")),
+            session_signal=_session_signal(payload.get("session_signal")),
+        )
+    )
+
+
+# Compatibility reader, not a prompt schema. Several older sessions emitted
+# frontier/session bookkeeping; accepting it is cheap, but the current prompt
+# only asks for fields that affect settlement, operator routing, research
+# certification, or Manager plan adjudication.
 _VERDICT_KEYS = (
     "STATUS",
     "REASON",
@@ -319,6 +365,44 @@ _VERDICT_KEYS = (
 )
 
 
+def _compact_research_result_blocks(text: str) -> str:
+    """Keep JSON evidence strings out of the line-based control-field reader."""
+    from ..core.role_reply import _line_pattern
+
+    pattern = _line_pattern(("RESEARCH_RESULT",))
+    decoder = json.JSONDecoder()
+    chunks: list[str] = []
+    consumed = offset = 0
+    for line in text.splitlines(keepends=True):
+        start = offset
+        offset += len(line)
+        if start < consumed:
+            continue
+        stripped = line.lstrip(" \t")
+        match = pattern.match(stripped)
+        if match is None:
+            continue
+        body_start = start + len(line) - len(stripped) + match.start("value")
+        while body_start < len(text) and text[body_start].isspace():
+            body_start += 1
+        if text.startswith("```", body_start):
+            fence_end = text.find("\n", body_start)
+            if fence_end < 0:
+                continue
+            body_start = fence_end + 1
+            while body_start < len(text) and text[body_start].isspace():
+                body_start += 1
+        try:
+            payload, end = decoder.raw_decode(text, body_start)
+        except ValueError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        chunks.extend((text[consumed:start], "RESEARCH_RESULT=" + json.dumps(payload)))
+        consumed = end
+    return "".join((*chunks, text[consumed:])) if chunks else text
+
+
 def _parse_named_verdict(text: str) -> ReviewDecision | None:
     """The verdict as stated on named lines, or ``None`` if it was not.
 
@@ -328,11 +412,13 @@ def _parse_named_verdict(text: str) -> ReviewDecision | None:
     answer we could not understand.
     """
     from ..core.role_reply import (
+        decision_footer_text,
         read_block,
         read_key_values,
         read_optional,
     )
 
+    text = _compact_research_result_blocks(text)
     values = read_key_values(text, _VERDICT_KEYS)
     status = str(values.get("STATUS") or "").strip().lower()
     if status not in _STATUSES:
@@ -351,16 +437,19 @@ def _parse_named_verdict(text: str) -> ReviewDecision | None:
     evidence = _tagged_values(read_optional(values, "FRONTIER_EVIDENCE"))
     regression = _tagged_values(read_optional(values, "REGRESSION_ENVELOPE"))
     signal = _tagged_values(read_optional(values, "SESSION_SIGNAL"))
-    research_result = normalize_research_result(
-        _load_json(read_optional(values, "RESEARCH_RESULT"))
-    )
+    raw_research_result = _load_json(read_optional(values, "RESEARCH_RESULT"))
+    if raw_research_result is None:
+        raw_research_result = _load_json(read_block(text, "RESEARCH_RESULT", _VERDICT_KEYS))
+    research_result = normalize_research_result(raw_research_result)
     return _apply_model_judgment_policy(
         ReviewDecision(
             status=status,
             reason=reason.strip()[:5000],
             next_action=read_block(text, "NEXT_ACTION", _VERDICT_KEYS).strip()[:1500],
             operator_question=read_optional(values, "OPERATOR_QUESTION")[:500],
-            operator_options=parse_agent_operator_options(text),
+            operator_options=parse_agent_operator_options(
+                decision_footer_text(text)
+            ),
             checkpoint_recommended=(
                 read_optional(values, "CHECKPOINT_RECOMMENDED").casefold() == "true"
             ),
@@ -406,6 +495,45 @@ def _parse_named_verdict(text: str) -> ReviewDecision | None:
     )
 
 
+def describe_unparsed_verdict(messages: list[str]) -> str:
+    """Say what was wrong with an unreadable verdict, in the operator's terms.
+
+    ``_find_decision_in_messages`` returns ``None`` for three unrelated
+    failures — no ``STATUS`` line, a ``STATUS`` outside the allowed set, and a
+    verdict with no rationale — and the caller reported all three as "did not
+    contain a valid named verdict footer". In testbed run 15 (``s-f0dbba19``)
+    that sentence was printed against a reply whose footer was entirely there:
+    eighteen named fields parsed, and only ``STATUS`` was missed, because the
+    model had welded it to the end of the preceding sentence. The operator was
+    told to ask for something they had already been given.
+
+    The welding itself is handled upstream now, in
+    :func:`argus_skill.core.role_reply._split_glued_keys`. This is for whatever
+    the next unreadable reply turns out to be.
+    """
+    from ..core.role_reply import read_block, read_key_values
+
+    text = "\n".join(str(m or "") for m in messages).strip()
+    if not text:
+        return "Reviewer produced no output to read a verdict from."
+    values = read_key_values(text, _VERDICT_KEYS)
+    status = str(values.get("STATUS") or "").strip().lower()
+    if not status:
+        seen = ", ".join(sorted(values)) or "none"
+        return (
+            "Reviewer output had no readable STATUS line "
+            f"(named fields that did parse: {seen})."
+        )
+    if status not in _STATUSES:
+        return (
+            f"Reviewer STATUS={status!r} is not one of "
+            f"{', '.join(sorted(_STATUSES))}."
+        )
+    if not read_block(text, "REASON", _VERDICT_KEYS).strip():
+        return f"Reviewer STATUS={status} carried no REASON; a verdict needs one."
+    return "Reviewer output did not contain a valid named verdict footer."
+
+
 def _find_decision_in_messages(
     messages: list[str],
     *,
@@ -421,4 +549,9 @@ def _find_decision_in_messages(
     return None
 
 
-__all__ = ["_find_decision_in_messages", "parse_decision_text"]
+__all__ = [
+    "_find_decision_in_messages",
+    "decision_from_payload",
+    "describe_unparsed_verdict",
+    "parse_decision_text",
+]

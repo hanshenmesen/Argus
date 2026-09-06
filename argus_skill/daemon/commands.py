@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,9 +28,12 @@ COMMAND_OPERATIONS = frozenset(
 )
 CommandStatus = Literal["accepted", "running", "applied", "failed", "rejected"]
 
-_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = (
+    weakref.WeakValueDictionary()
+)
 _THREAD_LOCKS_GUARD = threading.Lock()
 _MAX_COMMAND_HISTORY = 1_000
+# Command-state lock contention is a diagnosable state-boundary failure.
 _COMMAND_LOCK_TIMEOUT_SECONDS = 30.0
 
 

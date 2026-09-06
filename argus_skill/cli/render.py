@@ -104,7 +104,7 @@ def _render_engineer_progress_terminal(event: dict[str, Any], *, theme: Theme) -
     if kind in {"assistant_message", "agent_message", "message"}:
         visible = strip_named_lines(
             text,
-            ("MILESTONE_STATUS", "OPERATOR_QUESTION", "OPERATOR_OPTIONS"),
+            ("MILESTONE_STATUS", "NEXT_OWNER", "OPERATOR_QUESTION", "OPERATOR_OPTIONS"),
         )
         lines = [line.rstrip() for line in visible.splitlines() if line.strip()]
         if not lines:

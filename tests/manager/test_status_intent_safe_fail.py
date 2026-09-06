@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from argus_skill.manager.front_door import manager_triage
@@ -32,6 +33,18 @@ class _PreProviderRefusalRunner:
 
 class _HandledWithoutReplyRunner:
     last_thread_id = None
+
+    def chat_reply_if_conversational(self, **kwargs: Any) -> bool:
+        return True
+
+
+class _TimedOutWithoutReplyRunner:
+    last_thread_id = None
+    last_chat_outcome = SimpleNamespace(
+        stop_reason=(
+            "External interrupt: Manager turn wall-clock limit reached after 300s"
+        )
+    )
 
     def chat_reply_if_conversational(self, **kwargs: Any) -> bool:
         return True
@@ -70,6 +83,14 @@ def test_handled_empty_self_reply_is_explicit_and_never_dispatched() -> None:
     assert reply is not None
     assert reply != "(no reply)"
     assert "活着" in reply or "运行正常" in reply
+
+
+def test_failed_empty_self_reply_surfaces_the_actual_stop_reason() -> None:
+    reply = _triage(_TimedOutWithoutReplyRunner(), "调研这家公司")
+
+    assert reply is not None
+    assert "wall-clock limit reached after 300s" in reply
+    assert "completed without an assistant message" not in reply
 
 
 def test_successful_task_classify_is_not_overridden() -> None:

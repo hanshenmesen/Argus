@@ -4,6 +4,7 @@ import { Box, Text } from 'ink';
 import {
   displayObjective,
   formatMissionElapsed,
+  formatMissionRouting,
 } from '../../../core/src/missionView.js';
 import { outcomeDimensionSummary } from '../../../core/src/missionOutcome.js';
 import type { MissionTimelineItem, MissionView } from '../../../core/src/types.js';
@@ -82,8 +83,10 @@ export function MissionCockpit({
     ? `${cap(recentRoles[recentRoles.length - 2])} → ${cap(recentRoles[recentRoles.length - 1])}`
     : '';
   const stage = view.stage.label || view.stage.id || '—';
+  const mode = formatMissionRouting(view.routing);
   const round = view.round.max > 0 ? `${view.round.current} / ${view.round.max}` : view.round.current ? String(view.round.current) : '—';
   const outcome = outcomeDimensionSummary(view.outcome);
+  const teamLabel = view.routing.vertical === 'research' ? 'AI RESEARCH TEAM' : 'AI TEAM';
   const compactHeight = height != null && height < 36;
 
   // Ink clears and repaints the whole terminal whenever the live frame reaches
@@ -107,6 +110,7 @@ export function MissionCockpit({
           <Text dimColor>{` · ROUND ${round} · TEAM `}</Text>
           <Text>{activeRoles.length ? activeRoles.join(', ') : 'Manager'}</Text>
         </Text>
+        {mode ? <Text dimColor>{`MODE ${mode}`}</Text> : null}
       </Box>
     );
   }
@@ -123,6 +127,12 @@ export function MissionCockpit({
           <Text dimColor>{` · ROUND ${round} · ELAPSED `}</Text>
           <Text>{formatMissionElapsed(view.mission.elapsed_seconds)}</Text>
         </Text>
+        {mode ? (
+          <Text wrap="truncate-end">
+            <Text dimColor>MODE </Text>
+            <Text>{compact(mode, Math.max(18, width - 7))}</Text>
+          </Text>
+        ) : null}
         <Text wrap="truncate-end">
           <Text dimColor>MODEL SPEND </Text>
           <Text color={spendStatus === 'partial' || spendStatus === 'unpriced' ? theme.warning : theme.success}>
@@ -143,7 +153,7 @@ export function MissionCockpit({
           </Text>
         ) : null}
         <Box flexDirection="column">
-          <Text dimColor>AI RESEARCH TEAM</Text>
+          <Text dimColor>{teamLabel}</Text>
           {ROLE_ORDER.map((name) => {
             const role = roleByName.get(name);
             const status = role?.status ?? 'waiting';
@@ -201,6 +211,12 @@ export function MissionCockpit({
         <Text dimColor>ROUND </Text>
         <Text>{round}</Text>
       </Box>
+      {mode ? (
+        <Box>
+          <Text dimColor>MODE </Text>
+          <Text wrap="wrap">{mode}</Text>
+        </Box>
+      ) : null}
       <Box>
         <Text dimColor>MODEL SPEND </Text>
         <Text color={spendStatus === 'partial' || spendStatus === 'unpriced' ? theme.warning : theme.success}>
@@ -229,7 +245,7 @@ export function MissionCockpit({
       ) : null}
 
       <Box flexDirection="column" marginTop={1}>
-        <Text dimColor>AI RESEARCH TEAM</Text>
+        <Text dimColor>{teamLabel}</Text>
         {handoff ? <Text dimColor>{`handoff · ${handoff}`}</Text> : null}
         {ROLE_ORDER.map((name) => {
           const role = roleByName.get(name);

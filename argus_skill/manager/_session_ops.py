@@ -1,7 +1,7 @@
 """argus.manager._session_ops — session-lock plumbing for the Manager.
 
 Contains every module-level name related to the Manager's persistent codex
-session and its two POSIX advisory file locks:
+session and its two cross-platform advisory file locks:
 
 * ``manager_session_lock`` — serialises concurrent Manager LLM turns.
 * ``manager_pipeline_lock`` — serialises Manager commits with daemon mission
@@ -22,13 +22,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-try:  # POSIX advisory file locking; absent on Windows.
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX fallback
-    fcntl = None  # type: ignore[assignment]
+import portalocker
 
 from ..core.run_gateway import run_exec as gateway_run_exec
 from ..core.runner_errors import result_has_unrecoverable_resume_state
+from ..provider_integrations.authorization_retry import BackendLoginRequired
 from ._helpers import _manager_backend_failure
 
 log = logging.getLogger(__name__)
@@ -40,38 +38,25 @@ _PIPELINE_LOCK = ".manager_pipeline.lock"
 _PIPELINE_YIELD_FILE = ".manager_pipeline_yield.json"
 
 
-def _session_lock_timeout_s() -> float:
-    """Bounded wait for the shared Manager session lock (default 120s). Manager
-    turns are short LLM calls (classify / stage / skill-review), so 120s easily
-    covers a normal turn while capping starvation if a peer turn hangs."""
-    raw = os.environ.get("ARGUS_SKILL_MANAGER_LOCK_TIMEOUT_S", "")
-    try:
-        return max(0.0, float(raw)) if raw.strip() else 120.0
-    except ValueError:
-        return 120.0
+def _acquire_session_lock(fh: Any, *, timeout: float | None = None) -> bool:
+    """Acquire ``LOCK_EX``, optionally bounded for explicit diagnostic callers.
 
-
-def _pipeline_lock_timeout_s() -> float:
-    raw = os.environ.get("ARGUS_SKILL_MANAGER_PIPELINE_LOCK_TIMEOUT_S", "")
-    try:
-        return max(0.0, float(raw)) if raw.strip() else 1800.0
-    except ValueError:
-        return 1800.0
-
-
-def _acquire_session_lock(fh: Any, *, timeout: float) -> bool:
-    """Acquire ``LOCK_EX`` non-blocking, retrying up to ``timeout`` seconds.
-
-    Returns True if acquired, False if the peer held it past the budget (a
-    long/hung turn) — so the caller can fail-open instead of blocking forever.
+    Production Manager locks wait until the OS releases the peer's lock.
     """
-    deadline = time.monotonic() + max(0.0, timeout)
+    deadline = (
+        time.monotonic() + max(0.0, timeout)
+        if timeout is not None
+        else None
+    )
     while True:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portalocker.lock(
+                fh,
+                portalocker.LOCK_EX | portalocker.LOCK_NB,
+            )
             return True
-        except OSError:
-            if time.monotonic() >= deadline:
+        except (OSError, portalocker.exceptions.LockException):
+            if deadline is not None and time.monotonic() >= deadline:
                 return False
             time.sleep(0.2)
 
@@ -82,16 +67,11 @@ def manager_pipeline_lock(root: Path | str):
     path = Path(root)
     path.mkdir(parents=True, exist_ok=True)
     with (path / _PIPELINE_LOCK).open("a+b") as handle:
-        if fcntl is not None and not _acquire_session_lock(
-            handle,
-            timeout=_pipeline_lock_timeout_s(),
-        ):
-            raise TimeoutError("timed out waiting for the current mission boundary")
+        _acquire_session_lock(handle)
         try:
             yield
         finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            portalocker.unlock(handle)
 
 
 def request_manager_pipeline_yield(root: Path | str) -> str:
@@ -115,7 +95,7 @@ def request_manager_pipeline_yield(root: Path | str) -> str:
 def _clear_pipeline_yield_if_token(path: Path, token: str) -> bool:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError):
         return False
     if not isinstance(payload, dict) or str(payload.get("token") or "") != token:
         return False
@@ -140,8 +120,7 @@ def manager_pipeline_yield_requested(root: Path | str) -> bool:
         payload = json.loads(path.read_text(encoding="utf-8"))
         token = str(payload.get("token") or "")
         pid = int(payload.get("pid") or 0)
-        requested_at = float(payload.get("requested_at") or 0.0)
-    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError):
         return False
     if not token or pid <= 0:
         _clear_pipeline_yield_if_token(path, token)
@@ -149,9 +128,6 @@ def manager_pipeline_yield_requested(root: Path | str) -> bool:
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
-        _clear_pipeline_yield_if_token(path, token)
-        return False
-    if requested_at <= 0 or time.time() - requested_at > _pipeline_lock_timeout_s() + 60:
         _clear_pipeline_yield_if_token(path, token)
         return False
     return True
@@ -163,16 +139,11 @@ def manager_session_lock(root: Path | str):
     path = Path(root)
     path.mkdir(parents=True, exist_ok=True)
     with (path / _SESSION_LOCK).open("a+b") as handle:
-        if fcntl is not None and not _acquire_session_lock(
-            handle,
-            timeout=_session_lock_timeout_s(),
-        ):
-            raise TimeoutError("timed out waiting for the current Manager turn")
+        _acquire_session_lock(handle)
         try:
             yield
         finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            portalocker.unlock(handle)
 
 
 @contextmanager
@@ -201,7 +172,7 @@ def _restore_files_on_error(paths: list[Path]):
 
 
 class _ManagerSession:
-    """A flock-serialized, persistent codex session shared by every Manager LLM
+    """A file-lock-serialized persistent codex session shared by every Manager LLM
     call. The thread_id lives at ``<project_root>/.manager_session.json``; a
     sibling ``.manager_session.lock`` serializes cross-process use so the cockpit
     front-end and the daemon never interleave a turn. Fail-open: any lock/IO
@@ -259,13 +230,10 @@ class _ManagerSession:
         run_label: str,
         resume_thread_id: str | None = None,  # noqa: ARG002 — runner Protocol parity; ignored
     ) -> Any:
-        """Run one turn on the shared persistent session, serialized by flock.
+        """Run one turn on the shared persistent session under an advisory lock.
 
-        The session lock is acquired NON-blocking with a bounded wait
-        (``ARGUS_SKILL_MANAGER_LOCK_TIMEOUT_S``, default 120s), so a long/hung turn
-        in the peer process (cockpit vs daemon share one lock per cwd) can't freeze
-        this one indefinitely — if it can't be acquired in time we fall open to a
-        plain no-session call.
+        The session lock serializes the cockpit and daemon's shared Manager
+        thread. It is released by the OS if its owner exits.
 
         Fail-open recovery: if anything in the session-mode path fails (lock setup,
         a corrupt resume tid, a runner that does not accept ``resume_thread_id``),
@@ -273,6 +241,18 @@ class _ManagerSession:
         compatibility shim. The fallback runs AFTER the lock is released, never
         nested under it.
         """
+        from ..core.operator_context import build_operator_context_block
+
+        try:
+            operator_context, _operator_context_revision = build_operator_context_block(
+                "manager", self.project_root, consume_once=False
+            )
+        except OSError:
+            operator_context = ""
+        if operator_context:
+            from ..core.operator_context import append_operator_context
+
+            prompt = append_operator_context(prompt, operator_context)
         if self.skill_paths:
             options = replace(options, skill_paths=list(self.skill_paths))
 
@@ -289,13 +269,7 @@ class _ManagerSession:
             return _no_session()
 
         try:
-            if fcntl is not None and not _acquire_session_lock(
-                fh, timeout=_session_lock_timeout_s()
-            ):
-                # Peer holds a long/hung turn past the budget → don't block forever;
-                # a no-session call uses a fresh thread, so it can't corrupt the
-                # shared session.
-                return _no_session()
+            _acquire_session_lock(fh)
             try:
                 tid = self._read_tid()
                 result = gateway_run_exec(
@@ -330,11 +304,12 @@ class _ManagerSession:
                         pass
                 return result
             finally:
-                if fcntl is not None:
-                    try:
-                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                    except Exception:  # noqa: BLE001
-                        pass
+                try:
+                    portalocker.unlock(fh)
+                except Exception:  # noqa: BLE001
+                    pass
+        except BackendLoginRequired:
+            raise
         except Exception:  # noqa: BLE001 — session-mode failed (lock released) → no-session
             return _no_session()
         finally:
@@ -350,11 +325,11 @@ def reset_manager_session(project_root: Path | str) -> bool:
     EN: A new daemon is a fresh isolation generation — it must NOT resume the
     prior daemon's Manager conversation, which otherwise grows unbounded across
     generations until codex auto-compaction. Stage truth lives in
-    ``research/PIPELINE_STATE.json``, so dropping the thread_id pointer loses
+    ``.argus/PIPELINE_STATE.json``, so dropping the thread_id pointer loses
     nothing load-bearing; the on-disk codex transcript stays auditable.
     中文：新 daemon 是全新的隔离代际，绝不能 resume 上一个 daemon 的 Manager
     会话（它会跨代际无界增长，直到 codex 有损压缩）。stage 真相在
-    ``research/PIPELINE_STATE.json`` 里，清掉 thread_id 指针不丢任何承重信息；
+    ``.argus/PIPELINE_STATE.json`` 里，清掉 thread_id 指针不丢任何承重信息；
     盘上的 codex transcript 不动，仍可审计。
 
     Best-effort, never raises (boot must not be blocked). Returns True if a

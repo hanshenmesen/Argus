@@ -60,6 +60,7 @@ def test_resolve_task_workdir_accepts_directory(tmp_path: Path) -> None:
 
 def test_resolve_task_workdir_allows_symlink_outside_workspace(
     tmp_path: Path,
+    require_symlink_support,
 ) -> None:
     base = tmp_path / "workspace"
     base.mkdir()
@@ -74,6 +75,7 @@ def test_resolve_task_workdir_allows_symlink_outside_workspace(
 def test_adoption_preserves_execution_workspace(
     tmp_path: Path,
     external: bool,
+    request: pytest.FixtureRequest,
 ) -> None:
     base = tmp_path / "workspace"
     base.mkdir()
@@ -81,6 +83,7 @@ def test_adoption_preserves_execution_workspace(
     _git_init(target)
     requested = base / "target"
     if external:
+        request.getfixturevalue("require_symlink_support")
         requested.symlink_to(target, target_is_directory=True)
     (target / "src").mkdir()
     (target / "src" / "module.py").write_bytes(b"VALUE = 1\n")

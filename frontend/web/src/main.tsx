@@ -5,22 +5,35 @@ import App from './App';
 import { adoptTokenFromUrl } from './api';
 import { BootSplash } from './components/BootSplash';
 import { I18nProvider } from './i18n';
+import { queryRetryPolicy } from './hooks';
+import { installStaleChunkRecovery } from './lib/preloadRecovery';
 import '@fontsource-variable/geist';
 import '@fontsource-variable/geist-mono';
+import 'katex/dist/katex.min.css';
 import './index.css';
+
+// A cockpit left open across an update can still reference a deleted hashed
+// chunk. Reload the no-store shell before React turns that import into a blank UI.
+installStaleChunkRecovery(window, () => window.location.reload());
 
 // Runs before the first request so a QR-paired phone is authenticated for
 // every later load, not just the one carrying `?token=`.
 adoptTokenFromUrl();
 
+const embeddedDesktop = window.parent !== window;
+document.documentElement.dataset.argusEmbedded = String(embeddedDesktop);
+
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 3_000, retry: 1, refetchOnWindowFocus: false },
+    queries: { staleTime: 3_000, retry: queryRetryPolicy, refetchOnWindowFocus: false },
   },
 });
 
 function WebApp() {
-  const [booting, setBooting] = useState(true);
+  // Tauri already keeps its native launcher visible until this document has
+  // loaded. Avoid a second full-screen splash in the embedded cockpit; direct
+  // browser/PWA launches retain the remote UI's normal branded transition.
+  const [booting, setBooting] = useState(!embeddedDesktop);
   return (
     <>
       <App />

@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, type Dispatch, type SetStateAction } from 'react';
 import { rankProjects } from '../../core/src/projects';
 import { type ProjectRow } from './api';
 import { type NoticeTone } from './components/ActionNotice';
 import { type useProjectActions } from './hooks';
 import { type ProjectHistoryMode } from './useProjectSelection';
+
+// Manual Stop follows Codex-style immediate interruption. Graceful draining
+// remains available to upgrade/lifecycle flows that explicitly request it.
+export const MANUAL_STOP_FORCE = true;
 
 const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : String(error || 'Unknown error');
@@ -16,10 +20,12 @@ interface RefetchedProjects {
 
 interface UseProjectDaemonActionsOptions {
   actions: ReturnType<typeof useProjectActions>;
+  manageActions: ReturnType<typeof useProjectActions>;
+  manageTargetSid: string | null;
+  setManageTargetSid: Dispatch<SetStateAction<string | null>>;
   activeSid: string | null;
   clearProjectSelection: (mode?: ProjectHistoryMode) => void;
   continuous: { enabled: boolean; objective: string } | null | undefined;
-  currentSnapshotSid: string | undefined;
   notify: (tone: NoticeTone, message: string) => void;
   refetchProjects: () => Promise<RefetchedProjects>;
   selectProject: (id: string, mode?: ProjectHistoryMode) => void;
@@ -28,21 +34,24 @@ interface UseProjectDaemonActionsOptions {
 
 export function useProjectDaemonActions({
   actions,
+  manageActions,
+  manageTargetSid,
+  setManageTargetSid,
   activeSid,
   clearProjectSelection,
   continuous,
-  currentSnapshotSid,
   notify,
   refetchProjects,
   selectProject,
   setDaemonManageOpen,
 }: UseProjectDaemonActionsOptions) {
-  const [manageTargetSid, setManageTargetSid] = useState<string | null>(null);
-
   const daemonBusy = actions.startDaemon.isPending
     || actions.stopDaemon.isPending
-    || actions.updateProject.isPending
-    || actions.deleteProject.isPending;
+    || actions.forceStopDaemon.isPending
+    || manageActions.startDaemon.isPending
+    || manageActions.forceStopDaemon.isPending
+    || manageActions.updateProject.isPending
+    || manageActions.deleteProject.isPending;
 
   const actionFeedback = useCallback((success: string) => ({
     onSuccess: () => notify('success', success),
@@ -54,52 +63,60 @@ export function useProjectDaemonActions({
   [actionFeedback, actions.startDaemon]);
 
   const requestStopDaemon = useCallback(() =>
-    actions.stopDaemon.mutate(true, actionFeedback('Daemon is draining and will stop safely.')),
-  [actionFeedback, actions.stopDaemon]);
+    actions.forceStopDaemon.mutate(
+      undefined,
+      actionFeedback('Stop requested; the verified daemon process is being interrupted.'),
+    ),
+  [actionFeedback, actions.forceStopDaemon]);
 
   const manageStartDaemon = useCallback(async (): Promise<boolean> => {
     try {
-      await actions.startDaemon.mutateAsync();
+      await manageActions.startDaemon.mutateAsync();
       notify('success', 'Daemon resumed.');
       return true;
     } catch (error) {
       notify('error', errorText(error));
       return false;
     }
-  }, [actions.startDaemon, notify]);
+  }, [manageActions.startDaemon, notify]);
 
-  const managePauseDaemon = useCallback(async (): Promise<boolean> => {
+  const manageStopDaemon = useCallback(async (): Promise<boolean> => {
     try {
-      await actions.stopDaemon.mutateAsync(true);
-      notify('success', 'Daemon paused safely.');
+      await manageActions.forceStopDaemon.mutateAsync();
+      await refetchProjects();
+      notify('success', 'Daemon stopped. This session can now be deleted.');
       return true;
     } catch (error) {
       notify('error', errorText(error));
       return false;
     }
-  }, [actions.stopDaemon, notify]);
+  }, [manageActions.forceStopDaemon, notify, refetchProjects]);
 
   const manageRenameProject = useCallback(async (name: string): Promise<boolean> => {
-    if (!activeSid) return false;
+    if (!manageTargetSid) return false;
     try {
-      await actions.updateProject.mutateAsync({ sid: activeSid, name });
+      await manageActions.updateProject.mutateAsync({ sid: manageTargetSid, name });
       notify('success', 'Session name updated.');
       return true;
     } catch (error) {
       notify('error', errorText(error));
       return false;
     }
-  }, [actions.updateProject, activeSid, notify]);
+  }, [manageActions.updateProject, manageTargetSid, notify]);
 
   const manageDeleteProject = useCallback(async (): Promise<boolean> => {
-    if (!activeSid) return false;
+    if (!manageTargetSid) return false;
     try {
-      const deleted = await actions.deleteProject.mutateAsync();
+      const deletedSid = manageTargetSid;
+      const deleted = await manageActions.deleteProject.mutateAsync();
       setDaemonManageOpen(false);
-      clearProjectSelection('replace');
+      setManageTargetSid(null);
       const refreshed = await refetchProjects();
-      const next = rankProjects(refreshed.data?.projects ?? [])[0];
-      if (next) selectProject(next.id, 'replace');
+      if (deletedSid === activeSid) {
+        clearProjectSelection('replace');
+        const next = rankProjects(refreshed.data?.projects ?? [])[0];
+        if (next) selectProject(next.id, 'replace');
+      }
       notify(
         'success',
         deleted.workdir_preserved
@@ -111,24 +128,12 @@ export function useProjectDaemonActions({
       notify('error', errorText(error));
       return false;
     }
-  }, [actions.deleteProject, activeSid, clearProjectSelection, notify, refetchProjects, selectProject, setDaemonManageOpen]);
+  }, [activeSid, clearProjectSelection, manageActions.deleteProject, manageTargetSid, notify, refetchProjects, selectProject, setDaemonManageOpen, setManageTargetSid]);
 
   const requestManageSession = useCallback((projectId: string) => {
-    setDaemonManageOpen(false);
-    if (projectId === activeSid && currentSnapshotSid === projectId) {
-      setManageTargetSid(null);
-      setDaemonManageOpen(true);
-      return;
-    }
     setManageTargetSid(projectId);
-    selectProject(projectId);
-  }, [activeSid, currentSnapshotSid, selectProject, setDaemonManageOpen]);
-
-  useEffect(() => {
-    if (!manageTargetSid || activeSid !== manageTargetSid || currentSnapshotSid !== manageTargetSid) return;
-    setManageTargetSid(null);
     setDaemonManageOpen(true);
-  }, [activeSid, currentSnapshotSid, manageTargetSid, setDaemonManageOpen]);
+  }, [setDaemonManageOpen, setManageTargetSid]);
 
   const requestDispose = useCallback((id: string, op: 'done' | 'skip' | 'rm') =>
     actions.disposeBacklog.mutate(
@@ -159,7 +164,7 @@ export function useProjectDaemonActions({
   return {
     daemonBusy,
     manageDeleteProject,
-    managePauseDaemon,
+    manageStopDaemon,
     manageRenameProject,
     manageStartDaemon,
     requestDispose,

@@ -98,7 +98,14 @@ def test_engineer_and_reviewer_edit_one_shared_checkpoint_in_sequence(
     ]
 
     prompts = {label: prompt for label, prompt, _ in backend.history}
-    assert str(checkpoint.resolve()) not in prompts["engineer-r1"]
+    # Round 1 is told the path too. It has to be: round 1 is the round that
+    # WRITES the baton round 2 reads, and its sealed handoff record already
+    # advertises `checkpoint.path`. Withholding it here meant round 2 opened
+    # that advertised path to a missing file and restarted from nothing.
+    # `test_reviewer_output_does_not_need_checkpoint_json` below pins the other
+    # side of this: a one-round mission still writes no checkpoint, because the
+    # instruction carries its own "only when another round needs it" trigger.
+    assert str(checkpoint.resolve()) in prompts["engineer-r1"]
     assert str(checkpoint.resolve()) in prompts["engineer-r2"]
     reviewer_prompts = [p for label, p, _ in backend.history if label == "reviewer"]
     assert all(str(checkpoint.resolve()) not in prompt for prompt in reviewer_prompts)

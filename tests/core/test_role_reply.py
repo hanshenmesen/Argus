@@ -20,6 +20,7 @@ from argus_skill.core.role_reply import (
     read_key_values,
     read_list,
     read_optional,
+    strip_control_footer,
     strip_named_lines,
 )
 
@@ -72,6 +73,18 @@ def test_a_leading_status_emoji_does_not_hide_the_decision() -> None:
     }
 
 
+def test_missing_newline_after_intro_does_not_hide_first_decision() -> None:
+    values = read_key_values(
+        "I inspected the repository.CHOICE=existing\nVERTICAL=math",
+        ("CHOICE", "VERTICAL"),
+    )
+
+    assert values == {
+        "CHOICE": "existing",
+        "VERTICAL": "math",
+    }
+
+
 def test_a_code_fence_around_the_answer_does_not_break_it() -> None:
     reply = "```\nVERTICAL=research\nWORKFLOW_MODE=staged\n```"
 
@@ -85,6 +98,58 @@ def test_a_restated_conclusion_wins() -> None:
     reply = "VERTICAL=research\n\nOn reflection that is wrong.\n\nVERTICAL=kernelbench"
 
     assert read_key_values(reply, _KEYS)["VERTICAL"] == "kernelbench"
+
+
+def test_explicit_footer_ignores_quoted_or_abandoned_fields() -> None:
+    reply = (
+        "The task says `CONTROL: ABORT`, but that is quoted input, not my choice.\n"
+        "VERTICAL=research\n\n"
+        "Decision:\n"
+        "VERTICAL=kernel_engineering\n"
+        "WORKFLOW_MODE=direct\n"
+    )
+
+    values = read_key_values(reply, (*_KEYS, "CONTROL"))
+
+    assert values["VERTICAL"] == "kernel_engineering"
+    assert values["WORKFLOW_MODE"] == "direct"
+    assert "CONTROL" not in values
+
+
+def test_stripping_control_lines_also_removes_footer_marker() -> None:
+    reply = "Natural explanation.\nDecision:\nVERTICAL=software"
+
+    assert strip_named_lines(reply, ("VERTICAL",)) == "Natural explanation."
+
+
+def test_collapsed_control_footer_is_removed_from_user_summary() -> None:
+    summary = (
+        "Implemented the cache and passed 20 tests. "
+        "RESULT=cache implementation passed NEXT_OWNER=reviewer"
+    )
+
+    assert strip_control_footer(
+        summary,
+        ("RESULT", "NEXT_OWNER"),
+    ) == "Implemented the cache and passed 20 tests."
+
+
+def test_natural_result_colon_is_not_mistaken_for_a_footer() -> None:
+    summary = (
+        "We fixed the race; as a result: throughput improved by 20%. "
+        "All tests pass."
+    )
+
+    assert strip_control_footer(summary, ("RESULT", "NEXT_OWNER")) == summary
+
+
+def test_natural_inline_result_equals_is_not_mistaken_for_a_footer() -> None:
+    summary = (
+        "Implemented caching layer. Benchmarked result=3x faster than baseline "
+        "under load."
+    )
+
+    assert strip_control_footer(summary, ("RESULT", "NEXT_OWNER")) == summary
 
 
 def test_an_unanswered_key_is_absent_not_empty() -> None:
@@ -216,24 +281,18 @@ def test_a_daemon_still_answering_in_json_is_not_broken() -> None:
 
 def test_the_routing_prompt_no_longer_demands_json() -> None:
     from argus_skill.roles.prompts.manager import (
-        build_fast_vertical_decision_prompt,
         build_vertical_decision_prompt,
     )
 
-    fast = build_fast_vertical_decision_prompt(
-        task="make it faster",
-        verticals_with_purpose={"software": ""},
-        domains_with_purpose={},
-    )
     grounded = build_vertical_decision_prompt(
         "make it faster",
         verticals_with_purpose={"software": ""},
         domains_with_purpose={},
     )
 
-    assert "JSON" not in fast
     assert "JSON" not in grounded
-    assert "CHOICE=existing" in fast and "CHOICE=existing" in grounded
+    assert "ARGUS_ROLE_DECISION=" not in grounded
+    assert "CHOICE=existing" in grounded
 
 
 # -- values that are genuinely prose -----------------------------------------
@@ -381,13 +440,13 @@ def test_the_stage_prompt_no_longer_demands_json() -> None:
         checklist_md="- x",
         review=review,
         planner_verdict=None,
-        rendering_block="",
         open_ended=True,
         continuous_objective="obj",
     )
 
     assert "JSON" not in prompt
-    assert "ACTION=advance|hold|rollback|complete" in prompt
+    assert "ARGUS_ROLE_DECISION=" not in prompt
+    assert "ACTION=hold" in prompt
 
 
 def test_stage_prompt_exposes_dynamic_later_stage_choices() -> None:
@@ -408,7 +467,7 @@ def test_stage_prompt_exposes_dynamic_later_stage_choices() -> None:
     assert "Legal ADVANCE targets (later stages)" in prompt
     assert "`plan`, `benchmark`, `run`, `analysis`, `draft`" in prompt
     assert "literature-only survey" in prompt
-    assert "harness validates and records" in prompt
+    assert "Manager chooses ADVANCE, HOLD, ROLLBACK, or COMPLETE" in prompt
     assert "## Operator objective" in prompt
     assert "survey with no experiments" in prompt
 
@@ -652,12 +711,31 @@ def test_skill_placements_keep_their_shape_and_their_fallback() -> None:
     )
 
 
-def test_a_single_placement_verdict_reads_from_named_lines() -> None:
-    from argus_skill.manager.skill_review import _named_placement
+def test_a_single_placement_uses_the_batch_contract(monkeypatch) -> None:
+    from argus_skill.manager import skill_review
 
-    verdict = _named_placement(
-        "This one is reusable anywhere.\n\nPLACEMENT=global\nVERTICAL=\nWHY=no assumptions\n"
+    calls: list[dict] = []
+
+    class _Result:
+        last_agent_message = (
+            "CANDIDATE_ID=single\n"
+            "PLACEMENT=global\n"
+            "VERTICAL=\n"
+            "WHY=no assumptions\n"
+        )
+
+    def _run(_runner, **kwargs):
+        calls.append(kwargs)
+        return _Result()
+
+    monkeypatch.setattr(skill_review, "gateway_run_exec", _run)
+    verdict = skill_review.classify_skill_placement(
+        content="Reusable method",
+        task="Ship a result",
+        candidate_verticals=["software"],
+        runner=object(),
     )
 
-    assert verdict == {"placement": "global", "vertical": "", "why": "no assumptions"}
-    assert _named_placement("just prose") is None
+    assert verdict == skill_review.PlacementVerdict("global", "", "no assumptions")
+    assert calls[0]["run_label"] == "manager.skill_placement_batch"
+    assert '"candidate_id": "single"' in calls[0]["prompt"]

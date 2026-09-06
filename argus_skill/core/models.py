@@ -33,6 +33,7 @@ LoopStatus = Literal[
     "paused_provider_cooldown",
     "paused_provider_fence",
     "paused_daemon_shutdown",
+    "paused_external_work",
     "paused_operator",
     "aborted",
     "infra_blocked",
@@ -65,7 +66,13 @@ class RunnerOptions:
     # inspect project state without granting write access; None preserves each
     # backend's existing default behavior.
     sandbox_mode: str | None = None
-    # Strong process-level confinement used by daemon self-maintenance. Unlike
+    # Preserve the requested sandbox mode for this call even when the process
+    # default keeps legacy full-access behavior for normal runtime roles.
+    force_safe_mode: bool = False
+    # Remove all model-visible tools for prompts that contain untrusted
+    # diagnostic text. Unsupported backends must fail closed before spawning.
+    disable_tools: bool = False
+    # Strong process-level confinement used by isolated framework maintenance. Unlike
     # backend-native sandbox flags, this applies to every CLI backend and fails
     # closed when the host cannot provide isolation.
     isolate_workdir: bool = False
@@ -156,17 +163,14 @@ class RunnerResult:
     # private process group; the runner attempted cleanup by that exact PGID.
     orphan_process_group_id: int = 0
     orphan_process_group_cleanup_succeeded: bool = False
+    role_decisions: list[dict[str, Any]] = field(default_factory=list)
+    operator_context_revision: int = 0
 
     @property
     def last_agent_message(self) -> str:
         if not self.agent_messages:
             return ""
         return self.agent_messages[-1]
-
-    @property
-    def message(self) -> str:
-        """Concatenated agent message text for backend compatibility."""
-        return "\n".join(self.agent_messages)
 
 
 @dataclass
@@ -201,7 +205,10 @@ class ReviewDecision:
     backend_fatal_error: str = ""
     backend_exit_code: int | None = None
     backend_stop_kind: StopKind | None = None
+    # Runtime provenance for the pre-Reviewer operator-abort short circuit.
+    engineer_aborted_before_review: bool = False
     research_result: dict[str, Any] | None = None
+    manuscript_snapshot: dict[str, str] | None = None
 
     @property
     def final_submission_certified(self) -> bool:
@@ -239,6 +246,8 @@ class ReviewDecision:
             "stop_kind": self.backend_stop_kind,
             "usage_scope": "delta",
         }
+        if isinstance(self.manuscript_snapshot, dict):
+            payload["manuscript_snapshot"] = dict(self.manuscript_snapshot)
         report = self.planner_report if isinstance(self.planner_report, dict) else {}
         forward_progress = report.get("forward_progress")
         if isinstance(forward_progress, bool):

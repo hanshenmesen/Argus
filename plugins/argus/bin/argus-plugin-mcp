@@ -1,21 +1,2 @@
 #!/bin/sh
-
-if [ -n "${ARGUS_PLUGIN_PYTHON:-}" ]; then
-  exec "$ARGUS_PLUGIN_PYTHON" -m argus_skill.plugin.mcp_server
-fi
-
-managed_python="${ARGUS_HOME:-$HOME/.local/share/argus}/venv/bin/python"
-if [ -x "$managed_python" ]; then
-  exec "$managed_python" -m argus_skill.plugin.mcp_server
-fi
-
-if command -v argus-plugin-server >/dev/null 2>&1; then
-  exec argus-plugin-server
-fi
-
-if python3 -c 'import argus_skill' >/dev/null 2>&1; then
-  exec python3 -m argus_skill.plugin.mcp_server
-fi
-
-echo "Argus Python package is unavailable. Install Argus and run argus --doctor, or set ARGUS_PLUGIN_PYTHON to its Python interpreter." >&2
-exit 127
+exec node "$(dirname "$0")/argus-plugin-mcp.mjs"

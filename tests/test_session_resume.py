@@ -1,4 +1,4 @@
-"""Fresh-per-round Engineer session contract."""
+"""Role-session defaults and fresh-only fallback contract."""
 from __future__ import annotations
 
 import json
@@ -45,8 +45,8 @@ def _loop(backend: MemoryBackend, skills: Path, checkpoint: Path | None = None) 
     )
 
 
-def test_role_session_policy_defaults_to_fresh() -> None:
-    assert SupervisedConfig().role_session_policy == "fresh"
+def test_role_session_policy_defaults_to_backend_aware_auto() -> None:
+    assert SupervisedConfig().role_session_policy == "auto"
 
 
 def test_engineer_and_reviewer_never_resume_across_rounds_or_missions(
@@ -107,12 +107,16 @@ def test_continuation_engineer_round_uses_compact_checkpoint_prompt(tmp_path: Pa
     backend = MemoryBackend()
     backend.queue("matcher", CannedResponse(message='{"matched": []}'))
     backend.queue("distiller", CannedResponse(message=SKILL_MD))
-    backend.queue("engineer-r1", CannedResponse(message="r1"))
+    backend.queue("engineer-r1", CannedResponse(message="r1", thread_id="e1"))
     backend.queue("reviewer", CannedResponse(message=_review("continue")))
-    backend.queue("engineer-r2", CannedResponse(message="r2"))
+    backend.queue("engineer-r2", CannedResponse(message="r2", thread_id="e1"))
     backend.queue("reviewer", CannedResponse(message=_review("done")))
 
-    out = _loop(backend, tmp_path / "skills").run("task", workdir=tmp_path)
+    # Compact continuation prompts apply only to resumable provider threads;
+    # a fresh-policy session repeats the static contract every round.
+    loop = _loop(backend, tmp_path / "skills")
+    loop.config.role_session_policy = "rolling"
+    out = loop.run("task", workdir=tmp_path)
     assert out.successful
 
     prompts = [

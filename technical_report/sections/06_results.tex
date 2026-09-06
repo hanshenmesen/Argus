@@ -1,0 +1,426 @@
+\section{Results}
+\label{sec:results}
+
+The results come in that order for a reason. Seven arenas establish that the runtime
+does the work; \DutyWallHours{} wall-clock hours establish that it did so with the
+Driver's seat empty. Neither half means much alone. A capability number obtained under
+continuous supervision is a different result from the same number obtained unattended,
+and an empty seat is worth nothing if nothing came out of it. We report the floor, then
+the human cost of reaching it, then what the unattended hours delivered.
+
+\subsection{Capability Floor Across Seven Arenas}
+
+Table~\ref{tab:benchmark-results} is the primary empirical summary and reports all
+seven benchmarks in one comparison; Table~\ref{tab:benchmark-definitions} defines
+the task and metric for each row.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\linewidth}{@{}p{1.55cm}p{1.55cm}p{1.10cm}X p{1.75cm}X@{}}
+\toprule
+\rowcolor{papersand}
+\textbf{Benchmark} & \textbf{Backbone} & \textbf{Backend} & \textbf{Protocol} & \textbf{\systemname result} & \textbf{Comparison} \\
+\midrule
+SWE-Bench Pro & GPT-5.5/xhigh & Copilot & 731 software-repair tasks & $\approx$78\% accuracy & Direct Copilot $\approx$59\%; 1.41$\times$ aggregate Tokens \\
+SOL-ExecBench & GPT-5.5 & Codex & B200; 101 kernels & Rank \#6 globally; 7 kernels in the top 3 & Beat the \#1-ranked entrant on 2 kernels head to head \\
+nanochat B200 & GPT-5.5 & Codex & 5 min; 1$\times$B200 & 0.9636 BPB & Human best 0.9646 \\
+nanochat H100 & GPT-5.5 & Codex & 5 min; 1$\times$H100 & 0.9855 BPB & Human best 0.9879 \\
+nanoGPT speedrun & GPT-5.5 & Codex & 8$\times$H100; $N{=}10$ & 79.77 s & Same-device human 80.18 s \\
+AARRI-Bench & GPT-5.5 & Codex & 82 research-intern tasks & 63/82 (76.8\%) & Paper best 68.3\% \\
+Math-Reasoning Data & GPT-5.5 & Codex & AIME-style synthesis & 28.0 gap & Arbor 20.83; Claude 8.33; Codex 6.25 \\
+\bottomrule
+\end{tabularx}
+\caption{Results across seven benchmark arenas. Values remain in task-native units
+and are not cross-normalized. Backbone denotes the model driving the research
+agent; Backend denotes the execution surface.}
+\label{tab:benchmark-results}
+\end{table}
+
+Three of these arenas---nanochat, the nanoGPT speedrun, and SOL-ExecBench---are also
+run by systems purpose-built for them. Recursive reports stronger numbers than ours on
+the first two~\citep{recursive2026firststeps}. We report them anyway, and read them as
+a floor rather than a claim to the frontier: they establish that a general runtime
+carrying an independent Reviewer, an authority boundary, and a durable campaign
+contract remains competitive on tasks a specialist system optimizes directly. A
+verification-gated architecture that lost badly here would be paying for its gates in
+end-task performance, and Section~\ref{sec:limitations} would have to say so.
+
+The runtime is not bound to one backbone or one execution surface. A separate
+SWE-Bench Pro run replaces GPT-5.5 on Copilot with GLM-5.2 at a 200K-token context
+window, driven through Claude Code, and is currently at 70.94\% accuracy. That run
+is still in progress and has no matched Direct baseline on this backend, so we do
+not enter it in Table~\ref{tab:benchmark-results} or in any longitudinal analysis;
+we note it because the runtime carried the same contract, routing, and Reviewer
+policy onto a different model and a different agent surface without
+re-instrumentation.
+
+As a small upstream-adoption example, an \systemname-optimized TileLang
+\code{RWKV6} kernel was reviewed by a Moonshot AI-affiliated FLA collaborator and
+merged into \code{fla-org:main}
+(\href{https://github.com/fla-org/flash-linear-attention/pull/1045}{pull request (PR) \#1045};
+\href{https://github.com/fla-org/flash-linear-attention/commit/c70f11c5530142450525549cc96d13d9f5165f69}
+{commit \code{c70f11c}}); Appendix~\ref{app:upstream-kernel} records the technical
+details.
+
+An eighth arena is in progress and reported as partial. The MLE-Bench Lite campaign
+runs the official Low split~\citep{chan2024mlebench} under a reviewer-approved medal
+gate: a competition closes only when an independently reviewed submission earns a
+Kaggle medal, so outcomes are medals rather than leaderboard positions.
+Table~\ref{tab:mle-medals} lists those closed to date---\MLEMedals{} medals from
+\MLEGraded{} graded competitions, a \MLEMedalRate\% rate, evenly split across gold,
+silver, and bronze. We report the denominator because a medal rate without its graded
+total is not interpretable; the remaining four closed without a medal, two of them
+documented in detail.
+
+The gate is narrow rather than nominal. On \code{denoising-dirty-documents} the
+campaign settled 0.00009 RMSE short of the silver band, and on
+\code{jigsaw-toxic-comment-classification-challenge} it cleared bronze by 0.00018
+AUC---both awarded by the external grader against the official leaderboard, not by
+internal review. The transparent-conductor result is also a route change under that
+gate: the grader rejected the initial approach at 0.208 RMSLE, the campaign replaced
+it with a published state-of-the-art method, and the grader certified the replacement
+at 0.06402 against a 0.06582 bronze threshold. Remaining competitions continue; we
+exclude this arena from Table~\ref{tab:benchmark-results} and will report the full
+split on completion.
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\linewidth}{@{}Xp{1.85cm}p{1.75cm}p{1.35cm}@{}}
+\toprule
+\rowcolor{papersand}
+\textbf{Competition} & \textbf{Metric} & \textbf{\systemname} & \textbf{Medal} \\
+\midrule
+\code{aerial-cactus-identification} & AUC $\uparrow$ & \textbf{1.00000} & \textbf{Gold} \\
+\code{dogs-vs-cats-redux-kernels-edition} & LogLoss $\downarrow$ & \textbf{0.02168} & \textbf{Gold} \\
+\code{detecting-insults-in-social-commentary} & AUC $\uparrow$ & \textbf{0.91386} & \textbf{Gold} \\
+\code{histopathologic-cancer-detection} & AUC $\uparrow$ & 0.98312 & Silver \\
+\code{leaf-classification} & LogLoss $\downarrow$ & 0.00196 & Silver \\
+\code{mlsp-2013-birds} & AUC $\uparrow$ & 0.91479 & Silver \\
+\code{denoising-dirty-documents} & RMSE $\downarrow$ & 0.02618 & Bronze \\
+\code{jigsaw-toxic-comment-classification-challenge} & AUC $\uparrow$ & 0.98657 & Bronze \\
+\code{nomad2018-predict-transparent-conductors} & RMSLE $\downarrow$ & 0.06402 & Bronze \\
+\bottomrule
+\end{tabularx}
+\caption{MLE-Bench Lite competitions closed with a medal by \systemname{} so far.
+Arrows give the direction of improvement: area under the ROC curve (AUC) is
+maximized, while log loss (LogLoss), root mean squared error (RMSE), and
+column-wise root mean squared logarithmic error (RMSLE) are minimized. Each score
+is the Reviewer-approved submission that the external MLE-Bench grader scored, and
+each medal is the grader's award against that competition's official Kaggle
+leaderboard. Seven of the nine rows are reconciled against the 2026-07-29
+reviewer-approved campaign snapshot, which records 40 graded submissions across
+nine competitions. The campaign is still running, so this table reports the
+competitions closed to date rather than a final standing.}
+\label{tab:mle-medals}
+\end{table}
+
+The table shows one runtime reaching competitive outcomes across heterogeneous
+tasks. The remainder of this section
+analyzes the SWE-Bench Pro row because it provides a long sequential trajectory and
+Reviewer decisions.
+
+\subsection{Does the Driver's Seat Stay Empty?}
+\label{sec:duty-cycle}
+
+Every preceding result measures what the runtime produced. This one measures whether
+producing it required a person. Across \DutyCampaigns{} campaigns and
+\DutyWallHours{} wall-clock hours, \systemname{} asked for a human
+\DutyInterruptions{} times---once every \DutyInterval{} hours---and spent
+\DutyCycleLow--\DutyCycleHigh\% of its available time working. The seat stayed empty.
+
+Two metrics carry that claim, and neither survives alone. \emph{Interruption rate}
+alone is minimised by a system that does nothing; \emph{duty cycle} alone is
+maximised by a system that burns Tokens in a loop. Together they pin the case that
+matters: work is being done, and nobody is being asked to supervise it.
+
+Both quantities are defined in Section~\ref{sec:unattended-formal}: duty cycle by
+complement in Equation~\ref{eq:duty-cycle}, so that what counts as productive never
+has to be adjudicated, and interruption rate in
+Equation~\ref{eq:interruption-rate} over system-initiated requests only. We report
+the partition of Equation~\ref{eq:interruption-partition} alongside the rate, because
+a request for a credential and a request arising from indecision are different facts
+about the system.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/autonomy_profile.pdf}
+  \caption{Unattended operating profile. Panel (a) gives duty cycle per campaign
+  under Equation~\ref{eq:duty-cycle}; the two lower bars are annotated with why they
+  sit lower, and neither reason is agent hesitation. Panel (b) classifies every
+  human request raised across the \DutyCampaigns{} campaigns by what it asked for.
+  The two metrics are reported together because neither is interpretable alone: a
+  system that does nothing has a perfect interruption rate, and a system that loops
+  uselessly has a perfect duty cycle.}
+  \label{fig:autonomy-profile}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}Xp{1.7cm}p{1.7cm}p{1.9cm}@{}}
+\toprule
+\rowcolor{papersand}
+\textbf{Campaign} & \textbf{Span (h)} & \textbf{Busy (h)} & \textbf{Duty cycle} \\
+\midrule
+Research campaign A & 168.9 & 107.4 & \textbf{98.7\%} \\
+Research campaign B & 109.4 & 25.4 & \textbf{97.5\%} \\
+Mathematics campaign & 168.8 & 63.2 & \textbf{96.1\%} \\
+Retrieval-agent campaign & 133.1 & 46.5 & \textbf{95.3\%} \\
+Presentation campaign & 70.8 & 27.1 & \textbf{95.1\%} \\
+FlashAttention-4 adaptation & \FlashDASpan{} & 21.2 & 83.7\% \\
+Local-inference campaign & 169.2 & 44.7 & \DutyDegradedCycle\% \\
+\bottomrule
+\end{tabularx}
+\caption{Duty cycle with work in hand, computed from
+Equation~\ref{eq:duty-cycle}. Including all idle time---periods with an empty
+backlog awaiting a new assignment---the aggregate raw busy fraction is
+\DutyCycleRaw\%; the two figures answer different questions and should not be
+conflated.}
+\label{tab:duty-cycle}
+\end{table}
+
+Five campaigns sit between \DutyCycleLow\% and \DutyCycleHigh\%. The two lower rows
+are the informative ones. The FlashAttention-4 adaptation ran in a one-assignment
+-at-a-time mode: each of its long silences begins with a mission completing
+successfully and ends with the operator supplying the next objective, so the gap
+measures the human's response latency, not the runtime's hesitation. The lowest row,
+at \DutyDegradedCycle\%, is the campaign whose interruption log records a failed
+NVIDIA driver, corrupted container image storage, and contention for an exclusive
+GPU window. \textbf{The ceiling on unattended operation in these traces is
+infrastructure availability, not agent autonomy.}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}Xp{1.5cm}p{1.5cm}@{}}
+\toprule
+\rowcolor{papersand}
+\textbf{What the system asked for} & \textbf{Count} & \textbf{Share} \\
+\midrule
+Broken infrastructure (driver, storage, auth outage, GPU window) & 13 & \DutyInfraPercent\% \\
+Credentials, budget, or authorization & 10 & \DutyAuthorityPercent\% \\
+Missing context files & 7 & \DutyContextPercent\% \\
+\textbf{Research judgment} & \textbf{\DutyJudgmentCount{}} & \textbf{\DutyJudgmentPercent\%} \\
+Framework defect & 3 & \DutyFrameworkPercent\% \\
+\bottomrule
+\end{tabularx}
+\caption{All \DutyInterruptions{} human requests raised across \DutyCampaigns{}
+campaigns and \DutyWallHours{} wall-clock hours, classified by what was asked.}
+\label{tab:interruptions}
+\end{table}
+
+Across \DutyCampaigns{} campaigns, \DutyWallHours{} wall-clock hours, and
+\DutyEvents{} logged events, the runtime raised \DutyInterruptions{} requests for a
+human: one every \DutyInterval{} hours. The composition matters more than the rate.
+A majority---\DutyInfraPercent\% infrastructure plus \DutyAuthorityPercent\%
+authority---are cases where no autonomy improvement would help, because the machine
+was broken or the decision was not the machine's to make. The authority requests show
+the boundary working as designed rather than as a generic escape hatch; a
+representative one proposes its own ceiling before asking, requesting at most 256
+additional calls under an existing subscription with an explicit incremental billing
+cap of zero and no new credentials. Only \DutyJudgmentPercent\%, that is
+\DutyJudgmentCount{} requests in \DutyWallHours{} hours, are the case the Driver
+framing is really about: work was available and the system could not decide how to
+proceed. One of those is a mathematical campaign reporting that it had exhausted the
+analytic and structural bounding methods within its current scope---an escalation we
+would want a research system to make.
+
+These campaigns are also long individually, which matters for a reason separate from
+autonomy. \CampaignsOverWeek{} of the \DutyCampaigns{} exceed a week of wall-clock
+time and the longest runs \LongestCampaignDays{} days, with a single trace recording
+\LargestTraceEvents{} events. A trajectory of that span contains dependencies no
+short episode can: a premise adopted early, contradicted by a measurement days later,
+and revised with both states still on the record.
+Section~\ref{sec:limitations} returns to why that is the interesting property of this
+data.
+
+The remaining \DutyContextPercent\% are the runtime's own fault in a specific and
+fixable way: canonical handoff files went missing and the system correctly refused to
+proceed from an inferred state rather than guess. Together with the infrastructure
+share, this locates most of the remaining gap in operational engineering---process
+supervision, storage reliability, durable context---rather than in the agent loop.
+
+For scale, a strong coding agent driven turn by turn sustains roughly
+\CodexEndurance{} hour of unattended operation before requiring its operator, an
+interval two orders of magnitude below the \DutyInterval{}-hour figure above. The
+consequence for duty cycle follows from arithmetic rather than measurement: a harness
+whose Driver is a person cannot exceed that person's working hours, so even an
+operator devoting eight hours a day to a single campaign bounds it at
+33\%---and that ceiling is unaffected by how capable the underlying model becomes. The part
+that matters needs no experiment at all: it is arithmetic, and no scaffolding
+difference between the two systems touches it. One system's clock follows its
+operator's waking hours; the other's does not.
+
+\subsection{What the Unattended Hours Delivered}
+\label{sec:delivery}
+
+Duty cycle establishes that the seat stayed empty; it does not establish that
+anything worth having came out of it. Section~\ref{sec:infra-vertical} presents the
+delivery evidence in full, drawn from GPU and serving infrastructure because that
+domain pairs an unforgiving verifier with reviewers outside this project. Three
+comparisons bound the question here.
+
+Against a human working with a coding agent, on a SenseNova U1 integration into
+SGLang, one engineer invested over \SGLangHumanHours{} hours without completing the
+task, while \systemname{} finished it within a \SGLangArgusHours{}-hour wall-clock
+envelope under an operator who was not an infrastructure specialist. Against a
+specialist team, on a FlashAttention-4 adaptation carrying six diffusion-LLM mask
+families across two GPU architectures, the runtime reached
+\FlashDAGapLow--\FlashDAGapHigh\% of native kernel performance for under
+\FlashDACostCNY{} CNY of model spend, in a direction that team had worked for over
+three months. Against an external reviewer, \FLAPRTotal{} kernels submitted to
+\code{flash-linear-attention} were accepted with no blocking changes requested.
+
+The first two are bounds, not controlled trials, and Section~\ref{sec:limitations}
+sets out their asymmetries. The third answers to nobody here: it was decided by
+people who did not write the work and had no stake in its acceptance.
+
+\subsection{Knowing When to Stop: Verification Routing and Non-Termination}
+
+Objective revision is admissible only if the runtime can withhold completion. This
+subsection measures where independent verification is spent and where the runtime
+declines to declare a task finished.
+
+Of \ReviewerTasks{} tasks, \ReviewerInvoked{} (\ReviewerInvokedPercent\%) invoke
+an independent Reviewer, while \ReviewerSkipped{} (\ReviewerSkippedPercent\%) use
+Engineer self-review. The Reviewer requests another implementation round on
+\ReviewerRevisionRequested{} tasks. After revision, \ReviewerVerifierRecovered{}
+pass the official verifier and \ReviewerStrictRescues{} complete the strict
+\code{continue}$\rightarrow$revision$\rightarrow$\code{done} loop. A further
+\ReviewerFirstBlocked{} tasks receive a \code{blocked} verdict, recording that the
+runtime cannot complete them rather than emitting an unsupported completion.
+Refusing to stop early and refusing to claim success are two expressions of the same
+gate.
+
+Reviewer-routed tasks consume \ReviewerTokenRatio$\times$ as many solve input
+tokens and \ReviewerTimeRatio$\times$ as much active time as self-reviewed tasks on
+average, indicating that the routing policy selects a harder workload. The recovery
+funnel is therefore more interpretable than a raw group-accuracy comparison.
+
+The two populations should not be conflated. Of the Reviewer-routed workload,
+\ReviewerFirstAccepted{} tasks are accepted on first review and
+\ReviewerRevisionRequested{} receive a revision request, alongside
+\ReviewerFirstBlocked{} declared blocked; verifier pass
+(\ReviewerVerifierRecovered{}) and strict rescue (\ReviewerStrictRescues{}) are
+nested recovery milestones \emph{within} the revision-requested group rather than
+separate outcome classes. Panel~(a) of Figure~\ref{fig:swebench-evolution} shows
+this partition together with the accuracy comparison.
+
+\subsection{Cost of the Mechanism as State Accumulates}
+
+Figure~\ref{fig:swebench-evolution} shows the \systemname-only longitudinal
+trajectory. Here, self-evolution refers to changes in persistent runtime state, not
+to online training of the underlying model. Across Waves, accepted trajectories can
+update repository knowledge, reusable Skills, verification guidance, task
+definitions, and routing policy. These objects alter what later missions retrieve,
+which checks they run, and where they spend independent review.
+
+Mature operation W19--22 uses \SWEProTokenReduction\% fewer solve input Tokens and
+\SWEProTimeReduction\% less active workflow time per task than startup W1--6. The runtime spends less to do the same
+work once it has accumulated state to spend it against. The lowest-Token window, W13--18, reaches a
+\SWEProBestTokenReduction\% reduction from startup but requires more active time,
+showing that Token efficiency and execution latency do not move together. The
+final difficult-task window rebounds in both metrics.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/swebench_evolution.pdf}
+  \caption{Outcome, review, and longitudinal efficiency in the 731-task SWE-Bench
+  Pro run. Panel (a) reports the full-suite accuracy and aggregate-Token comparison,
+  adaptive Reviewer routing, and observed review outcomes. Panels (b) and (c)
+  aggregate \systemname solve input Tokens and active workflow time over
+  approximately six-Wave windows using task-weighted means. Relative to W1--6,
+  W19--22 uses \SWEProTokenReduction\% fewer solve input Tokens and \SWEProTimeReduction\% less active time per task.
+  Two incomplete Waves are omitted, while W23--24 remains visible as late
+  difficult-task stress. Copilot per-Wave resource traces were not retained; the
+  window comparison characterizes the operating profile over this sequence, and a
+  controlled replay would isolate the learning effect.}
+  \label{fig:swebench-evolution}
+\end{figure}
+
+The trajectories show a lower-cost mature operating window together with visible
+task-composition and late-wave difficulty effects. The rebound in W23--24 prevents
+the startup-to-mature comparison from being read as monotonic improvement, and the
+sequence characterizes state accumulation rather than isolating any single update.
+
+\subsection{Measured Process Quantities}
+
+The process theory is instantiated from two complementary traces. In the
+mathematical campaign, direct reasoning, verification, and action each account for
+approximately 56\% of their respective attributed units. In SWE-Bench Pro, Reviewer
+revision requests lead to 79.1\% official-verifier recovery and 51.2\% strict
+review-loop rescue, while the mature window uses \SWEProTokenReduction\% fewer solve input Tokens and
+\SWEProTimeReduction\% less active time than startup. Appendix~\ref{app:formula-instantiation} gives
+the complete substitutions for the density, reuse, yield, and compression
+quantities.
+
+The public research inventory additionally contains 41 de-duplicated artifacts
+across six programs, illustrating the range of research programs executed by the
+same runtime.
+
+\subsection{The Delivery Ledger}
+\label{sec:ledger}
+
+Table~\ref{tab:ledger} indexes the campaigns reported in this section and the
+subsections that follow it, grouped by the kind of verifier each answers to. The
+grouping is the point: the further down the table a row sits, the less the runtime
+controls the standard it is judged against, and the harder it is to satisfy the gate
+with narrative.
+
+\begin{table}[!t]
+\centering
+\scriptsize
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\linewidth}{@{}p{2.35cm} X p{3.15cm}@{}}
+\toprule
+\rowcolor{papersand}
+\textbf{Campaign} & \textbf{Result} & \textbf{Who decides} \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Benchmark harnesses (Section~\ref{sec:results})}} \\
+SWE-Bench Pro & $\approx$\SWEProArgusAccuracy\% vs \SWEProDirectAccuracy\% direct; \ReviewerFirstBlocked{} declared blocked & Official verifier \\
+SOL-ExecBench & Rank \#6 globally; 7 kernels placed top-3; beat the \#1 entrant on 2 & Official scorer \\
+nanochat B200 / H100 & 0.9636 / 0.9855 BPB vs 0.9646 / 0.9879 human best & Fixed protocol \\
+nanoGPT speedrun & 79.77\,s vs 80.18\,s same-device human & Verifier runs \\
+AARRI-Bench & 63/82 (76.8\%) vs 68.3\% paper best & Task rubric \\
+Math-Reasoning Data & 28.0 gap vs 20.83 / 8.33 / 6.25 & Frozen solver \\
+MLE-Bench Lite & \MLEMedalRate\% medal rate (\MLEMedals{}/\MLEGraded{} graded): 3 gold, 3 silver, 3 bronze & Kaggle leaderboard \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{AI for Science (Sections~\ref{sec:vertical-trace}, \ref{sec:materials-vertical})}} \\
+MOF generation & Chemical control 92.5 / 100.0 / 74.5\%; AUC $0.594{\to}0.833$; simpler method wins at matched compute & External \code{MOFChecker} \\
+Erd\H{o}s--Gy\'arf\'as & Six proof-backed frontier updates; one falsified route retained & Proof checker \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{AI for research writing (Section~\ref{sec:paper-case-study})}} \\
+Paper production & Six pipelines to submission; \PaperCaseMissions{} missions, \PaperCaseRollbacks{} Stage rollbacks & Venue format \\
+Research inventory & 41 de-duplicated artifacts across six programs & Public manuscripts \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{AI infrastructure (Section~\ref{sec:infra-vertical})}} \\
+FlashAttention-4 dLLM & \FlashDAParity{}/\FlashDAParity{} parity; \FlashDAGapLow--\FlashDAGapHigh\% of native; \FlashDAVsTriton$\times$ over Triton; under \FlashDACostCNY{} CNY & Bit-exact reference \\
+SGLang integration & \SGLangFiles{} files, \code{+\SGLangLines{}}; 160/160 exact; \SGLangThroughput$\times$ at BS8 & Real-hardware parity \\
+Upstream kernels & \FLAPRTotal{} \code{fla-org} submissions: RWKV6 $1.21\times$ (\#1045), KDA $1.29\times$ (\#1128), SM100 fix restoring 76 tests (\#1109), AttnRes $1.102\times$ (\#1114) & \textbf{Outside maintainers} \\
+MiniMax-H3 local & 62\,GiB model on 24\,GB M4 Pro; $6.159\times$ on one A6000 & Published artifacts \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{AI for AI (Section~\ref{sec:rsi-vertical})}} \\
+Runtime self-evolution & Parameter-invariant axis: \SWEProTokenReduction\% fewer solve Tokens, \SWEProTimeReduction\% less active time at maturity & Longitudinal ledger \\
+1B pretraining stack & Parameter-changing axis: from-scratch pipeline on 8$\times$B200 built and run end to end & Training convergence \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Hardware (Section~\ref{sec:silicon-vertical})}} \\
+ACE-2 accelerator & 13{,}914/13{,}914 commands; 0.614\,mm$^2$, WNS/TNS 0.00\,ns, exclusions published & Static timing engine \\
+\bottomrule
+\end{tabularx}
+\caption{Campaigns grouped by the authority that decides whether the result counts.
+Rows in the first block are scored by harnesses the runtime executes; the last two
+blocks are decided by external checkers, external reviewers, and physical tooling
+that the runtime does not own and cannot tune.}
+\label{tab:ledger}
+\end{table}
+
+Two rows carry disproportionate weight for the argument of this report, and neither
+is the highest number in the table. The upstream kernel row is the only one whose
+acceptance criteria were written by people with no connection to this project. The
+MOF row is the only one where the admitted method is \emph{smaller} than the
+published method it replaces, which is not an outcome a system optimizing a visible
+score tends to reach.

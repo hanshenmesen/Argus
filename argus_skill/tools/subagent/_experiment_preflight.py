@@ -17,9 +17,8 @@ from urllib.parse import urlparse
 
 import portalocker
 
-from ._registry import REGISTRY_DIR, _is_pid_alive, _list_tasks
+from ._registry import REGISTRY_DIR, _list_tasks, _recorded_process_alive
 
-_STALE_RUNNING_SECONDS = 15 * 60.0
 _LOCAL_INPUT_FLAGS = frozenset({
     "config",
     "curriculum",
@@ -51,6 +50,48 @@ _SHELL_BUILTINS = frozenset({
 })
 _CLAIMS_LOCK = threading.Lock()
 _HELD_CLAIMS: dict[tuple[str, str], Any] = {}
+
+
+def _shell_command_available(executable: str) -> bool:
+    if shutil.which(executable) is not None:
+        return True
+    if os.name == "nt":
+        escaped = executable.replace("'", "''")
+        script = (
+            f"$name = '{escaped}'; "
+            "if (Get-Command -Name $name -ErrorAction SilentlyContinue) "
+            "{ exit 0 } else { exit 1 }"
+        )
+        try:
+            return (
+                subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        script,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                ).returncode
+                == 0
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return (
+        subprocess.run(
+            ["bash", "-lc", f"command -v -- {shlex.quote(executable)}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).returncode
+        == 0
+    )
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -170,7 +211,8 @@ def _live_run_owner(run_dir: Path, *, task_id: str) -> dict[str, Any] | None:
             pid = int(task.get("pid") or task.get("worker_pid") or 0)
         except (TypeError, ValueError):
             pid = 0
-        if pid > 0 and _is_pid_alive(pid):
+        pid_field = "pid" if task.get("pid") else "worker_pid"
+        if pid > 0 and _recorded_process_alive(task, pid_field):
             return task
     return None
 
@@ -189,8 +231,12 @@ def _claim_run_dir(
     claim_path = _claim_path(run_dir)
     key = (claim_owner, str(run_dir))
     with _CLAIMS_LOCK:
-        if key in _HELD_CLAIMS:
-            return f"experiment run directory is already claimed by task {task_id}: {run_dir}"
+        for (held_owner, claimed_dir), _handle in _HELD_CLAIMS.items():
+            if claimed_dir == str(run_dir):
+                return (
+                    "experiment run directory is already claimed"
+                    f" by task {held_owner}: {run_dir}"
+                )
         claim_path.parent.mkdir(parents=True, exist_ok=True)
         handle = claim_path.open("a+", encoding="utf-8")
         try:
@@ -198,15 +244,15 @@ def _claim_run_dir(
         except portalocker.exceptions.LockException:
             try:
                 handle.seek(0)
-                owner = json.load(handle)
-            except (OSError, ValueError, json.JSONDecodeError):
-                owner = {}
+                owner_record = json.load(handle)
+            except (OSError, ValueError):
+                owner_record = {}
             handle.close()
             return (
                 "experiment run directory is already claimed"
                 + (
-                    f" by task {owner.get('task_id')}"
-                    if owner.get("task_id")
+                    f" by task {owner_record.get('task_id')}"
+                    if owner_record.get("task_id")
                     else ""
                 )
                 + f": {run_dir}"
@@ -258,7 +304,6 @@ def _reconcile_run_status(
     *,
     task_id: str,
     now: float,
-    stale_after_seconds: float,
 ) -> str:
     status_path = run_dir / "status.json"
     if not status_path.exists():
@@ -277,21 +322,10 @@ def _reconcile_run_status(
             "experiment run directory is already owned by live task "
             f"{owner.get('task_id')}: {run_dir}"
         )
-    try:
-        updated_at = float(status.get("updated_at") or status_path.stat().st_mtime)
-    except (OSError, TypeError, ValueError):
-        updated_at = now
-    age = max(0.0, now - updated_at)
-    if age < stale_after_seconds:
-        return (
-            "experiment status says running without a registered live owner; "
-            f"wait or reconcile after {stale_after_seconds:g}s: {status_path}"
-        )
     status.update({
         "state": "failed",
-        "error": "stale running status reconciled before relaunch",
+        "error": "running status has no live owner; reconciled before relaunch",
         "reconciled_at": now,
-        "stale_age_seconds": age,
     })
     _atomic_json(status_path, status)
     return ""
@@ -305,7 +339,6 @@ def experiment_launch_preflight(
     run_dir: str | None,
     claim_owner: str | None = None,
     now: float | None = None,
-    stale_after_seconds: float = _STALE_RUNNING_SECONDS,
 ) -> tuple[bool, str]:
     """Reject deterministic zero-work launches before a process is spawned."""
     base = Path(cwd).expanduser().resolve()
@@ -321,16 +354,8 @@ def experiment_launch_preflight(
             candidate = candidate if candidate.is_absolute() else base / candidate
             if not candidate.exists():
                 return True, f"launch executable does not exist: {candidate}"
-        elif shutil.which(executable) is None:
-            available = subprocess.run(
-                ["bash", "-lc", f"command -v -- {shlex.quote(executable)}"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).returncode == 0
-            if not available:
-                return True, f"launch executable is not available on PATH: {executable}"
+        elif not _shell_command_available(executable):
+            return True, f"launch executable is not available on PATH: {executable}"
 
     if _can_resolve_inputs_against_cwd(command):
         for name, value in _flags(command).items():
@@ -354,7 +379,6 @@ def experiment_launch_preflight(
                 resolved,
                 task_id=task_id,
                 now=float(now if now is not None else time.time()),
-                stale_after_seconds=max(1.0, float(stale_after_seconds)),
             )
             if issue:
                 return True, issue

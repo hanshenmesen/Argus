@@ -187,6 +187,14 @@ def test_tool_activity_detector_covers_codex_items_and_plain_text() -> None:
             "item": {"type": "agent_message", "text": "finished"},
         }
     )
+    for event_type in (
+        "mcp.tools.list_changed",
+        "session.mcp_servers_loaded",
+        "session.mcp_server_status_changed",
+        "session.tools_updated",
+        "session.skills_loaded",
+    ):
+        assert not AgentCliRunner._event_has_tool_activity({"type": event_type})
 
 
 def test_clean_exit_with_message_but_no_terminal_result_fails_closed(
@@ -264,7 +272,14 @@ def test_cli_process_starts_in_its_own_posix_session(_fake_copilot, monkeypatch)
         options=RunnerOptions(),
         run_label="stream-test",
     )
-    assert _fake_copilot["start_new_session"] is (runner_mod.os.name != "nt")
+    if runner_mod.os.name == "nt":
+        assert _fake_copilot["creationflags"] & runner_mod.subprocess.CREATE_NO_WINDOW
+        startup = _fake_copilot["startupinfo"]
+        assert startup is not None
+        assert startup.dwFlags & runner_mod.subprocess.STARTF_USESHOWWINDOW
+        assert startup.wShowWindow == runner_mod.subprocess.SW_HIDE
+    else:
+        assert _fake_copilot["start_new_session"] is True
 
 
 def test_callback_exception_never_breaks_the_turn(_fake_copilot, monkeypatch) -> None:
@@ -430,6 +445,38 @@ def test_engineer_turn_wall_clock_default_and_override(monkeypatch) -> None:
     assert _turn_wall_clock_seconds("engineer-r7") == 90
     monkeypatch.setenv("ARGUS_SKILL_ENGINEER_TURN_MAX_SECONDS", "0")
     assert _turn_wall_clock_seconds("engineer-r7") == 0
+
+
+@pytest.mark.parametrize(
+    "run_label",
+    [
+        "manager-classify-grounded",
+        "manager.skill_placement",
+        "router-classify",
+        "simple-1",
+        "chat-1",
+        "self-debug",
+        "self-implement",
+        "self-micro",
+        "self-review",
+        "self-synthesize",
+    ],
+)
+def test_manager_turn_wall_clock_is_unbounded_by_default(monkeypatch, run_label: str) -> None:
+    monkeypatch.delenv("ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS", raising=False)
+
+    assert _turn_wall_clock_seconds(run_label) == 0
+
+    monkeypatch.setenv("ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS", "45")
+    assert _turn_wall_clock_seconds(run_label) == 45
+    monkeypatch.setenv("ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS", "0")
+    assert _turn_wall_clock_seconds(run_label) == 0
+
+
+@pytest.mark.parametrize("run_label", ["planner-bounded-plan", "planner-preview"])
+def test_planner_turn_wall_clock_is_unbounded(monkeypatch, run_label: str) -> None:
+    monkeypatch.setenv("ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS", "1")
+    assert _turn_wall_clock_seconds(run_label) == 0
 
 
 def test_scientist_skill_distill_wall_clock_is_opt_in(monkeypatch) -> None:

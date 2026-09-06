@@ -41,10 +41,14 @@ def _manager_roots(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     )
     raw_state_root = str(getattr(args, "project_state_dir", "") or "").strip()
     state_root = Path(raw_state_root).expanduser() if raw_state_root else workdir
-    if raw_state_root:
-        from ..skills.vertical_select import migrate_legacy_manager_state
+    from ..manager._session_ops import manager_pipeline_lock
+    from ..skills.stage_machine import migrate_legacy_research_stage
+    from ..skills.vertical_select import migrate_legacy_manager_state
 
-        migrate_legacy_manager_state(state_root, workdir)
+    with manager_pipeline_lock(session_root):
+        if raw_state_root:
+            migrate_legacy_manager_state(state_root, workdir)
+        migrate_legacy_research_stage(state_root)
     return workdir, state_root, session_root
 
 
@@ -98,6 +102,7 @@ class _RunnerConstructionMixin:
         # currently-installed sink so codex's stream-json events become
         # ``engineer.progress`` items in whichever sink owns this call.
         self._current_sink: EventSink | None = None
+        self._active_mission_id = ""
         # Per-mission ledger of failed tool/command beats. Reset on every
         # execute() so warnings don't bleed across missions.
         self._current_failure_ledger: object | None = None
@@ -129,7 +134,7 @@ class _RunnerConstructionMixin:
         # ``/backend`` knob). Env-only reads here silently fell back to codex for
         # the in-process Manager front-door — see ``_resolve_runner_backend_name``.
         backend_name = _resolve_runner_backend_name(args)
-        runner_bin = resolve_runner_bin_setting() or None
+        runner_bin = resolve_runner_bin_setting(backend=backend_name) or None
         from ..agent_cli.runner_backend import (
             normalize_runner_backend,
             resolve_available_runner,
@@ -182,7 +187,8 @@ class _RunnerConstructionMixin:
                 from ..life.memory import consume_running_item_abort
 
                 abort_reason = consume_running_item_abort(
-                    getattr(self, "_manager_session_root", None)
+                    getattr(self, "_manager_session_root", None),
+                    target_item_id=self._active_mission_id,
                 )
                 if abort_reason:
                     return f"operator abort requested: {abort_reason}"
@@ -203,7 +209,7 @@ class _RunnerConstructionMixin:
             ),
             default_watchdog_hard_idle_seconds=_env_int(
                 "ARGUS_SKILL_RUNNER_HARD_IDLE_SECONDS",
-                45 * 60,
+                0,
             ),
             event_callback=_trampoline,
         )
@@ -214,8 +220,8 @@ class _RunnerConstructionMixin:
 
         # Per-role backends. Each agent role (engineer / reviewer / planner /
         # manager) can be pinned to its OWN backend via
-        # ``ARGUS_SKILL_{ROLE}_BACKEND`` (codex / claude / copilot / opencode /
-        # pi / grok) plus an
+        # ``ARGUS_SKILL_{ROLE}_BACKEND`` (codex / claude / copilot / cursor /
+        # opencode / pi / grok) plus an
         # optional ``ARGUS_SKILL_{ROLE}_RUNNER_BIN``. When neither is set the
         # role SHARES the single default backend above — so the common case
         # still builds exactly one CLI process and behaviour is unchanged. Set
@@ -226,7 +232,10 @@ class _RunnerConstructionMixin:
                 role,
                 backend_name,
             )
-            bin_env = resolve_runner_bin_setting(role)
+            bin_env = resolve_runner_bin_setting(
+                role,
+                backend=role_backend_name,
+            )
             from ..agent_cli.runner_backend import (
                 normalize_runner_backend,
                 resolve_available_runner,
@@ -279,7 +288,7 @@ class _RunnerConstructionMixin:
                 ),
                 default_watchdog_hard_idle_seconds=_env_int(
                     "ARGUS_SKILL_RUNNER_HARD_IDLE_SECONDS",
-                    45 * 60,
+                    0,
                 ),
                 event_callback=_trampoline,
             )
@@ -337,7 +346,12 @@ class _RunnerConstructionMixin:
         # classified — the harness must not second-guess agent-produced work.
         self._allow_chat_fast_path: bool = False
 
-    def _build_manager_skill_store(self, args: argparse.Namespace) -> Any:
+    def _build_manager_skill_store(
+        self,
+        args: argparse.Namespace,
+        *,
+        workdir: Path | None = None,
+    ) -> Any:
         """Build the path-only Skill-library view shared by all role Agents."""
         try:
             from ..skills.layered import (
@@ -350,8 +364,14 @@ class _RunnerConstructionMixin:
             global_dir = Path(args.skills_dir)
             project_state_dir = str(getattr(args, "project_state_dir", "") or "").strip()
             if project_state_dir:
-                workdir = Path(args.workdir).expanduser() if args.workdir else Path.cwd()
-                active_skill_scope = resolve_skill_scope(workdir)
+                execution_workdir = (
+                    Path(workdir)
+                    if workdir is not None
+                    else Path(args.workdir).expanduser()
+                    if args.workdir
+                    else Path.cwd()
+                )
+                active_skill_scope = resolve_skill_scope(execution_workdir)
                 explicit_project_skills = str(
                     os.environ.get("ARGUS_SKILL_PROJECT_SKILLS_DIR", "") or ""
                 ).strip()
@@ -366,6 +386,8 @@ class _RunnerConstructionMixin:
                         global_dir,
                         active_skill_scope,
                     ),
+                    native_project_dir=execution_workdir / ".agents" / "skills",
+                    execution_project_root=execution_workdir,
                 )
             return SkillStore(global_dir)
         except Exception:  # noqa: BLE001 — never block start-up on library discovery
@@ -376,9 +398,14 @@ class _RunnerConstructionMixin:
         """Return the exact shared Skill directory used by this runner."""
         return Path(self._args.skills_dir)
 
-    def _refresh_manager_skill_store(self, args: argparse.Namespace) -> None:
+    def _refresh_manager_skill_store(
+        self,
+        args: argparse.Namespace,
+        *,
+        workdir: Path | None = None,
+    ) -> None:
         """Refresh Manager library roots after vertical selection."""
-        store = self._build_manager_skill_store(args)
+        store = self._build_manager_skill_store(args, workdir=workdir)
         if store is None:
             return
         self._manager_skill_store = store
@@ -564,7 +591,7 @@ def _resolve_runner_backend_name(
     if explicit:
         return explicit
     resolved = getattr(args, "backend", None)
-    if resolved in ("codex", "claude", "copilot", "opencode", "pi", "grok"):
+    if resolved in ("codex", "claude", "copilot", "cursor", "opencode", "pi", "grok", "qoder", "dsh"):
         return resolved
     return None
 
@@ -575,24 +602,15 @@ def _resolve_role_runner_backend_name(
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Resolve one role override while preserving the caller's shared default."""
-    from ..core.knobs import resolve_knob
+    """Resolve one role override while preserving the caller's shared default.
 
-    env_map = env if env is not None else os.environ
-    role_var = f"ARGUS_SKILL_{role.upper()}_BACKEND"
-    for name in (
-        role_var,
-        "ARGUS_SKILL_RUNNER_BACKEND",
-        "ARGUS_SKILL_LIFE_BACKEND",
-    ):
-        explicit = str(env_map.get(name, "") or "").strip()
-        if explicit:
-            return explicit
-    return resolve_knob(
-        role_var,
-        str(default_backend or "codex"),
-        env={},
-    ).value
+    The chain lives in ``core.knobs``; this used to walk its own copy, which
+    consulted the persisted store for the ROLE name only. A ``/backend`` switch
+    persists the shared name, so that copy could not see one.
+    """
+    from ..core.knobs import resolve_role_backend
+
+    return resolve_role_backend(role, env=env, default=default_backend or "codex")
 
 
 def build_life_runner(args: argparse.Namespace, *, seed_thread_id: str | None = None):
@@ -608,7 +626,7 @@ def build_life_runner(args: argparse.Namespace, *, seed_thread_id: str | None = 
         if scripted_backend is not None:
             runner.backend = scripted_backend
         return runner
-    if args.backend in ("codex", "claude", "copilot", "opencode", "pi", "grok"):
+    if args.backend in ("codex", "claude", "copilot", "cursor", "opencode", "pi", "grok", "qoder", "dsh"):
         # These are agent-CLI backends: _SkillLoopRunner drives the selected
         # CLI via AgentCliBackend (per-role resolution), so the
         # SAME runner serves every backend. Gating this on "codex" alone used to

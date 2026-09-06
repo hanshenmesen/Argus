@@ -29,6 +29,7 @@ from argus_skill.verticals._base import (
 )
 from argus_skill.verticals.chip_design import environment_audit
 from argus_skill.verticals.chip_design.evidence import VALIDATORS, EvidenceError
+from argus_skill.verticals.chip_design.stages import stage_completion_issues
 from argus_skill.verticals.chip_design.tool_registry import (
     filter_entries,
     load_registry,
@@ -97,7 +98,7 @@ def _digest(path: Path) -> str:
 
 def _complete_project(root: Path, *, delivery_level: str = "rtl_ip") -> Path:
     _write_json(
-        root / "research/PIPELINE_STATE.json",
+        root / ".argus/PIPELINE_STATE.json",
         {"vertical": "chip_design", "current_stage": "signoff"},
     )
     _write_json(
@@ -466,8 +467,6 @@ def test_chip_design_is_registered_and_staged() -> None:
     assert require_vertical("chip_design") == "chip_design"
     module = load_vertical("chip_design")
     assert tuple(module.STAGE_ORDER) == STAGES
-    assert tuple(module.STAGE_CHECKS) == STAGES
-    assert tuple(module.REVIEWER_CHECKLISTS) == STAGES
     assert vertical_completion_gate(module) == "metric"
     assert vertical_workflow_mode(module) == "proportional"
     assert vertical_requires_independent_review(module) is True
@@ -536,27 +535,23 @@ def test_chip_design_skills_include_chip_and_digital_circuit_layers() -> None:
     assert "Delivery-level gate" in skills["reviewer/chip-design-signoff-review.md"]
 
 
-def test_reviewer_skill_paths_exist() -> None:
-    module = load_vertical("chip_design")
-    root = (
-        Path(__file__).resolve().parents[2]
-        / "argus_skill"
-        / "verticals"
-        / "chip_design"
-        / "skills"
-    )
-    missing = [
-        f"{stage}: {path}"
-        for stage, (path, _instructions, _artifacts) in module.REVIEWER_CHECKLISTS.items()
-        if not (root / path).is_file()
-    ]
-    assert missing == []
-
-
 def test_all_structured_evidence_validators_accept_complete_rtl_ip(tmp_path: Path) -> None:
     root = _complete_project(tmp_path)
-    for name, validator in VALIDATORS.items():
-        assert validator(root).is_file(), name
+    for stage in STAGES:
+        assert stage_completion_issues(stage, root) == (), stage
+
+
+def test_chip_design_completion_reports_missing_required_artifacts(tmp_path: Path) -> None:
+    root = _complete_project(tmp_path)
+
+    (root / "design/SPEC.md").unlink()
+    assert "design/SPEC.md" in " ".join(stage_completion_issues("definition", root))
+
+    (root / "design/TARGET.json").unlink()
+    assert "design/TARGET.json" in " ".join(stage_completion_issues("environment", root))
+
+    (root / "design/RTL_MANIFEST.json").unlink()
+    assert "RTL_MANIFEST.json" in " ".join(stage_completion_issues("rtl", root))
 
 
 def test_prototype_na_is_rejected_for_fpga_delivery(tmp_path: Path) -> None:
@@ -705,6 +700,13 @@ def test_environment_audit_report_is_sanitized(tmp_path: Path) -> None:
     assert "/pdks/" not in serialized
 
 
+def test_environment_audit_sanitizes_posix_and_windows_absolute_markers() -> None:
+    assert environment_audit._safe_project_marker("rtl/top.sv") == "rtl/top.sv"
+    assert environment_audit._safe_project_marker("/pdks/sky130") is None
+    assert environment_audit._safe_project_marker(r"C:\pdks\sky130") is None
+    assert environment_audit._safe_project_marker(r"\\server\pdks\sky130") is None
+
+
 def test_environment_audit_never_executes_recorded_target_python(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -822,7 +824,10 @@ def test_environment_audit_rejects_report_that_omits_scope_requirements(
     assert any("required_capabilities" in error for error in errors)
 
 
-def test_environment_audit_rejects_symlink_output(tmp_path: Path) -> None:
+def test_environment_audit_rejects_symlink_output(
+    tmp_path: Path,
+    require_symlink_support,
+) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
     outside.write_text("unchanged\n", encoding="utf-8")
     output = tmp_path / "research/ENVIRONMENT_AUDIT.json"

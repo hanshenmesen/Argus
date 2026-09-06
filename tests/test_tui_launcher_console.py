@@ -20,6 +20,20 @@ import pytest
 from argus_skill.apps import tui_launcher
 
 
+@pytest.fixture(autouse=True)
+def _interactive_stdin(monkeypatch):
+    """These tests drive the launcher as a terminal invocation.
+
+    `main()` refuses the cockpit when stdin is not a tty, which pytest's never
+    is, so the console-ownership behaviour under test is only reachable once
+    stdin looks interactive.
+    """
+    monkeypatch.delenv("ARGUS_SKILL_ALLOW_HEADLESS_TUI", raising=False)
+    monkeypatch.setattr(
+        tui_launcher.sys, "stdin", SimpleNamespace(isatty=lambda: True)
+    )
+
+
 @pytest.fixture
 def launcher(monkeypatch, tmp_path):
     """A launcher whose preflight passes, so only the spawn path is exercised."""
@@ -27,18 +41,13 @@ def launcher(monkeypatch, tmp_path):
     bundle.write_text("// bundle", encoding="utf-8")
     monkeypatch.setattr(tui_launcher, "_bundle_path", lambda: bundle)
     monkeypatch.setattr(tui_launcher.shutil, "which", lambda _name: "/usr/bin/node")
-    monkeypatch.setattr(tui_launcher, "_node_major", lambda _node: 22)
-    monkeypatch.setattr(tui_launcher, "_configure_tui_backend_bin", lambda: None)
-    monkeypatch.setattr(tui_launcher, "_export_tui_local_identity", lambda: None)
     monkeypatch.setattr(
         tui_launcher,
-        "describe_special_prompt_gate",
-        lambda: (True, ""),
-        raising=False,
+        "_node_version",
+        lambda _node: (22, 12, 0),
     )
-    import argus_skill.life.special_prompts as prompts
-
-    monkeypatch.setattr(prompts, "describe_special_prompt_gate", lambda: (True, ""))
+    monkeypatch.setattr(tui_launcher, "_configure_tui_backend_bin", lambda: None)
+    monkeypatch.setattr(tui_launcher, "_export_tui_local_identity", lambda: None)
     return bundle
 
 

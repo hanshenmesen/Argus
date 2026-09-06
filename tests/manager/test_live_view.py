@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import threading
 
@@ -12,12 +11,8 @@ from argus_skill.manager.live_view import (
     apply_live_view_decision,
     apply_manager_rendering_response,
     load_live_view_decision,
-    manager_checkpoint_refresh_required,
-    manager_rendering_prompt,
     normalize_live_view_path,
     parse_live_view_response,
-    parse_manager_presentations,
-    repair_manager_checkpoint_response,
 )
 
 
@@ -86,57 +81,6 @@ def test_live_view_manifest_can_be_session_scoped(tmp_path) -> None:
     assert (state / LIVE_VIEW_MANIFEST).exists()
     assert load_live_view_decision(workspace) is None
     assert load_live_view_decision(workspace, manifest_root=state) == view
-
-
-def test_manager_rendering_prompt_keeps_presentation_out_of_engineer(tmp_path) -> None:
-    apply_live_view_decision(
-        tmp_path,
-        decided=True,
-        view=LiveViewDecision(
-            title="赤壁赋",
-            paths=("chibifu.md",),
-            reason="Render the requested composition in the side panel.",
-        ),
-    )
-
-    prompt = manager_rendering_prompt(tmp_path)
-
-    assert "MANAGER ownership" in prompt
-    assert "Do not assign" in prompt
-    assert "Engineer" in prompt
-    assert "chibifu.md" in prompt
-    assert ".argus/live/" in prompt
-    assert "Current node" in prompt
-    assert "Verified progress" in prompt
-
-
-def test_manager_checkpoint_requires_substantive_refresh(tmp_path) -> None:
-    apply_live_view_decision(
-        tmp_path,
-        decided=True,
-        view=LiveViewDecision(
-            title="Proof progress",
-            paths=(".argus/live/progress.md",),
-            reason="Track the campaign.",
-        ),
-    )
-    raw = json.dumps({
-        "action": "hold",
-        "target_stage": "solve",
-        "reason": "bridge remains open",
-        "live_view": None,
-    })
-
-    assert manager_checkpoint_refresh_required(tmp_path, raw) is True
-
-    repaired = repair_manager_checkpoint_response(tmp_path, raw)
-
-    assert manager_checkpoint_refresh_required(tmp_path, repaired) is False
-    presentation = parse_manager_presentations(repaired)[0]
-    assert "## Current node" in presentation.content
-    assert "## Verified progress" in presentation.content
-    assert "## Current blocker" in presentation.content
-    assert "## Next action" in presentation.content
 
 
 def test_stage_response_can_select_manager_owned_rendering() -> None:
@@ -219,6 +163,7 @@ def test_manager_presentation_is_written_by_confined_harness(tmp_path) -> None:
 
 
 def test_manager_rendering_does_not_reenter_wiki_lock(tmp_path) -> None:
+    fcntl = pytest.importorskip("fcntl", reason="requires POSIX advisory locking")
     wiki_lock = tmp_path / ".autors" / "demo" / "wiki" / "data" / ".wiki.lock"
     wiki_lock.parent.mkdir(parents=True)
     raw = json.dumps({
@@ -369,7 +314,10 @@ def test_manager_can_author_supported_presentation_formats(
     assert (tmp_path / path).read_text(encoding="utf-8") == "content"
 
 
-def test_manager_presentation_refuses_symlinked_live_directory(tmp_path) -> None:
+def test_manager_presentation_refuses_symlinked_live_directory(
+    tmp_path,
+    require_symlink_support,
+) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (tmp_path / ".argus").mkdir()
@@ -413,7 +361,10 @@ def test_manager_rendering_rejects_payload_atomically(tmp_path) -> None:
     assert current.read_text(encoding="utf-8") == "old\n"
 
 
-def test_manager_clear_refuses_symlinked_argus_directory(tmp_path) -> None:
+def test_manager_clear_refuses_symlinked_argus_directory(
+    tmp_path,
+    require_symlink_support,
+) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "live-view.json").write_text("keep\n", encoding="utf-8")

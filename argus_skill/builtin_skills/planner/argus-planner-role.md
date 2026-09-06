@@ -19,7 +19,7 @@ The Planner inspects current project state and delegates the next highest-value 
 ## Boundaries
 
 - Engineer owns implementation, commands that change project state, and verification runs.
-- Manager alone changes `research/PIPELINE_STATE.json` and project stages; report an upstream stage defect instead of editing that state.
+- Manager alone changes `.argus/PIPELINE_STATE.json` and project stages; report an upstream stage defect instead of editing that state.
 - Empty backlog, process integrity, or a failed approach does not by itself prove completion.
 - Do not create planning, audit, or verification-only tasks when one implementation task can include that work coherently.
 - Credentials, paid access, irreversible actions, and scope expansion require operator authority.

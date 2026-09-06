@@ -81,7 +81,7 @@ def _queue_round(
 def test_default_budget_leaves_every_guard_untouched() -> None:
     config = SupervisedConfig()
 
-    assert config.max_rounds == 32
+    assert config.max_rounds == 0
     assert config.stall_threshold == 4
     assert config.soft_round_limit == 12
     assert config.hard_escalate_rounds == 24
@@ -117,6 +117,12 @@ def test_explicit_no_progress_reaches_stall_guard_on_real_bounded_run(
     assert status == "no_progress"
     assert len(rounds) == 2
     assert "Reviewer reported no forward progress for 2 consecutive rounds" in reason
+    # A stall measures the approach, not the question. When the reason said only
+    # that the rounds had ended, one campaign read it as a verdict on the work:
+    # its claim-bearing benchmark run stalled and the Planner's next task was an
+    # unrelated question carrying a four-word objective.
+    assert "The rounds ended; the question did not" in reason
+    assert "changing the question is how a campaign loses its paper" in reason
     stall_events = [event for event in events if event.get("type") == "round.stall"]
     assert [event["semantic_stall_streak"] for event in stall_events] == [1, 2]
 
@@ -187,6 +193,90 @@ def test_explicit_progress_continues_beyond_three_rounds(tmp_path) -> None:
 
     assert status == "done"
     assert len(rounds) == 5
+
+
+def test_soft_limit_stalls_after_two_verdicts_without_true_progress(
+    tmp_path,
+) -> None:
+    backend = MemoryBackend()
+    _queue_round(backend, 1, forward_progress=True)
+    _queue_round(backend, 2, forward_progress=False)
+    _queue_round(backend, 3, forward_progress=None)
+
+    status, rounds, _final, reason, _thread = _engineer(backend).run(
+        objective="Stop repeating a route that no longer advances.",
+        engineer_prompt_builder=lambda _next, _static=True: "Do the task.",
+        supervised_config=SupervisedConfig(
+            max_rounds=5,
+            no_progress_threshold=99,
+            stall_threshold=0,
+            soft_round_limit=2,
+            hard_escalate_rounds=0,
+            decision_progress_timeout_seconds=0,
+        ),
+        workdir=tmp_path,
+    )
+
+    assert status == "no_progress"
+    assert len(rounds) == 3
+    assert "Soft round limit 2 passed" in reason
+    assert "neither of the last two Reviewer verdicts" in reason
+
+
+def test_true_progress_in_last_two_verdicts_continues_past_soft_limit(
+    tmp_path,
+) -> None:
+    backend = MemoryBackend()
+    _queue_round(backend, 1, forward_progress=False)
+    _queue_round(backend, 2, forward_progress=True)
+    _queue_round(backend, 3, forward_progress=False)
+    _queue_round(backend, 4, status="done", forward_progress=True)
+
+    status, rounds, _final, _reason, _thread = _engineer(backend).run(
+        objective="Continue while the frontier genuinely advances.",
+        engineer_prompt_builder=lambda _next, _static=True: "Do the task.",
+        supervised_config=SupervisedConfig(
+            max_rounds=5,
+            no_progress_threshold=99,
+            stall_threshold=0,
+            soft_round_limit=2,
+            hard_escalate_rounds=0,
+            decision_progress_timeout_seconds=0,
+        ),
+        workdir=tmp_path,
+    )
+
+    assert status == "done"
+    assert len(rounds) == 4
+
+
+def test_soft_limit_prompt_states_enforced_rule_in_one_sentence(tmp_path) -> None:
+    backend = MemoryBackend()
+    _queue_round(backend, 1, forward_progress=True)
+    _queue_round(backend, 2, status="done", forward_progress=True)
+
+    status, _rounds, _final, _reason, _thread = _engineer(backend).run(
+        objective="Finish after the boundary warning.",
+        engineer_prompt_builder=lambda _next, _static=True: "Do the task.",
+        supervised_config=SupervisedConfig(
+            max_rounds=3,
+            soft_round_limit=2,
+            hard_escalate_rounds=0,
+            decision_progress_timeout_seconds=0,
+        ),
+        workdir=tmp_path,
+    )
+
+    assert status == "done"
+    reviewer_prompts = [
+        prompt for label, prompt, _options in backend.history if label == "reviewer"
+    ]
+    assert (
+        "After round 2, the harness settles the mission as stalled when neither "
+        "of the last two Reviewer verdicts has `forward_progress=true`; genuine "
+        "progress continues normally."
+    ) in reviewer_prompts[1]
+    assert "GPU quota / preemption" not in reviewer_prompts[1]
 
 
 def test_productive_mission_crosses_round_24_with_a_local_regression(
@@ -326,3 +416,37 @@ def test_nonpositive_budget_is_left_alone() -> None:
     assert config.stall_threshold == 4
     assert config.soft_round_limit == 12
     assert config.hard_escalate_rounds == 24
+
+
+def test_waiting_on_a_healthy_job_is_not_stalling(tmp_path) -> None:
+    """Seven missions across six campaigns died in ninety minutes on the stall
+    counter, every one of them while a healthy GPU job it had launched was still
+    running -- including the MATH-500 base gate the whole run-03 paper rests on.
+    No round can show forward progress while the compute it is waiting for has
+    not finished, so four such rounds retired the mission for doing exactly what
+    it was asked to do. Work that is stalled or needs attention still counts.
+    """
+    from argus_skill.core.models import ReviewDecision
+    from argus_skill.engineer import round_settlement
+    from argus_skill.engineer.external_work import ExternalWorkState, ExternalWorkStatus
+
+    review = ReviewDecision(
+        status="continue", reason="job still running", next_action=""
+    )
+    review.planner_report = {"forward_progress": False}
+
+    def _streak(state: ExternalWorkState) -> int:
+        healthy = round_settlement._next_semantic_stall_streak(
+            review,
+            3,
+            blocked_on_healthy_work=(state is ExternalWorkState.RUNNING_HEALTHY),
+        )
+        return healthy[0]
+
+    assert _streak(ExternalWorkState.RUNNING_HEALTHY) == 0
+    assert _streak(ExternalWorkState.STALLED) == 4
+
+    # And the workdir probe reports what the registry says, not what it hopes.
+    status = ExternalWorkStatus(work_id="w1", state=ExternalWorkState.RUNNING_HEALTHY)
+    assert status.waitable is True
+    assert round_settlement._blocked_on_healthy_work(tmp_path) is False

@@ -6,6 +6,14 @@ import { parseSSEFrames } from '../api';
 import { activeGuardianAlert } from '../lib/guardian';
 import type { EventMsg } from '../api';
 import { EventStream } from '../components/EventStream';
+import { EVENT_CORPUS } from '../../../core/src/eventCorpus.generated';
+import {
+  renderEvent as renderSemanticEvent,
+  renderText,
+  type RenderContext,
+  type RenderModel,
+} from '../../../core/src/eventRender';
+import type { TypedArgusEvent } from '../../../core/src/eventPayloads.generated';
 
 /** The clean whitelist renderer — noise is hidden, meaningful events get a
  *  role + glyph + line, matching the terminal cockpit. */
@@ -65,6 +73,57 @@ describe('renderEvent', () => {
     } as EventMsg);
 
     expect(rendered?.text).toBe('I need the operator to choose the report format.');
+  });
+
+  it('shows real command and tool details instead of generic summaries', () => {
+    expect(renderEvent({
+      type: 'engineer.progress',
+      kind: 'command_execution',
+      text: 'npm test -- --runInBand',
+      action_summary: 'running project command',
+      agent_layer: 'engineer',
+    } as EventMsg)?.text).toBe('npm test -- --runInBand');
+    expect(renderEvent({
+      type: 'engineer.progress',
+      kind: 'tool_use',
+      text: 'read: {"path":"src/harness.ts","offset":1,"limit":2000}',
+      action_summary: 'using a tool',
+      agent_layer: 'engineer',
+    } as EventMsg)?.text).toBe(
+      'read: {"path":"src/harness.ts","offset":1,"limit":2000}',
+    );
+  });
+
+  it('shows all Manager routing axes', () => {
+    expect(renderEvent({
+      type: 'life.manager.intent.completed',
+      route: 'team',
+      vertical: 'software',
+      workflow_mode: 'staged',
+      lifetime: 'bounded',
+      continuous: true,
+      open_ended: false,
+    } as EventMsg)?.text).toBe(
+      '→ TEAM · software · STAGED · BOUNDED · FINITE CONTINUOUS',
+    );
+  });
+
+  it('leads Manager routing failures with structured facts and keeps raw error', () => {
+    const event = {
+      type: 'life.manager.intent.failed',
+      phase: 'backend',
+      cause: '401 Missing bearer',
+      attempts: 2,
+      error: 'VerticalDecisionError: routing failed [backend]: 401 Missing bearer',
+    } as EventMsg;
+
+    expect(renderEvent(event)?.text).toBe(
+      'routing failed · backend 401 Missing bearer (attempt 2) · raw: '
+      + 'VerticalDecisionError: routing failed [backend]: 401 Missing bearer',
+    );
+    expect(renderEvent(event, 'zh-CN')?.text).toContain(
+      '分流失败 · 后端 401 Missing bearer (第2次尝试)',
+    );
   });
 
   it('renders operator and Manager conversation turns in Activity', () => {
@@ -227,11 +286,41 @@ describe('EventStream role grouping', () => {
       onToggleReasoning: () => undefined,
     }));
 
-    expect(html).toContain('Autonomous activity');
+    expect(html).toContain('Background activity');
     expect(html).toContain('data-role="planner"');
     expect(html).toContain('data-role="engineer"');
     expect(html).toContain('data-role="reviewer"');
     expect(html).toContain('aria-expanded="true"');
+  });
+
+  it('does not mount details for collapsed role and system groups', () => {
+    const html = renderToStaticMarkup(createElement(EventStream, {
+      events: [
+        {
+          type: 'life.manager.intent.started', agent_layer: 'manager',
+          text: 'collapsed manager history sentinel', ts: 1,
+        },
+        {
+          type: 'life.manager.intent.completed', agent_layer: 'manager',
+          text: 'manager latest summary', ts: 2,
+        },
+        {
+          type: 'life.planner.task_added', agent_layer: 'planner',
+          title: 'active planner detail sentinel', ts: 3,
+        },
+        {
+          type: 'mission.idle',
+          text: 'collapsed system detail sentinel', ts: 4,
+        },
+      ] as EventMsg[],
+      connected: true,
+      showReasoning: true,
+      onToggleReasoning: () => undefined,
+    }));
+
+    expect(html).toContain('active planner detail sentinel');
+    expect(html).not.toContain('collapsed manager history sentinel');
+    expect(html).not.toContain('collapsed system detail sentinel');
   });
 });
 
@@ -322,5 +411,82 @@ describe('activeGuardianAlert', () => {
     expect(
       activeGuardianAlert([ev({ type: 'round.stall', text: 's' }), ev({ type: 'round.main.completed' })]),
     ).toBeNull();
+  });
+});
+
+const WEB_RENDER_CONTEXT: RenderContext = {
+  locale: 'en',
+  showReasoning: true,
+  unknownEventPolicy: 'hide',
+  density: 'compact',
+};
+
+function semanticProjection(value: ReturnType<typeof renderEvent> | RenderModel) {
+  if (value === null || 'visibility' in value && value.visibility === 'hidden') {
+    return { visibility: 'hidden', role: '', tone: '', text: '' };
+  }
+  if ('visibility' in value) {
+    return { visibility: value.visibility, role: value.role, tone: value.tone, text: renderText(value) };
+  }
+  return {
+    visibility: value.tone === 'err' || value.tone === 'warn' ? 'alert' : 'normal',
+    role: value.role,
+    tone: value.tone,
+    text: value.text,
+  };
+}
+
+describe('semantic renderer shadow comparison', () => {
+  it('makes reasoning, locale, density, and unknown-event behavior explicit policies', () => {
+    const reasoning = EVENT_CORPUS.fixtures.find((row) => row.id === 'engineer.progress.reasoning')!.event;
+    expect(renderSemanticEvent(reasoning, { ...WEB_RENDER_CONTEXT, showReasoning: false }).visibility).toBe('hidden');
+
+    const secret = EVENT_CORPUS.fixtures.find((row) => row.id === 'engineer.progress.secret-redaction')!.event;
+    expect(renderSemanticEvent(secret, WEB_RENDER_CONTEXT).sensitive).toBe(true);
+
+    const blocked = EVENT_CORPUS.fixtures.find((row) => row.id === 'life.lifecycle.block')!.event;
+    expect(renderSemanticEvent(blocked, WEB_RENDER_CONTEXT).visibility).toBe('hidden');
+    expect(renderSemanticEvent(blocked, { ...WEB_RENDER_CONTEXT, density: 'full' }).visibility).toBe('alert');
+
+    const started = EVENT_CORPUS.fixtures.find((row) => row.id === 'life.manager.intent.started')!.event;
+    expect(renderText(renderSemanticEvent(started, { ...WEB_RENDER_CONTEXT, locale: 'zh-CN' }))).toBe('判断任务归属…');
+
+    const unknown = { type: 'future.event', text: 'kept for grep' } as unknown as TypedArgusEvent;
+    expect(renderSemanticEvent(unknown, WEB_RENDER_CONTEXT).visibility).toBe('hidden');
+    expect(renderText(renderSemanticEvent(unknown, { ...WEB_RENDER_CONTEXT, unknownEventPolicy: 'greppable' }))).toBe('[future.event] kept for grep');
+  });
+
+  it('matches current web semantics across the generated corpus except triaged old-renderer bugs', () => {
+    const oldRendererBugs: Record<string, Partial<ReturnType<typeof semanticProjection>>> = {
+      // The old web renderer leaks recognized credentials; the semantic core redacts them.
+      'engineer.progress.secret-redaction': { text: 'using token <REDACTED:github-token>' },
+      // Python follow already strips NEXT_OWNER; the old web renderer strips only the other handoff fields.
+      'engineer.progress.handoff-fields': { text: 'Artifact complete.' },
+      // A failed command was incorrectly dim in web even though TUI marks it as an error.
+      'engineer.progress.failed-command': { tone: 'err', visibility: 'alert' },
+      // The old label says duplicate even when policy deferred an unnecessary review purchase.
+      'life.planner.task_skipped.review-purchase-deferred': { text: 'review purchase deferred Purchase another paper review' },
+      // These catalog events currently fall through the web whitelist despite carrying operator meaning.
+      'life.planner.normalized': { text: 'normalized · removed duplicate planner task' },
+      // The old renderer leaves a trailing space when this schema has no objective field.
+      'life.planner.start': { text: 'planning' },
+      'life.planner.waiting': { role: 'planner', visibility: 'normal' },
+      'life.planner.waiting.waiting-resource': { text: 'waiting · subagent state waiting_resource is a healthy resource wait' },
+      'life.planner.waiting_woken': { role: 'planner', visibility: 'normal' },
+      'life.planner.terminal_idle': { role: 'planner', visibility: 'normal' },
+      'life.planner.verification_probe': { role: 'planner', visibility: 'normal' },
+    };
+
+    for (const fixture of EVENT_CORPUS.fixtures) {
+      const current = semanticProjection(renderEvent(fixture.event as EventMsg));
+      const semantic = semanticProjection(renderSemanticEvent(fixture.event, WEB_RENDER_CONTEXT));
+      const correction = oldRendererBugs[fixture.id];
+      if (correction) {
+        expect(semantic, fixture.id).toMatchObject(correction);
+        expect(current, fixture.id).not.toEqual(semantic);
+      } else {
+        expect(semantic, fixture.id).toEqual(current);
+      }
+    }
   });
 });

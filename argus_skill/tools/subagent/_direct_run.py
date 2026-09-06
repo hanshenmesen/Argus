@@ -5,6 +5,7 @@ parsing, and the direct `_run_direct` dispatcher.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import signal
@@ -13,21 +14,33 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ...daemon.state import (
+    _terminate_windows_process_tree as terminate_windows_process_tree,
+)
 from ._experiment_preflight import (
     experiment_launch_preflight,
     release_experiment_launch_claim,
 )
 from ._registry import (
     _ZERO_USAGE_TUPLE,
-    REGISTRY_DIR,
     _apply_supervisor_usage_fields,
     _exit_status_path,
     _launch_durable_command,
+    _process_identity,
     _read_task,
+    _task_log_dir,
     _write_task,
 )
 from ._reporting import _alert_engineer
+from ._resource_admission import (
+    ResourceLease,
+    acquire_for_task,
+    command_env,
+    record_renewal_failure,
+)
 from ._text import _tail_file
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # RL detection and collapse-guidance helpers
@@ -160,16 +173,28 @@ def _parse_launch_flags(command: str) -> dict[str, str]:
 # Deterministic run-contract preflight
 # ---------------------------------------------------------------------------
 
-def _run_contract_preflight(command: str, cwd: str) -> tuple[bool, str]:
+#: Mirrors ``skills.run_contract.DEFAULT_RUN_CONTRACT_PATH``. Duplicated because
+#: the only caller needs it when that very import is what failed, so it cannot
+#: read the constant from there. ``test_default_contract_path_stays_in_sync``
+#: fails if the two ever drift.
+_DEFAULT_CONTRACT_REL = "research/RUN_CONTRACT.json"
+
+
+def _run_contract_preflight(command: str, cwd: str) -> tuple[bool, str, str]:
     """Deterministic provenance interlock for a ``scale=full`` RL launch.
 
     Refuses a full-scale launch that is not a faithful, feasibility-probed
     execution of the frozen ``research/RUN_CONTRACT.json`` (drift in LR / group
     size / steps / curriculum, or a missing/invalid feasibility packet). This is
     provenance/consistency enforcement, NOT a scientific verdict — adequacy stays
-    with the L2 reviewer. Fail-soft: any unexpected error yields ``(False, "")``
-    so a framework bug can never wedge a launch.
+    with the L2 reviewer. An unreadable or malformed contract is itself a
+    provenance failure and rejects the launch. Unexpected framework errors remain
+    fail-soft, returning status ``"skipped"`` so they cannot wedge a launch but
+    also cannot be mistaken for a completed interlock.
     """
+    # Rebound to the resolved path once the command's ``--run-contract`` flag has
+    # been read; until then the default is the only honest thing to name.
+    contract_path: Path | None = None
     try:
         from ...skills import run_contract as rc  # noqa: PLC0415
 
@@ -206,13 +231,33 @@ def _run_contract_preflight(command: str, cwd: str) -> tuple[bool, str]:
             packet_path = Path(packet_rel)
             if not packet_path.is_absolute():
                 packet_path = base / packet_path
-        return rc.check_full_run_launch(
+        reject, concern = rc.check_full_run_launch(
             contract_path=contract_path,
             packet_path=packet_path,
             knobs=knobs,
         )
-    except Exception:
-        return (False, "")
+        return reject, concern, ""
+    except (OSError, ValueError) as exc:
+        # The contract itself is unreadable or does not say what a contract has
+        # to say — ``run_contract`` raises ValueError for exactly that (a
+        # non-object payload, an empty materialized curriculum). Not being able
+        # to read the provenance record IS a provenance failure, so reject and
+        # name the file the engineer has to fix.
+        named = contract_path or f"{cwd}/{_DEFAULT_CONTRACT_REL}"
+        return (
+            True,
+            f"provenance contract {named} is unreadable or malformed: "
+            f"{type(exc).__name__}: {exc}",
+            "",
+        )
+    except Exception:  # noqa: BLE001 — framework bugs must not wedge a launch
+        # TypeError / KeyError / anything else escaping here is a bug in this
+        # harness, not a statement about the contract. Blocking a legitimate
+        # launch on our own defect is the wrong trade, so stay fail-soft — but
+        # say so, and let the caller record ``skipped`` on the run so nobody
+        # later reads this launch as provenance-checked.
+        log.exception("Run-contract provenance interlock could not run")
+        return (False, "", "skipped")
 
 
 # ---------------------------------------------------------------------------
@@ -230,11 +275,27 @@ def _terminate_proc(proc: "subprocess.Popen[Any]", grace: float = 10.0) -> None:
     if proc.poll() is not None:
         return
     if os.name == "nt":
+        pid = proc.pid
+        if pid > 0:
+            tree_stopped = terminate_windows_process_tree(
+                pid,
+                identity_check=lambda: proc.pid == pid and proc.poll() is None,
+            )
+            if tree_stopped:
+                try:
+                    proc.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
+                return
         proc.terminate()
         try:
             proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -269,22 +330,30 @@ def _run_direct(
     task_id: str,
     command: str,
     description: str,
-    timeout: int,
+    timeout: int | None,
     cwd: str,
     run_dir: str | None = None,
 ) -> None:
     """Run command directly via Popen. No LLM involved."""
-    log_dir = REGISTRY_DIR / f"{task_id}_logs"
+    log_dir = _task_log_dir(task_id)
     log_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = log_dir / "stdout.log"
     stderr_path = log_dir / "stderr.log"
 
     start_time = time.time()
+    submitted_task = _read_task(task_id) or {}
     run_id = str(
-        (_read_task(task_id) or {}).get("run_id")
+        submitted_task.get("run_id")
         or f"{task_id}-{time.time_ns()}"
     )
+    timeout_defaulted = bool(submitted_task.get("timeout_defaulted", False))
+    timeout_fields = {
+        "timeout_seconds": timeout,
+        "timeout_defaulted": timeout_defaulted,
+    }
+    worker_identity = _process_identity(os.getpid())
     claim_owner = f"{run_id}:{os.getpid()}:{time.time_ns()}"
+    resource_lease: ResourceLease | None = None
     try:
         rejected, concern = experiment_launch_preflight(
             task_id=task_id,
@@ -306,12 +375,19 @@ def _run_direct(
                 "completed_at": time.time(),
                 "mode": "direct",
                 "worker_pid": os.getpid(),
+                "worker_process_identity": worker_identity,
                 "run_dir": run_dir,
+                **timeout_fields,
             }
             _apply_supervisor_usage_fields(td, model="", totals=_ZERO_USAGE_TUPLE)
             _write_task(task_id, td)
             _alert_engineer(task_id, "PREFLIGHT-REJECTED", td)
             return
+        resource_lease = acquire_for_task(
+            task_id,
+            mode="direct",
+            project_root=Path.cwd(),
+        )
         with stdout_path.open("w") as out, stderr_path.open("w") as err:
             proc = _launch_durable_command(
                 task_id=task_id,
@@ -320,22 +396,51 @@ def _run_direct(
                 stdout=out,
                 stderr=err,
                 cwd=cwd,
+                env=command_env(resource_lease),
             )
+            command_identity = _process_identity(proc.pid)
             running_task = _apply_supervisor_usage_fields({
                 "state": "running", "task_id": task_id,
                 "run_id": run_id,
                 "description": description, "command": command,
                 "pid": proc.pid, "worker_pid": os.getpid(),
+                "process_identity": command_identity,
+                "worker_process_identity": worker_identity,
                 "started_at": time.time(), "mode": "direct",
                 "run_dir": run_dir,
                 "exit_status_path": str(
                     _exit_status_path(task_id, run_id).resolve()
                 ),
                 "stdout_log": str(stdout_path), "stderr_log": str(stderr_path),
+                **timeout_fields,
             }, model="", totals=_ZERO_USAGE_TUPLE)
             _write_task(task_id, running_task)
             try:
-                proc.wait(timeout=timeout)
+                if timeout is None and resource_lease is None:
+                    proc.wait()
+                elif resource_lease is None:
+                    proc.wait(timeout=timeout)
+                else:
+                    deadline = (
+                        time.monotonic() + timeout
+                        if timeout is not None
+                        else None
+                    )
+                    renew_every = max(1.0, resource_lease.ttl_seconds / 3.0)
+                    while True:
+                        remaining = (
+                            deadline - time.monotonic()
+                            if deadline is not None
+                            else renew_every
+                        )
+                        if deadline is not None and remaining <= 0:
+                            raise subprocess.TimeoutExpired(proc.args, timeout)
+                        try:
+                            proc.wait(timeout=min(renew_every, remaining))
+                            break
+                        except subprocess.TimeoutExpired:
+                            if not resource_lease.renew():
+                                record_renewal_failure(task_id, resource_lease)
             except subprocess.TimeoutExpired:
                 # Kill the whole process group, not just the shell: the command
                 # runs with start_new_session=True, so a GPU trainer it spawned
@@ -345,7 +450,13 @@ def _run_direct(
                     "run_id": run_id,
                     "description": description, "command": command,
                     "pid": proc.pid, "worker_pid": os.getpid(),
-                    "timeout_seconds": timeout,
+                    "process_identity": command_identity,
+                    "worker_process_identity": worker_identity,
+                    **timeout_fields,
+                    "timeout_message": (
+                        f"Hard timeout reached after {timeout} seconds; "
+                        "this was the configured --timeout limit."
+                    ),
                     "elapsed_seconds": round(time.time() - start_time, 1),
                     "completed_at": time.time(), "mode": "direct",
                     "run_dir": run_dir,
@@ -365,9 +476,12 @@ def _run_direct(
             "command": command, "exit_code": proc.returncode,
             "elapsed_seconds": elapsed, "completed_at": time.time(),
             "pid": proc.pid, "worker_pid": os.getpid(), "mode": "direct",
+            "process_identity": command_identity,
+            "worker_process_identity": worker_identity,
             "run_dir": run_dir,
             "stdout_tail": stdout_tail, "stderr_tail": stderr_tail,
             "stdout_log": str(stdout_path), "stderr_log": str(stderr_path),
+            **timeout_fields,
         }
         _apply_supervisor_usage_fields(td, model="", totals=_ZERO_USAGE_TUPLE)
         _write_task(task_id, td)
@@ -382,12 +496,16 @@ def _run_direct(
             "elapsed_seconds": round(time.time() - start_time, 1),
             "completed_at": time.time(), "mode": "direct",
             "worker_pid": os.getpid(),
+            "worker_process_identity": worker_identity,
             "run_dir": run_dir,
+            **timeout_fields,
         }
         _apply_supervisor_usage_fields(td, model="", totals=_ZERO_USAGE_TUPLE)
         _write_task(task_id, td)
         _alert_engineer(task_id, "CRASHED", td)
     finally:
+        if resource_lease is not None:
+            resource_lease.release()
         release_experiment_launch_claim(
             task_id=task_id,
             cwd=cwd,

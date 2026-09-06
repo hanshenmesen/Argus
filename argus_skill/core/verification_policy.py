@@ -1,13 +1,10 @@
-"""Two axes that were doing one field's work.
+"""Generic exploration and per-mission verification policy.
 
-``research_target_level`` describes what finishing the *project* means:
-exploratory, publishable, doctoral. It is also injected into the Planner and
-Reviewer prompts every round, where it reads as the bar for *this* round. A
-project aiming at a publishable paper therefore gets every early probe judged
-against publication readiness, and ideas die before they are formed — not
-because the evidence was bad, but because a seed experiment is not a paper.
-
-Separating the two axes fixes that without loosening anything:
+A project-level acceptance bar and the evidence needed for one bounded mission
+are different decisions. Treating them as one makes every early increment face
+the final project bar, while silently choosing a weaker bar would compromise
+completion. This module separates those axes without owning any vertical's
+stage names or evidence rules:
 
 ``ExplorationPosture``
     How much budget to spend on non-obvious, high-risk, high-upside routes.
@@ -20,10 +17,8 @@ Separating the two axes fixes that without loosening anything:
 
 A bolder posture must never mean a laxer conclusion, and a lighter profile must
 never mean weaker facts. What a profile changes is *what has to be delivered*,
-never *whether the evidence is real* — that floor is enforced in code by
-:mod:`argus_skill.verticals.research.integrity_gate` and
-:mod:`argus_skill.core.evidence_status`, not by prose a relaxed profile could
-argue with.
+never *whether the evidence is real*. Concrete integrity checks and stage
+mappings belong to the active vertical.
 
 Resolution order is deliberate and fail-visible:
 
@@ -35,17 +30,16 @@ Resolution order is deliberate and fail-visible:
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
+
+from .pipeline_state import read_pipeline_state, write_pipeline_state
 
 __all__ = [
     "DEFAULT_POSTURE",
     "DEFAULT_PROFILE",
     "EXPLORATION_POSTURES",
     "PROFILE_ORDER",
-    "STAGE_PROFILES",
     "VERIFICATION_PROFILES",
     "EffectivePolicy",
     "lowers_the_bar",
@@ -68,42 +62,15 @@ DEFAULT_PROFILE = "adaptive"
 #: Increasing strictness. Used to detect when a change lowers the bar.
 PROFILE_ORDER = {"explore": 0, "develop": 1, "certify": 2}
 
-#: Stage → profile, per vertical. Early stages ask whether the direction is
-#: real; middle stages ask whether the implementation and comparison hold; the
-#: last stages certify the claim.
-STAGE_PROFILES: dict[str, dict[str, str]] = {
-    "research": {
-        "research": "explore",
-        "plan": "explore",
-        "benchmark": "develop",
-        "run": "develop",
-        "analysis": "develop",
-        "draft": "develop",
-        "review": "certify",
-        "submission": "certify",
-    },
-    "kernel_engineering": {
-        "scope": "explore",
-        "discover": "explore",
-        "environment": "explore",
-        "baseline": "develop",
-        "optimize": "develop",
-        "validate": "certify",
-        "report": "certify",
-        "deliver": "certify",
-    },
-}
-
 #: One line per profile, for the prompt. Deliberately terse: the reviewer
 #: prompt has a hard character budget, and a rule the code enforces does not
 #: need to be restated in prose.
 _PROFILE_MEANING = {
     "explore": "is the premise real, testable, and worth the next probe",
     "develop": "does the implementation, comparison, and claim scope hold",
-    "certify": "full claim coverage, venue compliance, submission-ready",
+    "certify": "full acceptance-claim coverage with release-ready evidence",
 }
 
-_STATE_RELPATH = ("research", "PIPELINE_STATE.json")
 _FINAL_SCOPES = frozenset({"final_submission"})
 
 
@@ -117,21 +84,17 @@ def normalize_profile(value: Any) -> str | None:
     return text if text in CONFIGURABLE_PROFILES else None
 
 
-def profile_for_stage(stage: Any, vertical: Any = None) -> str | None:
-    """Map a stage to its default profile, or ``None`` when unknown."""
+def profile_for_stage(
+    stage: Any,
+    stage_profiles: dict[str, str] | None = None,
+) -> str | None:
+    """Map a stage through a vertical-owned profile table."""
     stage_text = str(stage or "").strip().lower()
     if not stage_text:
         return None
-    vertical_text = str(vertical or "").strip().lower()
-    table = STAGE_PROFILES.get(vertical_text)
-    if table is None:
-        # Stage names are near-unique across verticals; fall back to any table
-        # that defines this stage rather than refusing to resolve.
-        for candidate in STAGE_PROFILES.values():
-            if stage_text in candidate:
-                return candidate[stage_text]
-        return None
-    return table.get(stage_text)
+    table = stage_profiles or {}
+    profile = str(table.get(stage_text) or "").strip().lower()
+    return profile if profile in VERIFICATION_PROFILES else None
 
 
 def lowers_the_bar(current: str, proposed: str) -> bool:
@@ -177,17 +140,18 @@ class EffectivePolicy:
 
 def stored_policy(project_root: object) -> dict[str, Any]:
     """Read the Manager-owned policy fields. Missing file → empty."""
-    path = Path(str(project_root)).joinpath(*_STATE_RELPATH)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = read_pipeline_state(project_root)
+    except (OSError, ValueError):
         return {}
-    if not isinstance(payload, dict):
-        return {}
-    return {
-        "exploration_posture": normalize_posture(payload.get("exploration_posture")),
-        "verification_profile": normalize_profile(payload.get("verification_profile")),
-    }
+    stored: dict[str, Any] = {}
+    posture = normalize_posture(payload.get("exploration_posture"))
+    profile = normalize_profile(payload.get("verification_profile"))
+    if posture is not None:
+        stored["exploration_posture"] = posture
+    if profile is not None:
+        stored["verification_profile"] = profile
+    return stored
 
 
 def resolve_policy(
@@ -197,6 +161,7 @@ def resolve_policy(
     stage: Any = None,
     vertical: Any = None,
     target_level: Any = None,
+    stage_profiles: dict[str, str] | None = None,
 ) -> EffectivePolicy:
     """Resolve the policy in force for the current mission."""
     stored = stored_policy(project_root)
@@ -224,7 +189,7 @@ def resolve_policy(
         return EffectivePolicy(profile=configured, source="operator", **common)
 
     # 3. adaptive → stage.
-    mapped = profile_for_stage(stage_text, vertical_text)
+    mapped = profile_for_stage(stage_text, stage_profiles)
     if mapped is not None:
         return EffectivePolicy(profile=mapped, source="stage", **common)
 
@@ -270,6 +235,7 @@ def set_policy(
     confirmed: bool = False,
     stage: Any = None,
     vertical: Any = None,
+    stage_profiles: dict[str, str] | None = None,
 ) -> EffectivePolicy:
     """Persist policy changes into the Manager-owned pipeline state.
 
@@ -277,13 +243,9 @@ def set_policy(
     for the project, so it needs the operator to say so — an Engineer or
     Reviewer must not be able to make its own completion easier.
     """
-    root = Path(str(project_root))
-    path = root.joinpath(*_STATE_RELPATH)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        payload = {}
-    if not isinstance(payload, dict):
+        payload = read_pipeline_state(project_root)
+    except (OSError, ValueError):
         payload = {}
 
     if profile is not None:
@@ -293,11 +255,16 @@ def set_policy(
                 f"unknown verification profile {profile!r}; "
                 f"expected one of {', '.join(CONFIGURABLE_PROFILES)}"
             )
-        before = resolve_policy(root, stage=stage, vertical=vertical)
+        before = resolve_policy(
+            project_root,
+            stage=stage,
+            vertical=vertical,
+            stage_profiles=stage_profiles,
+        )
         after_effective = (
             new_profile
             if new_profile in VERIFICATION_PROFILES
-            else (profile_for_stage(stage, vertical) or before.profile)
+            else (profile_for_stage(stage, stage_profiles) or before.profile)
         )
         if not confirmed and lowers_the_bar(before.profile, after_effective):
             raise PolicyConfirmationRequired(
@@ -316,6 +283,10 @@ def set_policy(
             )
         payload["exploration_posture"] = new_posture
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return resolve_policy(root, stage=stage, vertical=vertical)
+    write_pipeline_state(project_root, payload)
+    return resolve_policy(
+        project_root,
+        stage=stage,
+        vertical=vertical,
+        stage_profiles=stage_profiles,
+    )

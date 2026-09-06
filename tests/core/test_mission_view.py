@@ -16,6 +16,20 @@ def emit(root: Path, event_type: str, ts: float, **payload) -> dict:
     return update_mission_view_event(root, {"type": event_type, "ts": ts, **payload})
 
 
+def test_legacy_team_waiting_projects_as_planner_waiting(tmp_path: Path) -> None:
+    view = emit(
+        tmp_path,
+        "life.team.waiting",
+        1,
+        reason="await external worker",
+    )
+
+    planner = next(role for role in view["roles"] if role["role"] == "planner")
+    assert planner["status"] == "waiting"
+    assert planner["label"] == "Waiting on external work"
+    assert view["timeline"][-1]["title"] == "Planner waiting"
+
+
 def test_manager_handoff_refreshes_stage_after_objective_update(tmp_path: Path) -> None:
     emit(
         tmp_path,
@@ -62,11 +76,32 @@ def test_manager_grounding_lifecycle_is_visible(tmp_path: Path) -> None:
         execution_task="Repair parser behavior\n\nManager grounding",
         vertical="software",
         workflow_mode="staged",
+        route="team",
+        lifetime="bounded",
+        continuous=True,
+        open_ended=False,
         reason="grounded",
     )
     roles = {role["role"]: role for role in view["roles"]}
     assert view["mission"]["status"] == "framed"
+    assert view["routing"] == {
+        "route": "team",
+        "vertical": "software",
+        "workflow_mode": "staged",
+        "lifetime": "bounded",
+        "continuous": True,
+        "open_ended": False,
+    }
     assert roles["manager"]["status"] == "done"
+    view = emit(
+        tmp_path,
+        "life.planner.task_added",
+        3,
+        item_id="task-1",
+        title="Fix the CLI",
+    )
+    planner = next(role for role in view["roles"] if role["role"] == "planner")
+    assert planner["label"] == "Task added"
 
 
 def test_manager_intent_failure_is_not_labeled_as_grounding_failed(
@@ -92,9 +127,28 @@ def test_manager_intent_failure_is_not_labeled_as_grounding_failed(
     roles = {role["role"]: role for role in view["roles"]}
     assert view["mission"]["status"] == "failed"
     assert roles["manager"]["status"] == "error"
-    assert roles["manager"]["label"] == "Manager routing failed"
-    assert view["timeline"][-1]["title"] == "Manager routing failed"
-    assert view["role_work"][-1]["title"] == "Manager routing failed"
+    assert roles["manager"]["label"] == "I couldn't determine how to handle this request."
+    assert view["timeline"][-1]["title"] == roles["manager"]["label"]
+    assert view["role_work"][-1]["title"] == roles["manager"]["label"]
+    assert "VerticalDecisionError" not in view["timeline"][-1]["detail"]
+    assert "VerticalDecisionError" not in view["role_work"][-1]["detail"]
+
+
+def test_manager_stage_decision_uses_human_action_and_status(tmp_path: Path) -> None:
+    view = emit(
+        tmp_path,
+        "life.manager.stage_decision",
+        1,
+        action="rollback",
+        target_stage="paper_review",
+        reason="The submission evidence is stale.",
+    )
+
+    manager = next(role for role in view["roles"] if role["role"] == "manager")
+    assert manager["label"] == "Returning to paper review"
+    assert view["timeline"][-1]["title"] == "Returning to paper review"
+    assert view["role_work"][-1]["status"] == "done"
+    assert view["role_work"][-1]["detail"] == "The submission evidence is stale."
 
 
 def test_load_normalizes_persisted_legacy_manager_failure_label(
@@ -142,10 +196,34 @@ def test_v3_snapshot_rebuilds_to_include_completion_summary(tmp_path: Path) -> N
         backlog=[],
     )
 
-    assert view["schema_version"] == 4
+    assert view["schema_version"] == 6
     assert view["mission"]["summary"] == (
         "Created RESULT.txt and verified its exact contents."
     )
+
+
+def test_v4_snapshot_migrates_without_discarding_projected_state(tmp_path: Path) -> None:
+    (tmp_path / "mission-view.json").write_text(
+        json.dumps({
+            "schema_version": 4,
+            "bootstrapped": True,
+            "mission": {"id": "kept", "title": "Keep this mission", "status": "working"},
+            "stage": {"id": "delivery", "label": "Delivery"},
+        }),
+        encoding="utf-8",
+    )
+
+    view = snapshot_mission_view(
+        tmp_path,
+        session={},
+        daemon={},
+        roles=[],
+        backlog=[],
+    )
+
+    assert view["schema_version"] == 6
+    assert view["mission"]["id"] == "kept"
+    assert view["routing"]["route"] == ""
 
 
 def test_venue_and_idea_research_are_visible_as_engineer_work(tmp_path: Path) -> None:

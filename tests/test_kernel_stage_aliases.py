@@ -7,7 +7,7 @@ from argus_skill.skills.stage_machine import current_stage
 
 
 def _write_state(root: Path, stage: str) -> Path:
-    path = root / "research" / "PIPELINE_STATE.json"
+    path = root / ".argus" / "PIPELINE_STATE.json"
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps({

@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from ..core.knobs import env_int
 from ..core.role_session import (
     ROLE_SESSION_POLICIES,
     configured_role_session_policy,
@@ -30,21 +33,29 @@ _BG_SUBAGENT_ADVISORY_ENV = "ARGUS_SKILL_BG_SUBAGENT_ADVISORY"
 _COMPACT_CONTINUATION_PROMPTS_ENV = "ARGUS_SKILL_COMPACT_CONTINUATION_PROMPTS"
 _ROLE_SESSION_MAX_TURNS_ENV = "ARGUS_SKILL_ROLE_SESSION_MAX_TURNS"
 _ROLE_SESSION_MAX_INPUT_TOKENS_ENV = "ARGUS_SKILL_ROLE_SESSION_MAX_INPUT_TOKENS"
+_NARRATIVE_REVIEW_ENFORCEMENT_ENV = "ARGUS_SKILL_NARRATIVE_REVIEW_ENFORCEMENT"
 _CONTINUE_WORK_SENTINEL = "CONTINUE_WORK:"
 _CONTINUE_WORK_MAX_CHARS = 500
-_DEFAULT_DECISION_PROGRESS_TIMEOUT_SECONDS = 30 * 60
-_RUNNER_DEFAULT_HARD_IDLE_SECONDS = 45 * 60
-
-
-def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(minimum, value)
+_DEFAULT_DECISION_PROGRESS_TIMEOUT_SECONDS = 0
+_RUNNER_DEFAULT_HARD_IDLE_SECONDS = 0
+# Framework-owned fallback for ``EngineerConfig.live_search_stages``: the
+# research stage, where idea discovery / literature grounding happens. A
+# vertical that owns a different pipeline (math runs scope/solve/review and has
+# no research stage at all) declares its own set through the vertical contract;
+# this stays the answer for every vertical that declares nothing.
+DEFAULT_LIVE_SEARCH_STAGES: frozenset[str] = frozenset({"research"})
+OPERATOR_QUESTION_FORBIDDEN_NEXT_ACTION = (
+    "Continue autonomously: solve reversible environment, tool, worktree, and "
+    "dependency issues with available capabilities; do not ask the operator. "
+    "If only irreversible authority or unavailable credentials remain, preserve "
+    "the current state and report blocked without an operator question."
+)
+OPERATOR_QUESTION_POLICY_REVIEW_SOURCES = frozenset(
+    {
+        "engineer_operator_question_policy",
+        "reviewer_operator_question_policy",
+    }
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -52,6 +63,11 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _narrative_review_enforcement() -> str:
+    raw = os.environ.get(_NARRATIVE_REVIEW_ENFORCEMENT_ENV, "shadow")
+    return "blocking" if raw.strip().lower() == "blocking" else "shadow"
 
 
 def parse_continue_work_request(message: str | None) -> str | None:
@@ -89,11 +105,81 @@ class EngineerConfig:
     dangerous_yolo: bool = False
     sandbox_mode: str | None = None
     isolate_workdir: bool = False
-    # Pipeline stages in which the engineer runs with codex's native live
-    # web_search enabled (``codex exec --search``). Default: the research stage,
-    # so idea discovery / literature grounding does REAL live search instead of
-    # cached/recalled results. Empty set → never enable it.
-    live_search_stages: frozenset[str] = frozenset({"research"})
+    # Public, historical caller configuration for pipeline stages in which the
+    # engineer runs with codex's native live web_search enabled
+    # (``codex exec --search``). The value and type of this default are part of
+    # the API; private provenance below, rather than ``None``, records omission.
+    live_search_stages: frozenset[str] = DEFAULT_LIVE_SEARCH_STAGES
+    # State root that owns the pipeline stage used by the live-search gate.
+    # Execution may happen in a separate workdir.
+    vertical_state_root: Path | None = None
+    # ``dataclasses.replace`` reconstructs an instance by passing every init
+    # field back to ``__init__``. Keeping provenance as a keyword-only init
+    # field lets that replay carry the original state instead of mistaking the
+    # replayed public value for a caller choice. Keyword-only keeps every
+    # historical positional parameter in the same place.
+    _live_search_stages_explicit: bool = field(
+        default=False,
+        repr=False,
+        compare=False,
+        kw_only=True,
+    )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Treat post-construction writes to the public knob as explicit."""
+        if (
+            name == "live_search_stages"
+            and "_live_search_stages_explicit" in self.__dict__
+        ):
+            object.__setattr__(self, "_live_search_stages_explicit", True)
+        object.__setattr__(self, name, value)
+
+    def replace(self, **changes: Any) -> EngineerConfig:
+        """Return an updated config while preserving caller provenance.
+
+        Use this public entry point when updating ``live_search_stages``.
+        ``dataclasses.replace`` cannot distinguish an explicitly supplied
+        default-equivalent value from a field it copied unchanged, so use this
+        method when that distinction matters.
+        """
+        if "live_search_stages" in changes:
+            changes["_live_search_stages_explicit"] = True
+        return dataclass_replace(self, **changes)
+
+
+_engineer_config_init = EngineerConfig.__init__
+
+
+@wraps(_engineer_config_init)
+def _init_engineer_config_with_provenance(
+    self: EngineerConfig,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    """Capture argument presence without losing replayed provenance."""
+    provenance_supplied = "_live_search_stages_explicit" in kwargs
+    provenance = kwargs.get("_live_search_stages_explicit", False)
+    stages_supplied = len(args) > 10 or "live_search_stages" in kwargs
+    explicit = stages_supplied
+    # ``dataclasses.replace`` supplies the old provenance alongside every init
+    # field. Preserve that state, but recognize a replayed non-default public
+    # value as an explicit replacement. Only a replacement equal to the public
+    # default is inherently ambiguous; ``EngineerConfig.replace`` records that
+    # intent before ``dataclasses.replace`` discards the changed-key information.
+    if provenance_supplied:
+        explicit = bool(provenance)
+        if not explicit and stages_supplied:
+            stages = (
+                args[10]
+                if len(args) > 10
+                else kwargs["live_search_stages"]
+            )
+            explicit = stages != DEFAULT_LIVE_SEARCH_STAGES
+    _engineer_config_init(self, *args, **kwargs)
+    self._live_search_stages_explicit = explicit
+
+
+EngineerConfig.__init__ = _init_engineer_config_with_provenance  # type: ignore[method-assign]
 
 
 def _engineer_live_search(workdir: Any, stages: "frozenset[str]") -> bool:
@@ -149,7 +235,8 @@ def _fit_stall_guard(threshold: int, budget: int) -> int:
 class SupervisedConfig:
     """Knobs for the round-loop control."""
 
-    max_rounds: int = 32
+    # Zero means no arbitrary round ceiling; explicit positive budgets still work.
+    max_rounds: int = 0
     # Keep the historical reviewed loop by default. Planner-classified
     # low-risk bounded work may opt into an Engineer self-review completion.
     require_independent_review: bool = True
@@ -166,17 +253,15 @@ class SupervisedConfig:
     # Safe round-boundary budget since the last Reviewer-classified decision or
     # evidence increment. This never interrupts a live provider call.
     decision_progress_timeout_seconds: int = field(
-        default_factory=lambda: _env_int(
+        default_factory=lambda: env_int(
             _DECISION_PROGRESS_TIMEOUT_ENV,
             _DEFAULT_DECISION_PROGRESS_TIMEOUT_SECONDS,
         )
     )
-    # Anti-livelock escalation — distinct from the stall guards above, which fire
-    # when the engineer is idle or the Reviewer classifies repeated rounds as
-    # nondecision work. A mission that makes evidence progress every round but
-    # never passes its gate would otherwise drift to ``max_rounds``.
-    # At ``soft_round_limit`` the reviewer is instructed to return ``blocked`` if
-    # the binding constraint is an external/unresolvable dependency. At
+    # Anti-livelock escalation — after ``soft_round_limit``, two consecutive
+    # Reviewer verdicts without ``forward_progress=true`` settle through the
+    # existing no-progress path. Any true verdict in that two-round window lets
+    # productive long work continue. At
     # ``hard_escalate_rounds`` the loop requires an explicit Reviewer progress
     # judgment: known progress (including a short bounded regression before the
     # stall threshold) may continue, while a missing signal ends the mission so
@@ -187,14 +272,15 @@ class SupervisedConfig:
     backend_failure_threshold: int = 2
     backend_failure_backoff_seconds: float = 15.0
     session_id: str | None = None
-    # Experimental A/B policy. Production stays fresh unless explicitly set to
-    # mission or rolling.
+    # Product-wide policy: ``auto`` selects bounded rolling sessions for
+    # resumable native CLIs and fresh turns for others. Explicit fresh/mission/
+    # rolling values remain available for rollback and evaluation.
     role_session_policy: str = field(default_factory=configured_role_session_policy)
     role_session_max_turns: int = field(
-        default_factory=lambda: _env_int(_ROLE_SESSION_MAX_TURNS_ENV, 6)
+        default_factory=lambda: env_int(_ROLE_SESSION_MAX_TURNS_ENV, 6)
     )
     role_session_max_input_tokens: int = field(
-        default_factory=lambda: _env_int(
+        default_factory=lambda: env_int(
             _ROLE_SESSION_MAX_INPUT_TOKENS_ENV,
             120_000,
         )
@@ -204,19 +290,29 @@ class SupervisedConfig:
     # ``<life_dir>/events.jsonl``). The reviewer runs in the project work-tree
     # and only sees the engineer's final summary, so it cannot otherwise tell
     # HOW a result was produced (hardcoded answer? skipped step? cheat method?
-    # faked metric?). When set, the reviewer prompt gains an execution-log
-    # audit section pointing here with grep recipes; empty string (memory
-    # backend / tests / unresolvable path) = legacy behaviour, no audit section,
-    # byte-for-byte unchanged. The engineer's shell commands land in the
-    # ``text`` field of each ``engineer.progress`` event in this file.
+    # faked metric?). When set, the reviewer prompt gains a one-line fallback
+    # pointer; empty string (memory backend / tests / unresolvable path) omits
+    # it. The engineer's shell commands still land in the ``text`` field of
+    # each ``engineer.progress`` event in this file.
     engineer_log_path: str = ""
+    # Prompt routing operation selected once from the active vertical/stage.
+    # Narrative editing forces a fresh Engineer context so review wording and
+    # authoring chronology cannot leak into the reader-facing pass.
+    engineer_operation: str = "mission"
+    narrative_mission_id: str = ""
+    narrative_snapshot_root: str = ""
+    # New semantic-loss/cold-read signals calibrate in shadow mode first.
+    # Set ARGUS_SKILL_NARRATIVE_REVIEW_ENFORCEMENT=blocking only after evals.
+    narrative_review_enforcement: str = field(
+        default_factory=_narrative_review_enforcement
+    )
     # Ordinary Markdown file edited directly by Engineer and Reviewer. None
     # disables the shared checkpoint for callers that intentionally opt out.
     checkpoint_path: Path | None = None
     # Mission-level canonical packet. Round handoffs are written beside it.
     context_packet_path: str = ""
     runner_hard_idle_seconds: int = field(
-        default_factory=lambda: _env_int(
+        default_factory=lambda: env_int(
             _RUNNER_HARD_IDLE_ENV,
             _RUNNER_DEFAULT_HARD_IDLE_SECONDS,
         )
@@ -230,12 +326,15 @@ class SupervisedConfig:
     background_subagent_advisory: bool = field(
         default_factory=lambda: _env_bool(_BG_SUBAGENT_ADVISORY_ENV, True)
     )
+    operator_questions_allowed: bool = True
+    operator_question_policy_root: Path | None = None
+
     def __post_init__(self) -> None:
         """Keep the round-budget guards reachable when ``max_rounds`` shrinks.
 
         ``stall_threshold`` / ``soft_round_limit`` / ``hard_escalate_rounds``
-        are ABSOLUTE round counts sized for the default ``max_rounds`` (32).
-        A specialized caller may explicitly lower the budget for one mission,
+        are absolute semantic thresholds. A specialized caller may explicitly
+        set a positive round budget for one mission,
         and a guard whose threshold is not strictly reachable within that
         budget can then never fire. Nothing reports this: the value stays in
         the config, is passed
@@ -244,11 +343,6 @@ class SupervisedConfig:
         Semantic stall is counted only from the Reviewer's structured
         ``FORWARD_PROGRESS=false`` judgment. The harness never derives it from
         verdict prose or filesystem activity.
-
-        ``_runtime_execute`` already performs the mirror-image coordination in
-        the unbounded direction (a progressive experiment matrix raises
-        ``max_rounds`` and explicitly zeroes both escalation guards). This does
-        the same for the bounded direction, generically.
 
         Rescaling preserves each guard's MEANING ("stop after this much
         fruitless work") expressed in the budget actually available:
@@ -260,8 +354,8 @@ class SupervisedConfig:
           final round, it is disabled rather than silently becoming a one-strike
           policy. Callers may still request ``stall_threshold=1`` explicitly
           when a two-round budget should stop after its first negative verdict.
-        * ``soft_round_limit`` advises the Reviewer partway through, so it
-          must also land strictly inside the budget.
+        * ``soft_round_limit`` enforces a two-verdict progress window after the
+          boundary, so it must land strictly inside the budget.
         * ``hard_escalate_rounds`` is the point where continuation must be backed
           by the Reviewer's explicit progress judgment. A missing signal ends
           with a planner-readable reason; reaching this boundary on the final
@@ -272,7 +366,7 @@ class SupervisedConfig:
         unchanged.
         """
         if self.role_session_policy not in ROLE_SESSION_POLICIES:
-            raise ValueError("role_session_policy must be fresh, mission, or rolling")
+            raise ValueError("role_session_policy must be auto, fresh, mission, or rolling")
         budget = int(self.max_rounds)
         if budget <= 0:
             return

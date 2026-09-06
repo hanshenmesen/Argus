@@ -29,7 +29,9 @@ def test_the_message_names_the_holder_and_the_ways_out() -> None:
     text = _busy_message(Path("/tmp/argus-test/workdir"), json.dumps(_OWNER))
 
     assert "pid 4242" in text
-    assert "kill 4242" in text, "an operator told a pid holds it must be told how to stop it"
+    assert "argus --daemon-stop --resume s-holder" in text
+    assert "Stop-Process" not in text
+    assert "kill 4242" not in text
     assert "--status" in text
     assert "different directory" in text
     assert _OWNER["life_dir"] in text
@@ -50,4 +52,4 @@ def test_an_unparseable_lease_record_still_says_everything_it_knows() -> None:
 def test_an_empty_lease_record_still_reports_the_conflict() -> None:
     text = _busy_message(Path("/tmp/wd"), "")
 
-    assert "/tmp/wd is already leased" in text
+    assert f"{Path('/tmp/wd')} is already leased" in text

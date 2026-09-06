@@ -26,7 +26,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from ...core.models import RunnerOptions, RunnerResult
-from ...core.secret_guard import known_secret_values
+from ._budget_monitor import monitor_budget
 from ._exec_admission import admit
 from ._exec_context import _ExecContext
 from ._exec_spawn import spawn_and_finish
@@ -43,7 +43,7 @@ def execute(
     run_label: str,
     resume_thread_id: str | None = None,
 ) -> RunnerResult:
-    backend._known_secret_values = known_secret_values()
+    backend._refresh_known_secret_values()
     # Pin Codex's implicit config model before any accounting or execution.
     # The generated command, reservation, and settled usage record therefore
     # share one model id instead of independently guessing after the call.
@@ -87,4 +87,5 @@ def execute(
     if denied is not None:
         return denied
 
-    return spawn_and_finish(ctx, cli_options)
+    with monitor_budget(ctx, cli_options):
+        return spawn_and_finish(ctx, cli_options)

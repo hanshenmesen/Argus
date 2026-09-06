@@ -295,6 +295,7 @@ def test_cli_archive_writes_persisted_state(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=_cli_env(tmp_path),
     )
     assert proc.returncode == 0, proc.stderr
@@ -316,6 +317,7 @@ def test_cli_resume_refuses_non_quarantined(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=_cli_env(tmp_path),
     )
     # Fresh project is incubating, not quarantined → resume refuses.
@@ -339,6 +341,7 @@ def test_cli_lifecycle_transition_aborts_when_explicit_session_is_missing(
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=_cli_env(tmp_path),
     )
 
@@ -377,6 +380,7 @@ def test_cli_resume_after_quarantine_returns_to_running(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=_cli_env(tmp_path),
     )
     assert proc.returncode == 0, proc.stderr
@@ -411,6 +415,7 @@ def test_cli_status_shows_persisted_marker(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=_cli_env(tmp_path),
     )
     assert proc.returncode == 0, proc.stderr
@@ -432,6 +437,7 @@ def test_cli_mutual_exclusion_blocks_two_lifecycle_flags(tmp_path: Path) -> None
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     assert proc.returncode == 2
     assert "mutually exclusive" in proc.stderr

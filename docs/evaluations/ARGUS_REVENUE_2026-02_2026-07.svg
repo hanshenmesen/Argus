@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-labelledby="title desc">
+  <title id="title">Argus verified revenue, February through July 2026</title>
+  <desc id="desc">No verified revenue records were available for any of the six complete calendar months, so no revenue curve is drawn.</desc>
+  <rect width="960" height="480" fill="#ffffff"/>
+  <text x="480" y="42" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="700">Argus verified revenue — 2026-02 to 2026-07</text>
+  <text x="480" y="70" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#555555">Revenue, not valuation · blank means unverified, not zero</text>
+  <line x1="100" y1="390" x2="900" y2="390" stroke="#333333" stroke-width="2"/>
+  <line x1="100" y1="105" x2="100" y2="390" stroke="#333333" stroke-width="2"/>
+  <text x="35" y="250" transform="rotate(-90 35 250)" text-anchor="middle" font-family="sans-serif" font-size="14">Verified revenue (USD)</text>
+  <g font-family="sans-serif" font-size="13" text-anchor="middle" fill="#333333">
+    <text x="160" y="420">2026-02</text>
+    <text x="290" y="420">2026-03</text>
+    <text x="420" y="420">2026-04</text>
+    <text x="550" y="420">2026-05</text>
+    <text x="680" y="420">2026-06</text>
+    <text x="810" y="420">2026-07</text>
+  </g>
+  <g font-family="sans-serif" font-size="14" text-anchor="middle" fill="#9b2c2c">
+    <text x="160" y="365">N/A</text>
+    <text x="290" y="365">N/A</text>
+    <text x="420" y="365">N/A</text>
+    <text x="550" y="365">N/A</text>
+    <text x="680" y="365">N/A</text>
+    <text x="810" y="365">N/A</text>
+  </g>
+  <rect x="190" y="145" width="580" height="105" rx="8" fill="#fff5f5" stroke="#c53030"/>
+  <text x="480" y="185" text-anchor="middle" font-family="sans-serif" font-size="18" font-weight="700" fill="#822727">No verified revenue records were found</text>
+  <text x="480" y="215" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#555555">A numeric line would fabricate data. Supply accounting evidence to replace N/A values.</text>
+</svg>

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -179,6 +180,14 @@ def _prepare_checkout(
     return temporary
 
 
+def _remove_tree(path: Path) -> None:
+    def remove_readonly(func, value, _exc_info) -> None:
+        os.chmod(value, stat.S_IWRITE)
+        func(value)
+
+    shutil.rmtree(path, onerror=remove_readonly)
+
+
 def _copy_private_config(source: Path, destination: Path) -> None:
     for relative in (Path(".env"), Path("skills/ppt-master/.env")):
         source_path = source / relative
@@ -200,11 +209,46 @@ def _replace_checkout(target: Path, prepared: Path) -> None:
     except BaseException:
         os.replace(backup, target)
         raise
-    shutil.rmtree(backup)
+    _remove_tree(backup)
 
 
 def _python_executable(explicit: str | None = None) -> str:
     return explicit or os.environ.get("ARGUS_SKILL_PYTHON") or sys.executable
+
+
+def _python_has_pip(python: str) -> bool:
+    try:
+        result = subprocess.run(
+            [python, "-m", "pip", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _install_requirements(python: str, requirements: Path) -> None:
+    if _python_has_pip(python):
+        command = [python, "-m", "pip", "install", "-r", str(requirements)]
+    else:
+        uv = shutil.which("uv")
+        if uv is None:
+            raise RuntimeError(
+                f"PPT Master dependency installation requires pip for {python} "
+                "or the uv executable"
+            )
+        command = [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            python,
+            "-r",
+            str(requirements),
+        ]
+    _run(command)
 
 
 def _write_manifest(
@@ -276,32 +320,20 @@ def install_ppt_master(
             if target.exists():
                 _copy_private_config(target, prepared)
             if install_dependencies:
-                _run(
-                    [
-                        python,
-                        "-m",
-                        "pip",
-                        "install",
-                        "-r",
-                        str(prepared / "skills" / "ppt-master" / "requirements.txt"),
-                    ]
+                _install_requirements(
+                    python,
+                    prepared / "skills" / "ppt-master" / "requirements.txt",
                 )
             _replace_checkout(target, prepared)
         finally:
             if prepared.exists() and prepared != target:
-                shutil.rmtree(prepared)
+                _remove_tree(prepared)
 
     _validate_checkout(target, revision, git)
     if install_dependencies and current_revision == revision:
-        _run(
-            [
-                python,
-                "-m",
-                "pip",
-                "install",
-                "-r",
-                str(skill_root(global_root) / "requirements.txt"),
-            ]
+        _install_requirements(
+            python,
+            skill_root(global_root) / "requirements.txt",
         )
     _write_manifest(
         target,

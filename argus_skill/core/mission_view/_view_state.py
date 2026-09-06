@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 import threading
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -18,7 +19,7 @@ from ..event_catalog import EventType, canonical_event_type
 
 MISSION_VIEW_FILE = "mission-view.json"
 MISSION_VIEW_LOCK_FILE = "mission-view.lock"
-MISSION_VIEW_SCHEMA_VERSION = 4
+MISSION_VIEW_SCHEMA_VERSION = 6
 MISSION_TIMELINE_LIMIT = 120
 MISSION_ROLE_WORK_LIMIT_PER_ROLE = 40
 MISSION_BOOTSTRAP_MAX_BYTES = 8 * 1024 * 1024
@@ -26,7 +27,9 @@ MISSION_SKILL_CONTENT_MAX_BYTES = 128 * 1024
 
 _ROLE_NAMES = ("manager", "planner", "engineer", "reviewer")
 _PIPELINE_ROLE_NAMES = frozenset({"planner", "engineer", "reviewer"})
-_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = (
+    weakref.WeakValueDictionary()
+)
 _THREAD_LOCKS_GUARD = threading.Lock()
 
 try:  # pragma: no cover - production daemons are POSIX
@@ -52,6 +55,14 @@ def empty_mission_view() -> dict[str, Any]:
             "campaign_elapsed_seconds": 0.0,
         },
         "stage": {"id": "", "label": ""},
+        "routing": {
+            "route": "",
+            "vertical": "",
+            "workflow_mode": "",
+            "lifetime": "",
+            "continuous": False,
+            "open_ended": False,
+        },
         "round": {"current": 0, "max": 0},
         "active_role": "",
         "roles": [
@@ -78,6 +89,9 @@ def empty_mission_view() -> dict[str, Any]:
         "achievement": None,
         "review": {"status": "", "reason": "", "rejected_attempts": 0},
         "frontier": {"change": "", "summary": "", "updated_at": 0.0},
+        # One structured receipt links completion, chat, and the right-side
+        # result surface.  It is null until a successful mission settles.
+        "delivery": None,
         "outcome": {},
         "last_event_ts": 0.0,
         "updated_at": 0.0,
@@ -114,9 +128,9 @@ def _read_unlocked(root: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return empty_mission_view()
     schema_version = payload.get("schema_version")
-    if schema_version not in {1, 2, 3, MISSION_VIEW_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, 3, 4, 5, MISSION_VIEW_SCHEMA_VERSION}:
         return empty_mission_view()
-    if schema_version in {1, 2, 3}:
+    if schema_version in {1, 2, 3, 4, 5}:
         payload["schema_version"] = MISSION_VIEW_SCHEMA_VERSION
         if schema_version == 3:
             payload["bootstrapped"] = False
@@ -145,7 +159,11 @@ def _read_unlocked(root: Path) -> dict[str, Any]:
     payload.setdefault("learned_wiki_pages", [])
     payload.setdefault("role_work", [])
     payload.setdefault("frontier", {"change": "", "summary": "", "updated_at": 0.0})
+    payload.setdefault("delivery", None)
     payload.setdefault("outcome", {})
+    routing = payload.setdefault("routing", {})
+    for key, value in empty_mission_view()["routing"].items():
+        routing.setdefault(key, value)
     for skill in payload.setdefault("learned_skills", []):
         if isinstance(skill, dict):
             skill.pop("content", None)

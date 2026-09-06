@@ -8,6 +8,7 @@ subagent-spawn helpers. The default (gate OFF) must be byte-for-byte unchanged.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,7 @@ def gate_on(monkeypatch):
 # ── gate ───────────────────────────────────────────────────────────────────
 def test_default_policy_grants_every_backend_full_access(monkeypatch):
     monkeypatch.delenv("ARGUS_SKILL_SAFE_MODE", raising=False)
-    for backend in ("codex", "claude", "copilot", "opencode", "pi"):
+    for backend in ("codex", "claude", "copilot", "cursor", "opencode", "pi"):
         runner = AgentCliRunner(agent_bin=backend, backend=backend)
         options = runner._apply_sandbox_policy(
             RunnerOptions(sandbox_mode="read-only", isolate_workdir=True)
@@ -69,27 +70,68 @@ def test_gate_env_parsing(monkeypatch, val, expected):
 
 # ── writable allowlist containment invariants ────────────────────────────────
 def test_writable_roots_excludes_gate_brain_and_package():
-    home = str(Path.home())
-    roots = sandbox.writable_roots()
+    home = Path.home()
+    roots = [Path(root) for root in sandbox.writable_roots()]
     # NEVER writable: the gate's brain, the package source, the codex config.
-    for r in roots:
-        assert not (r == home + "/.argus-skill" or r.startswith(home + "/.argus-skill/"))
-        assert not (r == home + "/.codex" or r.startswith(home + "/.codex/"))
-    forb = sandbox.forbidden_write_roots()
-    assert home + "/.argus-skill" in forb
-    assert home + "/.codex" in forb
+    assert not any(root.is_relative_to(home / ".argus-skill") for root in roots)
+    assert not any(root.is_relative_to(home / ".codex") for root in roots)
+    forbidden = {Path(root) for root in sandbox.forbidden_write_roots()}
+    assert home / ".argus-skill" in forbidden
+    assert home / ".codex" in forbidden
     # the package root is forbidden
     import argus_skill
-    pkg = str(Path(argus_skill.__file__).resolve().parent.parent)
-    assert pkg in forb
+    package_root = Path(argus_skill.__file__).resolve().parent.parent
+    assert package_root in forbidden
 
 
 def test_writable_roots_includes_research_caches():
-    roots = sandbox.writable_roots()
-    assert any(r.endswith("/.cache") for r in roots)   # pip / HF / torch
-    assert any(r.endswith("/.kube") for r in roots)     # B200 kubectl token cache
-    assert any(r.endswith("/.triton") for r in roots)   # Triton JIT/autotune cache
-    assert any(r.endswith("/.nv") for r in roots)       # NVIDIA ptxas/nvrtc cache
+    names = {Path(root).name for root in sandbox.writable_roots()}
+    assert ".cache" in names   # pip / HF / torch
+    assert ".kube" in names     # B200 kubectl token cache
+    assert ".triton" in names   # Triton JIT/autotune cache
+    assert ".nv" in names       # NVIDIA ptxas/nvrtc cache
+
+
+def test_forbidden_roots_include_user_site_and_local_bin():
+    """2026-09-05 escape: with the system site unwritable, pip inside the
+    maintenance worktree silently fell back to a *user* install, rewriting
+    ~/.local/bin/argus and planting an editable .pth in the user
+    site-packages — both auto-load into the next un-sandboxed interpreter.
+    Both roots must be forbidden and never granted via --add-dir. ~/.local/lib
+    covers the user site of EVERY interpreter version — the incident pip ran
+    under the system 3.11, not this venv's 3.12 — while the per-interpreter
+    user site stays forbidden for a PYTHONUSERBASE outside home. (The
+    worktree itself stays writable: it is the -C / bwrap bind root, which
+    forbidden_write_roots never filters.)"""
+    import site
+    home = Path.home()
+    forbidden = {Path(root) for root in sandbox.forbidden_write_roots()}
+    assert home / ".local" / "lib" in forbidden
+    assert home / ".local" / "bin" in forbidden
+    assert Path(site.getusersitepackages()) in forbidden
+    roots = [Path(root) for root in sandbox.writable_roots()]
+    assert not any(root.is_relative_to(home / ".local" / "lib") for root in roots)
+    assert not any(root.is_relative_to(home / ".local" / "bin") for root in roots)
+    assert not any(
+        root.is_relative_to(site.getusersitepackages()) for root in roots
+    )
+
+
+def test_forbidden_user_site_follows_substituted_home(tmp_path, monkeypatch):
+    """site.getusersitepackages() is resolved once against the startup HOME;
+    when a test substitutes Path.home(), the forbidden user-site root must
+    move with the other home-derived roots instead of pointing at the real
+    home."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(sandbox.Path, "home", classmethod(lambda cls: home))
+    forbidden = [Path(root) for root in sandbox.forbidden_write_roots()]
+    assert home / ".local" / "lib" in forbidden
+    assert home / ".local" / "bin" in forbidden
+    assert any(
+        root.name == "site-packages" and root.is_relative_to(home)
+        for root in forbidden
+    )
 
 
 def test_writable_roots_never_grants_the_venv():
@@ -106,7 +148,11 @@ def test_writable_roots_never_grants_the_venv():
     assert prefix in sandbox.forbidden_write_roots()
 
 
-def test_writable_roots_resolves_symlinked_candidate_into_venv(tmp_path, monkeypatch):
+def test_writable_roots_resolves_symlinked_candidate_into_venv(
+    tmp_path,
+    monkeypatch,
+    require_symlink_support,
+):
     """Cross-session escape: a sandboxed session can write ~/.cache, so it could
     repoint it at the venv via symlink. writable_roots() must realpath candidates
     so the symlinked ~/.cache resolves into the (forbidden) venv and is DROPPED —
@@ -139,7 +185,11 @@ def test_fail_closed_workdir_returns_real_nonsymlink_dir(tmp_path, monkeypatch):
     assert os.path.realpath(wd).startswith(os.path.realpath(str(fake_tmp)))
 
 
-def test_fail_closed_workdir_rejects_preplanted_symlink(tmp_path, monkeypatch):
+def test_fail_closed_workdir_rejects_preplanted_symlink(
+    tmp_path,
+    monkeypatch,
+    require_symlink_support,
+):
     # The pid-derived scratch path is predictable and /tmp is engineer-writable, so
     # a prior sandboxed turn can pre-plant it as a symlink to the gate brain. The
     # rootless reviewer -C must NOT resolve there.
@@ -176,6 +226,36 @@ def test_build_codex_command_sandboxed():
     assert "sandbox_workspace_write.network_access=true" in cmd
 
 
+def test_build_codex_command_disables_interactive_notify_hook_per_turn():
+    cmd = _codex_runner()._build_codex_command(
+        resume_thread_id=None,
+        options=RunnerOptions(model="gpt-5.5", dangerous_yolo=True),
+    )
+
+    pairs = list(zip(cmd, cmd[1:]))
+    assert ("-c", "notify=[]") in pairs
+
+
+def test_build_codex_no_tools_keeps_provider_config_but_skips_tool_startup():
+    cmd = _codex_runner()._build_codex_command(
+        resume_thread_id=None,
+        options=RunnerOptions(
+            model="deepseek-v4-flash",
+            disable_tools=True,
+            sandbox_mode="read-only",
+        ),
+    )
+
+    pairs = list(zip(cmd, cmd[1:]))
+    assert "--ignore-user-config" not in cmd
+    assert "--ignore-rules" in cmd
+    assert ("-c", "mcp_servers={}") in pairs
+    assert ("-c", "plugins={}") in pairs
+    assert ("-c", "features.js_repl=false") in pairs
+    assert ("-c", 'web_search="disabled"') in pairs
+    assert cmd[cmd.index("-m") + 1] == "deepseek-v4-flash"
+
+
 def test_build_codex_command_legacy_unchanged():
     cmd = _codex_runner()._build_codex_command(
         resume_thread_id=None,
@@ -191,11 +271,24 @@ def test_chokepoint_noop_when_gate_off(gate_off):
     assert o.dangerous_yolo is True and o.sandbox_mode is None
 
 
+def test_chokepoint_allows_per_invocation_safe_mode(gate_off):
+    o = _codex_runner()._apply_sandbox_policy(
+        RunnerOptions(
+            dangerous_yolo=True,
+            sandbox_mode="read-only",
+            force_safe_mode=True,
+            working_dir="/wd",
+        )
+    )
+    assert o.dangerous_yolo is True
+    assert o.sandbox_mode == "read-only"
+
+
 def test_chokepoint_converts_builder_when_gate_on(gate_on):
     o = _codex_runner()._apply_sandbox_policy(RunnerOptions(dangerous_yolo=True, working_dir="/wd"))
     assert o.sandbox_mode == "workspace-write"
     assert o.dangerous_yolo is False and o.full_auto is False
-    assert any(r.endswith("/.cache") for r in o.add_dirs)
+    assert any(Path(root).name == ".cache" for root in o.add_dirs)
     assert not any("/.argus-skill" in r for r in o.add_dirs)
 
 
@@ -258,6 +351,35 @@ def test_sandboxed_child_env_scrubs_vcs_creds(monkeypatch):
     assert env["PATH"] == "/usr/bin"
 
 
+def test_sandboxed_child_env_pins_pip_user_off(monkeypatch):
+    """pip's silent user-install fallback is the 2026-09-05 escape; PIP_USER=0
+    makes an unwritable-site install fail loudly (Errno 13) instead. An
+    inherited opt-in must not survive."""
+    monkeypatch.setenv("PIP_USER", "1")
+    env = sandbox.sandboxed_child_env()
+    assert env["PIP_USER"] == "0"
+
+
+def test_pip_user_pinned_off_on_the_yolo_inherit_path(gate_off):
+    """The maintenance engineer runs dangerous_yolo by default
+    (apps/_runtime_execute.py): _child_env returns None and the codex child
+    inherits the parent env untouched, so sandboxed_child_env() never runs.
+    PIP_USER=0 therefore rides the parent env via
+    configure_framework_python_env, which the daemon life worker
+    (_rf_bootstrap_environment) and the CLI main both run before spawning any
+    child shell."""
+    from argus_skill.core.runtime_env import configure_framework_python_env
+
+    runner = _codex_runner()
+    options = runner._apply_sandbox_policy(
+        RunnerOptions(dangerous_yolo=True, working_dir="/wd")
+    )
+    assert runner._child_env(options) is None  # yolo child inherits parent env
+    parent = configure_framework_python_env({"PATH": "/usr/bin", "PIP_USER": "1"})
+    assert parent["PIP_USER"] == "0"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX worktree isolation")
 def test_isolated_workdir_wraps_any_backend_and_hides_vcs_credentials(
     tmp_path,
     monkeypatch,
@@ -315,6 +437,7 @@ def test_isolated_workdir_wraps_any_backend_and_hides_vcs_credentials(
     assert command[-2:] == ["/usr/bin/copilot", "--version"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX worktree isolation")
 def test_isolated_workdir_rebinds_symlinked_resolver_target(
     tmp_path,
     monkeypatch,
@@ -347,6 +470,7 @@ def test_isolated_workdir_rebinds_symlinked_resolver_target(
     ]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX worktree isolation")
 def test_isolated_workdir_rebinds_runner_hidden_under_home(
     tmp_path,
     monkeypatch,
@@ -379,6 +503,7 @@ def test_isolated_workdir_rebinds_runner_hidden_under_home(
     assert command[-2:] == [str(runner), "--version"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX worktree isolation")
 def test_isolated_workdir_rebinds_vscode_codex_selected_by_wrapper(
     tmp_path,
     monkeypatch,
@@ -428,6 +553,7 @@ def test_isolated_workdir_rebinds_vscode_codex_selected_by_wrapper(
     ]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX worktree isolation")
 def test_isolated_workdir_fails_closed_without_bubblewrap(
     tmp_path,
     monkeypatch,
@@ -437,6 +563,7 @@ def test_isolated_workdir_fails_closed_without_bubblewrap(
         sandbox.isolated_workdir_command(["copilot"], working_dir=tmp_path)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX worktree isolation")
 def test_isolated_workdir_uses_macos_sandbox_exec_without_bubblewrap(
     tmp_path,
     monkeypatch,
@@ -486,7 +613,7 @@ def test_isolated_runner_scrubs_credentials_even_without_native_sandbox(
     assert "AWS_SESSION_TOKEN" not in env
     assert "KUBECONFIG" not in env
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull
-    assert env["GH_CONFIG_DIR"] == "/tmp/argus-no-gh-auth"
+    assert Path(env["GH_CONFIG_DIR"]) == Path(tempfile.gettempdir()) / "argus-no-gh-auth"
 
 
 def test_isolated_copilot_disables_builtin_mcp_and_custom_instructions() -> None:
@@ -521,7 +648,7 @@ def test_no_hardcoded_bypass_left_in_subagent_spawns():
     """Every codex spawn must route through the gated policy. The only remaining
     literal bypass is the legacy default-OFF fallback in the runner/policy."""
     import argus_skill.tools.subagent._core as sub
-    src = Path(sub.__file__).read_text()
+    src = Path(sub.__file__).read_text(encoding="utf-8")
     assert "--dangerously-bypass-approvals-and-sandbox" not in src
 
 
@@ -548,7 +675,9 @@ def test_no_raw_codex_spawn_bypasses_gate_anywhere():
         rel = p.relative_to(pkg_root).as_posix()
         if rel in allowed:
             continue
-        if "--dangerously-bypass-approvals-and-sandbox" in p.read_text():
+        if "--dangerously-bypass-approvals-and-sandbox" in p.read_text(
+            encoding="utf-8"
+        ):
             offenders.append(rel)
     assert offenders == [], f"raw codex bypass outside the gated chokepoint: {offenders}"
 
@@ -557,7 +686,7 @@ def test_teammate_has_no_harness_forced_research_spawn():
     """Teammates use the normal reviewed mission path, not a second CLI spawn."""
     import argus_skill.team.teammate_entry as te
 
-    src = Path(te.__file__).read_text()
+    src = Path(te.__file__).read_text(encoding="utf-8")
     assert "_forced_web_research" not in src
     assert "codex_sandbox_args" not in src
     assert "--dangerously-bypass-approvals-and-sandbox" not in src
@@ -575,6 +704,7 @@ def test_off_path_inert_for_all_roles(gate_off):
     # legacy command still emits the bypass and no -s
     cmd = r._build_codex_command(resume_thread_id=None, options=o1)
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd and "-s" not in cmd
+@pytest.mark.skipif(os.name != "posix", reason="requires a POSIX executable wrapper")
 def test_copilot_wrapper_exposes_real_nvm_binary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

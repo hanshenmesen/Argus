@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-07",
+  "primary_source_commit": "bc553f04",
+  "session_follow_up_fix_commit": "c7f44522",
+  "skill_follow_up_fix_commit": "8100d2ae",
+  "backend": "pi",
+  "model": "github-copilot/gpt-5-mini",
+  "reasoning_effort": "low",
+  "primary_run_count": 20,
+  "diagnostic_follow_up_run_count": 17,
+  "total_run_count": 37,
+  "session_experiment": {
+    "tasks": 2,
+    "replicates": 2,
+    "runs_per_policy": 4,
+    "success_definition": "reviewer_done_and_held_out_pass",
+    "fresh": {
+      "reviewer_done": 3,
+      "held_out_pass": 3,
+      "joint_success": 2,
+      "mean_wall_seconds": 185.917,
+      "mean_prompt_estimated_tokens": 13434.25,
+      "mean_provider_input_tokens": 176458.5,
+      "mean_repeated_repo_reads": 7.75,
+      "mean_engineer_repeated_repo_reads": 4.75,
+      "mean_cost_usd": 0.028598
+    },
+    "mission": {
+      "reviewer_done": 4,
+      "held_out_pass": 4,
+      "joint_success": 4,
+      "mean_wall_seconds": 158.804,
+      "mean_prompt_estimated_tokens": 8934.0,
+      "mean_provider_input_tokens": 253697.5,
+      "mean_repeated_repo_reads": 4.5,
+      "mean_engineer_repeated_repo_reads": 0.5,
+      "mean_cost_usd": 0.029934
+    },
+    "rolling_max_turns_2": {
+      "reviewer_done": 2,
+      "held_out_pass": 2,
+      "joint_success": 1,
+      "mean_wall_seconds": 161.28,
+      "mean_prompt_estimated_tokens": 10172.75,
+      "mean_provider_input_tokens": 199236.25,
+      "mean_repeated_repo_reads": 4.25,
+      "mean_engineer_repeated_repo_reads": 2.0,
+      "mean_cost_usd": 0.025583
+    },
+    "post_fix_rolling_smoke": {
+      "runs": 2,
+      "reviewer_done": 2,
+      "held_out_pass": 2,
+      "joint_success": 2,
+      "note": "full matrix rerun still required"
+    },
+    "decision": "canary_mission_keep_default_fresh_expand_repaired_rolling"
+  },
+  "skill_experiment": {
+    "tasks": 2,
+    "replicates": 2,
+    "runs_per_condition": 4,
+    "control": {
+      "reviewer_done": 4,
+      "held_out_pass": 0,
+      "useful_skill_opened": 0,
+      "wrong_skill_opened": 0,
+      "mean_wall_seconds": 63.606,
+      "mean_prompt_estimated_tokens": 4766.75,
+      "mean_provider_input_tokens": 63368.25,
+      "mean_cost_usd": 0.010341
+    },
+    "relevant_plus_unrelated": {
+      "reviewer_done": 4,
+      "held_out_pass": 4,
+      "useful_skill_opened": 4,
+      "wrong_skill_opened": 1,
+      "useful_skill_bytes_read_total": 3794,
+      "wrong_skill_bytes_read_total": 294,
+      "mean_wall_seconds": 81.287,
+      "mean_prompt_estimated_tokens": 4858.5,
+      "mean_provider_input_tokens": 103014.0,
+      "mean_cost_usd": 0.012284
+    },
+    "oracle_injected_relevant_body": {
+      "runs": 4,
+      "held_out_pass": 4,
+      "mean_wall_seconds": 73.373,
+      "mean_prompt_estimated_tokens": 4795.5,
+      "mean_provider_input_tokens": 86688.0,
+      "mean_cost_usd": 0.011562,
+      "selection_cost_included": false
+    },
+    "natural_incidence_probe": {
+      "runs": 2,
+      "useful_skill_opened": 0,
+      "held_out_pass": 0
+    },
+    "follow_up": {
+      "change": "mandatory_agent_native_relevance_decision_and_nonempty_native_roots",
+      "model_experiment_rerun": false,
+      "reason": "operator requested direct repair without further experiment"
+    },
+    "decision": "retain_implementation_but_prompt_cost_and_natural_invocation_not_met"
+  },
+  "limitations": [
+    "one backend and model",
+    "two controlled repositories",
+    "four primary runs per condition",
+    "initial skill treatment explicitly requested inspection of clearly relevant guidance",
+    "natural-incidence follow-up has only two runs",
+    "raw traces retained locally only"
+  ]
+}

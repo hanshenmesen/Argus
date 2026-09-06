@@ -6,14 +6,19 @@ import argparse
 import os
 from pathlib import Path
 
+from ...agent_cli.runner_backend import SUPPORTED_BACKENDS
+
 _PUBLIC_HELP = """usage: argus [mode]
 
 Human cockpit:
   argus
+  argus --web          browser cockpit on http://127.0.0.1:8799
+  argus --watch        live read-only view of the running mission
 
 First-time setup and diagnostics:
   argus --setup
-  argus --doctor
+  argus doctor
+  argus repair --plan
   argus update
 
 Automation:
@@ -44,9 +49,26 @@ class _ArgusArgumentParser(argparse.ArgumentParser):
         return _PUBLIC_HELP
 
 
+def _tcp_port(value: str) -> int:
+    """Reject a port the kernel can never bind, before anything offers a URL.
+
+    An out-of-range `--web-port` used to reach uvicorn, which printed the
+    pairing banner's URL first and then raised `OverflowError: bind(): port
+    must be 0-65535` as a traceback.
+    """
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a whole number") from None
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError(
+            f"{port} is outside the TCP port range 0-65535"
+        )
+    return port
+
+
 def build_parser() -> argparse.ArgumentParser:
     from ... import __version__
-    from ...release import release_manifest
     from ...skills.builtins import DEFAULT_PROJECT_BUILTIN_SKILLS_DIR
 
     parser = _ArgusArgumentParser(
@@ -60,11 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
         # that mis-classifies ``--init`` and exits 2 on Python <= 3.12.
         allow_abbrev=False,
     )
-    release_id = str(release_manifest().get("release_id") or "unknown")
     parser.add_argument(
         "--version",
         action="version",
-        version=f"argus-skill {__version__} ({release_id})",
+        version=f"argus-skill {__version__}",
     )
     parser.add_argument(
         "--update",
@@ -181,10 +202,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="enable continuous planner mode (daemon generates new tasks "
              "when backlog is empty)",
     )
-    daemon_grp.add_argument(
+    objective_source = daemon_grp.add_mutually_exclusive_group()
+    objective_source.add_argument(
         "--objective",
         default="",
         help="continuous improvement objective (used with --continuous)",
+    )
+    objective_source.add_argument(
+        "--objective-file",
+        default=None,
+        metavar="PATH",
+        help="read the continuous objective from UTF-8 PATH instead of "
+             "process arguments",
     )
     daemon_grp.add_argument(
         "--resume-continuous",
@@ -203,6 +232,13 @@ def build_parser() -> argparse.ArgumentParser:
              "planner certifies project_done (default: open-ended — the agent "
              "keeps generating new work forever)",
     )
+    daemon_grp.add_argument(
+        "--mission-width",
+        type=int,
+        default=2,
+        help="concurrent mission workers: 0 pauses, 1 is serial, N enables "
+             "path-disjoint parallel Planner tasks (default: 2)",
+    )
 
     cockpit_grp = parser.add_argument_group("cockpit")
     cockpit_grp.add_argument(
@@ -215,6 +251,25 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MSG",
         help="append a nudge message to the supervisor's inbox (the next "
              "engineer round picks it up as operator guidance)",
+    )
+    cockpit_grp.add_argument(
+        "--answer",
+        metavar="TEXT",
+        help="answer the question a mission is paused on and let it run again "
+             "(a nudge is guidance for the next round; this clears the pause)",
+    )
+    cockpit_grp.add_argument(
+        "--answer-item",
+        default="",
+        metavar="ITEM_ID",
+        help="with --answer: the paused item to answer, when more than one is "
+             "waiting",
+    )
+    cockpit_grp.add_argument(
+        "--ask",
+        metavar="QUESTION",
+        help="answer a one-shot question inline with the Manager and exit; "
+             "nothing is queued and no daemon/--continuous is required",
     )
     cockpit_grp.add_argument(
         "--notify-stage",
@@ -232,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     cockpit_grp.add_argument(
         "--web",
         action="store_true",
-        help="serve the web/TUI backend API (argus-skill[web] extra) — the "
+        help="serve the web/TUI backend API — the "
              "shared API that the React web UI (frontend/web) and the Ink "
              "terminal UI (frontend/tui) both talk to. Binds 127.0.0.1 by "
              "default; set ARGUS_SKILL_WEB_TOKEN to require a bearer token.",
@@ -244,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cockpit_grp.add_argument(
         "--web-host",
+        "--host",
         default="127.0.0.1",
         help="bind host for --web (default 127.0.0.1; use 0.0.0.0 to reach it "
              "from a phone on the same network). A non-loopback bind always "
@@ -259,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     cockpit_grp.add_argument(
         "--web-port",
         "--port",
-        type=int,
+        type=_tcp_port,
         default=8799,
         help="port for --web (default 8799)",
     )
@@ -282,8 +338,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="run backend/auth, capability, daemon, and state diagnostics",
     )
     capability_grp.add_argument(
+        "-doctor",
+        dest="doctor",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    capability_grp.add_argument(
+        "--fix-safe",
+        action="store_true",
+        help="with --doctor/-doctor: apply registered SAFE repairs and verify",
+    )
+    capability_grp.add_argument(
+        "--json",
+        action="store_true",
+        help="with --doctor/-doctor: print stable machine-readable findings",
+    )
+    capability_grp.add_argument(
+        "--deep",
+        action="store_true",
+        help="with --doctor/-doctor: include bounded backend authentication probes",
+    )
+    capability_grp.add_argument(
+        "--verify",
+        action="store_true",
+        help="with --doctor/-doctor: label the run as post-repair verification",
+    )
+    capability_grp.add_argument(
         "--backend",
-        choices=("copilot", "codex", "claude", "opencode", "pi", "grok"),
+        choices=SUPPORTED_BACKENDS,
         default=None,
         help="backend selected by --setup, --doctor, or this daemon launch",
     )
@@ -296,12 +378,7 @@ def build_parser() -> argparse.ArgumentParser:
     capability_grp.add_argument(
         "--non-interactive",
         action="store_true",
-        help="with --setup: never prompt; requires --backend and --accept-house-rules",
-    )
-    capability_grp.add_argument(
-        "--accept-house-rules",
-        action="store_true",
-        help="with noninteractive --setup: explicitly accept the default house rules",
+        help="with --setup: never prompt; requires --backend or --api-url",
     )
     capability_grp.add_argument(
         "--allow-prerelease",
@@ -309,14 +386,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow an explicitly selected prerelease backend CLI",
     )
     capability_grp.add_argument(
-        "--set-git-global",
-        action="store_true",
-        help="with --setup: opt in to changing global Git identity",
+        "--api-url",
+        default=None,
+        help="with --setup: configure an OpenAI-compatible API through Pi",
     )
     capability_grp.add_argument(
-        "--configure-codex",
-        action="store_true",
-        help="with --setup: opt in to writing Codex config/auth files",
+        "--api-key",
+        default=None,
+        help="with --setup: API key (prefer ARGUS_SETUP_API_KEY to avoid shell history)",
+    )
+    capability_grp.add_argument(
+        "--api-model",
+        default=None,
+        help="with --setup: model id for --api-url (default gpt-5.5)",
     )
     capability_grp.add_argument(
         "--model-api-status",
@@ -338,22 +420,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--ppt-master-status",
         action="store_true",
         help="show the installed PPT Master path, revision, and dependency status",
-    )
-
-    maintenance_grp = parser.add_argument_group("self-maintenance")
-    maintenance_grp.add_argument(
-        "--approve-publication",
-        metavar="COMMIT",
-        default="",
-        help="approve pushing a reviewed self-maintenance fix upstream and "
-             "opening its PR. Nothing leaves this machine without it; the fix "
-             "is already reviewed, canaried and live locally. The approval is "
-             "bound to COMMIT and is single-use, so the next fix needs its own",
-    )
-    maintenance_grp.add_argument(
-        "--list-pending-publications",
-        action="store_true",
-        help="list reviewed self-maintenance fixes waiting for approval",
     )
 
     skills_grp = parser.add_argument_group("skill admin")
@@ -415,8 +481,8 @@ def build_parser() -> argparse.ArgumentParser:
     gates_grp.add_argument(
         "--project-root",
         default=".",
-        help="project root for --evidence-chain-check / "
-             "--anti-mediocrity-check / --lifecycle-status (default cwd)",
+        help="project root for management commands such as --status when run "
+             "outside the workdir, and for evidence/lifecycle checks (default cwd)",
     )
     gates_grp.add_argument(
         "--proposed-condition",
@@ -431,6 +497,76 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command")
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Diagnose Argus; repairs require an explicit option",
+    )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print a stable machine-readable diagnostic report",
+    )
+    doctor_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="include backend authentication probes",
+    )
+    doctor_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="label this run as post-repair verification",
+    )
+    doctor_parser.add_argument(
+        "--fix-safe",
+        action="store_true",
+        help="apply registered SAFE repairs, then rerun Doctor",
+    )
+    doctor_parser.add_argument(
+        "--advisor",
+        choices=("auto", "none", *SUPPORTED_BACKENDS),
+        default="none",
+        help="explicitly ask an installed Code Agent to inspect and repair Argus (default: none)",
+    )
+    repair_parser = subparsers.add_parser(
+        "repair",
+        help="Plan or apply registered Argus recovery actions",
+    )
+    repair_mode = repair_parser.add_mutually_exclusive_group(required=True)
+    repair_mode.add_argument(
+        "--plan",
+        action="store_true",
+        help="show deterministic repair recommendations without modifying state",
+    )
+    repair_mode.add_argument(
+        "--safe",
+        action="store_true",
+        help="plan and apply only registered SAFE actions, then verify",
+    )
+    repair_mode.add_argument(
+        "--apply",
+        metavar="PLAN_ID",
+        help="apply one persisted plan (CONSENT actions also require --yes)",
+    )
+    repair_mode.add_argument(
+        "--prepare-pr",
+        metavar="PLAN_ID",
+        help="write a sanitized upstream repair report without publishing it",
+    )
+    repair_mode.add_argument(
+        "--submit-pr",
+        metavar="PLAN_ID",
+        help="submit an explicitly authorized prepared repository repair",
+    )
+    repair_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm CONSENT actions or external PR publication",
+    )
+    repair_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print a stable machine-readable repair result",
+    )
     subparsers.add_parser(
         "update",
         help="Safely fast-forward and reinstall this source checkout",
