@@ -196,6 +196,12 @@ def _parallel_final_review_passes(
             "locations. The integrated Reviewer separately checks scientific claims "
             "against source code and raw evidence; do not launch other reviewers."
         )
+    prompts = {
+        label: prompt
+        + "\n\nPut the complete assessment and all required repairs in your final response. "
+        "Intermediate progress messages are not forwarded to the integrated Reviewer."
+        for label, prompt in prompts.items()
+    }
     findings: dict[str, str] = {}
     if comparison is not None and identical_snapshot_pair(comparison):
         prompts.pop("ScientificLoss", None)
@@ -400,7 +406,7 @@ def _parallel_final_review_passes(
             **usage,
         )
     findings.update({
-        label: "\n".join(results[label].agent_messages or []).strip()
+        label: "\n".join((results[label].agent_messages or [])[-1:]).strip()
         for label in prompts
     })
     empty = next((label for label, text in findings.items() if not text), "")
