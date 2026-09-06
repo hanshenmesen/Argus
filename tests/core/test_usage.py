@@ -331,6 +331,27 @@ def test_copilot_missing_premium_and_token_prices_remains_partial(
     assert record.cost_usd is None
 
 
+@pytest.mark.parametrize(
+    ("status", "error", "premium_requests", "expected_status"),
+    [
+        ("completed", "", 1.0, "partial"),
+        ("denied", "provider cooldown", None, "not_billed"),
+        ("error", "Error: No session, task, or name matched 'stale-thread'.", None, "not_billed"),
+    ],
+)
+def test_modern_token_billing_distinguishes_missing_usage_from_refusals(
+    tmp_path: Path, status, error, premium_requests, expected_status
+) -> None:
+    record = build_usage_record(
+        call_id="modern", project_root=tmp_path / "p1", mission_id=None,
+        provider="copilot", model="gpt-5.6-sol", run_label="engineer-r1",
+        started_at=1.0, completed_at=2.0, status=status, error=error,
+        premium_requests=premium_requests, copilot_token_billing_expected=True,
+    )
+    assert record.pricing_status == expected_status
+    assert record.cost_usd == (0.0 if expected_status == "not_billed" else None)
+
+
 def test_non_copilot_still_requires_token_pricing(tmp_path: Path) -> None:
     record = build_usage_record(
         call_id="unknown-codex",
@@ -672,7 +693,7 @@ def test_copilot_reconcile_does_not_reuse_usage_or_price_denials(
     assert denied.input_tokens is None
     assert denied.model_usage == ()
     marker = json.loads(ledger.copilot_reconcile_path.read_text(encoding="utf-8"))
-    assert marker["version"] == 3
+    assert marker["version"] == 4
 
     third = replace(first, call_id="second-completed")
     ledger.append(third)

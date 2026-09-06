@@ -65,3 +65,5 @@ class _ExecContext:
     codex_quota_active: bool = field(default=False)
     quota_permit: Any = field(default=None)
     event_permit: Any = field(default=None)
+    copilot_token_billing_expected: bool = False
+    copilot_usage_cursor: Any = None

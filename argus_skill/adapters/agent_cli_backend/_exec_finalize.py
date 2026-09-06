@@ -152,6 +152,7 @@ def finalize_result(
                 token_usage=usage,
                 premium_requests=premium,
                 total_nano_aiu=result.total_nano_aiu,
+                copilot_token_billing_expected=ctx.copilot_token_billing_expected,
                 provider_cost_usd=(
                     provider_cost_usd
                     if backend._backend_name in {"opencode", "pi"}

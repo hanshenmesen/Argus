@@ -34,6 +34,7 @@ from ...provider_integrations.authorization_retry import (
 )
 from ...provider_integrations.copilot_usage import (
     capture_copilot_usage_cursor,
+    copilot_store_supports_token_billing,
     read_copilot_usage_since,
 )
 from ._exec_finalize import finalize_result, finish_quota
@@ -106,6 +107,11 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
     # ------------------------------------------------------------------ #
     copilot_usage_cursor = (
         capture_copilot_usage_cursor() if backend._is_copilot else None
+    )
+    ctx.copilot_usage_cursor = copilot_usage_cursor
+    copilot_db_path = getattr(copilot_usage_cursor, "db_path", None)
+    ctx.copilot_token_billing_expected = copilot_store_supports_token_billing(
+        copilot_db_path
     )
     try:
         cli_result = AUTHORIZATION_RETRY_OWNER.run_agent_cli(
@@ -212,6 +218,10 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
             getattr(cli_result, "thread_id", None) or ctx.resume_thread_id
         ),
     )
+    # The first invocation can create the token-usage table after the cursor.
+    ctx.copilot_token_billing_expected |= copilot_store_supports_token_billing(
+        copilot_db_path
+    ) or copilot_usage is not None
     try:
         translated = backend._translate_result(
             cli_result,
