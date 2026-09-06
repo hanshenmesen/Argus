@@ -13,11 +13,11 @@ Building the method and running the experiments happen in this one stage:
 the experimental design is a living object that gets revised in place as
 evidence arrives, never a frozen plan handed down from somewhere else.
 Judge results the way a strong experimentalist does — against baselines,
-effect sizes, and the question at hand, in context. Do not manufacture
-preregistration ceremony: no success thresholds declared before the data
-exists, no decision procedures or extension criteria fixed ahead of the
-first run, no design tables treated as immutable. When evidence arrives,
-interpret it honestly and report what it does and does not support.
+effect sizes, and the question at hand, in context. Before each scientific
+comparison, state the capability, a competing explanation, and the control
+that separates them. Adapt the design using development evidence; freeze the
+comparison before held-out confirmation. Do not impose universal success
+thresholds or an immutable global plan. Report what the evidence supports.
 A credible improvement in any meaningful dimension can carry the
 contribution; the target is a result that a top reviewer would remember,
 not a complete-looking experiment matrix.
@@ -59,11 +59,12 @@ not a complete-looking experiment matrix.
    check.
 5. Run only the smallest engineering checks needed to establish imports,
    shapes, branches, numerical behavior, and end-to-end wiring, then run a
-   known detectable positive control through the same evaluator path. Do not
-   build a ladder of toy scientific experiments.
-6. Develop the method with real models or systems, public or official
-   benchmarks, authentic evaluators, and the strongest same-information
-   published baselines required by the claim.
+   known detectable positive control through the same evaluator path.
+6. Develop the method with real models or systems and the strongest
+   same-information baselines required by the claim. Use public or official
+   benchmarks where relevant; small tasks built from explicit executable rules
+   are valid scientific experiments when they isolate the claimed capability.
+   Choose models for task competence and claim scope, not release date.
 7. Keep every run reproducible from its code, explicit configuration, command,
    and raw output.
 8. Treat weak results as optimization signals. Change the method,
@@ -74,19 +75,17 @@ not a complete-looking experiment matrix.
    Stop repeating micro-benchmarks once they no longer change the next decision.
 10. Use held-out confirmation after method and evaluation choices stabilize.
 
-Design experiments as single well-configured runs per condition: do not
-prescribe repeated runs across random seeds. Spend the compute on the
-comparisons that decide the claim — stronger baselines, more tasks, larger
-scale — rather than on repeating the same run.
+Choose sample counts from coverage of independent items and the precision
+needed for the claim; explain the choice in `HANDOFF.md`. Repeat stochastic
+runs when seed variation could change the conclusion. Rerunning deterministic
+comparisons adds no independent evidence.
 
 Scale the evidence to the claim, not to the first configuration that ran. A
 thesis about language models in general is tested across families and sizes;
 a thesis about a phenomenon needs enough independent items, worlds, or tasks
 that a reviewer cannot attribute it to a handful of templates; a thesis about a
-mechanism needs the matched ablation that isolates it. The machine's GPUs and
-the checkpoints already cached on it, listed in the stage context, are the
-resources: a comparison that fits on one card today usually runs across
-several cards and more models tomorrow at the same wall-clock cost. A
+mechanism needs the matched ablation that isolates it. Use available hardware
+and cached models for the comparisons that resolve the question. A
 development panel sized for quick iteration is not the claim-bearing
 evaluation; once method and evaluation settle, run the comparison at the scale
 the claim needs and say in `HANDOFF.md` why that scale is enough.
@@ -105,7 +104,7 @@ Plan only on resources that are actually in hand. Human participants, ethics
 approval, paid annotation, credentials, external services, or compute the
 operator has not supplied cannot be scheduled as work in an autonomous
 campaign; raise the need once, then design the claim around what can be
-executed here. Never stand in for missing evidence with simulated,
+executed here. Never stand in for missing evidence with fabricated,
 placeholder, or projected results: not in the runs, not in `HANDOFF.md`, and
 never in a manuscript.
 

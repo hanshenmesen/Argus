@@ -70,14 +70,13 @@ def test_idea_is_source_only_and_never_reselects_after_implementation_failure() 
     assert "do not continue into experiment" in playbook
 
 
-def test_experiments_are_adaptive_and_paper_requires_dominant_wins() -> None:
+def test_experiments_are_adaptive_and_paper_requires_evidence_for_the_claim() -> None:
     experiment = _stage("experiment")
 
     assert "adaptive programme" in experiment
     assert "no frozen global experiment plan" in experiment
-    assert "wins clearly exceed losses" in experiment
-    assert "headline and primary comparisons win" in experiment
-    assert "strongest same-information baseline is beaten" in experiment
+    assert "credible evidence supports a scientifically meaningful scoped claim" in experiment
+    assert "claims of superiority require beating the strongest same-information baseline" in experiment
     assert "keep the selected idea and current stage" in experiment
 
 

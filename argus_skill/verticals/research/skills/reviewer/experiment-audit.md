@@ -29,8 +29,9 @@ with the raw items and the code in front of you:
 
 - Where does each gold label come from: derived by a solver or a theory whose
   rule is written down, imported from published human judgments, or typed in
-  by the project? A stipulated label is a hypothesis, not ground truth, and
-  cannot ground a claim that a model fails it.
+  by the project? Constructed tasks can derive gold from explicit executable
+  rules; accept all valid answers. Author expectations alone cannot ground a
+  claim that a model fails the task.
 - Does a constant answer already score well? Accuracy against the majority
   label, per construction and per cell, tells whether the benchmark measures
   anything.

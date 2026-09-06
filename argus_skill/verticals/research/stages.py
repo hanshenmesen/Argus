@@ -82,8 +82,9 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             statement=(
                 "Implement the selected mechanism and real strong published baselines "
                 "through real entry points. Do not rename a local heuristic after a paper. "
-                "Use current model choices where the claim depends on currency, appropriate "
-                "public or official benchmarks, and the field's real evaluator. Keep "
+                "Choose models for task competence and claim scope. Use appropriate "
+                "public or official benchmarks or controlled tasks with labels derived "
+                "from explicit rules, and a real evaluator. Keep "
                 "explicit run configuration beside the code and verify the smallest "
                 "faithful path before claim-bearing execution."
             ),
@@ -119,22 +120,22 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "benchmarks, controls, and next experiments may change in response to "
                 "development evidence. Design and execution live in the same stage, so "
                 "revise the experimental design in place as evidence arrives. No frozen "
-                "global experiment plan is required, and experiment designs do not "
-                "prescribe repeated runs across random seeds — one well-configured run "
-                "per condition is the default, with compute spent on decisive "
-                "comparisons instead."
+                "global experiment plan is required. Choose independent units, sample "
+                "counts, and repetitions for the coverage and precision the claim needs; "
+                "repeat stochastic runs when seed variation could change the conclusion. "
+                "Freeze the comparison before held-out confirmation."
             ),
             evidence_hint="executed commands/configuration and raw experimental outputs",
         ),
         ChecklistItem(
             id="experiment.paper_bar",
             statement=(
-                "Advance to Paper only when mechanism-relevant wins clearly exceed losses, "
-                "headline and primary comparisons win, and the strongest same-information "
-                "baseline is beaten. Comparisons must include real strong published "
-                "baselines rather than renamed local heuristics, use current models and "
-                "appropriate public or official benchmarks where relevant, and pass a "
-                "positive control through the real evaluator. Evidence scale is part of "
+                "Advance to Paper when credible evidence supports a scientifically "
+                "meaningful scoped claim. Claims of superiority require beating the "
+                "strongest same-information baseline. Comparisons must include real strong "
+                "published baselines rather than renamed local heuristics, use models and "
+                "tasks appropriate to the claim, and pass a positive control through the "
+                "real evaluator. Evidence scale is part of "
                 "the bar: a claim about models in general rests on several families and "
                 "sizes, a claim about a phenomenon on enough independent items that "
                 "templates cannot explain it; a handful of development items or one model "

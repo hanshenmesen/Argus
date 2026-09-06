@@ -13,6 +13,8 @@ separate result-review file.
 
 - Is the executed path faithful to the selected mechanism?
 - Did the evaluator and positive control work?
+- Does the experiment directly test the claimed capability? Which control
+  distinguishes it from the strongest shortcut explanation?
 - Were baselines real, competitive, and fairly resourced?
 - Does the benchmark exercise the claimed mechanism, and does it hold up on
   its own: label provenance, a constant-answer baseline, targets that the
