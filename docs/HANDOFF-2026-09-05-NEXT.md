@@ -337,3 +337,24 @@ pre-generation rejection 补丁，已保存到分支 `wip/copilot-pre-generation
 7ddbde45b40d、s-0ebfd18c、s-c73d4e48）用 setsid 脱离的脚本在任务边界排空重启，
 重启环境改为 ARGUS_SKILL_UNPRICED_COST_POLICY=allow；两个 web server 已重启。
 config.json 全部角色模型为 gpt-5.6-sol。
+
+## 2026-09-06 15:40 UTC · 实验规模、机制否定后的出口、路由到 research 的论文局部任务（a8e049980）
+
+**为什么改。** 当天的证据：CoT 课题（s-0ebfd18c）在 experiment 阶段 49 小时、211 个 mission、28 次 hold，机制在 N=64 面板上一直输给精确 residual LOO，backlog 堆到 143 条同一目标的换名任务；ACL 课题（s-c73d4e48）46 小时、26 次 hold 后靠一个 32 项面板上 4–0/1–0 的旁支结果进 paper，进 paper 后 Planner 仍排训练修复；Manager 曾接受"先用标注的占位人类结果写论文"的指令；两次画图能力测试（fig-01、fig-02）都被前门判成 `software`，研究纵向的画图 skill 从未被提供。
+
+**改了什么（判断依据，不是配额或关卡）。**
+- `verticals/research/prompt_policy.py`：新增 `local_model_inventory_block`，扫描 HF 缓存（`HF_HUB_CACHE`/`HF_HOME`/`~/.cache/huggingface/hub`）、项目内 `models--*` 目录和 knob `ARGUS_SKILL_MODEL_CACHE_DIRS`（本机已持久化为 `/data/v-boxiuli/hf_cache/hub`），在 idea/experiment 阶段与硬件清单一起给 Planner、Engineer，Reviewer 在这两个阶段也能看到；Planner 片段加了"被否定的假设关闭它的修复族、paper 阶段排写作"。
+- `research-experiment-playbook.md`：规模要配得上主张；决定性比较否定机制后重推论点而不是再修一轮；只规划手上有的资源，不写模拟/占位结果；自建 benchmark 是主张的一部分（标签来源、常数答案基线、目标可区分）。
+- `stages.py`：`experiment.paper_bar` 加证据规模；`experiment.repair` 改为否定后重推论点；`review.scientific` 加 benchmark 能否承载主张。
+- `research-paper-playbook.md`：写最强的被支持论点；paper 阶段写作不开发方法；稿件只报告跑过的结果；论文局部的 direct 请求只交付该部分。
+- `research-idea-playbook.md`：资源现实指本机 GPU 与缓存权重，不把决定性实验建在没有的人类被试、伦理批准、付费标注上。
+- `reviewer/experiment-audit.md` 新增"先信不信这个 benchmark"一节；`reviewer/experiment-results-review.md` 加规模与否定后出口两问。
+- `roles/prompts/manager.py`：阶段决策加一条"证据规模是科学的一部分"；`_RESEARCH_DELIVERABLE_ROUTING` 明确论文的图/章节/修订归 research，direct 请求给 `START_STAGE`。
+- `manager/domain_author.py`、`_vertical_ops.py`、`_core.py`、`skills/stage_machine.py`、`skills/vertical_select.py`、`apps/_runtime_supervisor.py`：决策新增 `start_stage`（仅 direct，按纵向别名归一，无效丢弃），`persist_vertical` 在没有阶段时以它播种，绝不重置已有阶段。
+- 测试：`tests/skills/test_local_model_inventory.py`（新），`test_verticals.py`、`test_domain_author.py`、`test_manager.py`、`test_direct_idea_task_completes_at_idea.py` 各加用例；`test_research_protocol_quality.py` 的一条过期断言随 8ff4280fd 更新。预存失败：`tests/skills/test_paper_chart_style.py::test_research_data_figures_have_one_renderer_path`（router 文案 9e39270ba 改过，测试没跟）。
+
+**验证。** fig-03（s-90908ce6，与 fig-02 同一目标、同一输入）在 a8e049980 上被判为 `research / direct / paper`，Engineer 的 skill 库含 `_shared_verticals/research/engineer`；fig-02 在旧代码上是 `software / direct / delivery`。两者产物可直接对比：`argus-capability-tests/fig-02/figures` 与 `fig-03/figures`。
+
+**部署。** main = a8e049980 已 push。ACL daemon 用 `deploy_and_roll.sh`（先 drain 到任务边界，再更新 argus-runtime-latest，再 `--resume --resume-continuous`）滚动；fig-03 从 `argus-runtime-recovery-20260905`（已 detach 到 a8e049980）用 `PYTHONPATH`+`ARGUS_SKILL_SOURCE_ROOT` 启动。idea-02（s-d141e08e，RLVR 开放选题）仍在旧代码上跑完。
+
+**没做的事。** 没有把 Codex 对 ACL benchmark 的审计（标签矛盾、常数基线 78.6%、yes/no 是受限打分等）交给项目；它存在 `argus-capability-tests/_yardsticks/`，用来检验新 Reviewer 指导能否让 Argus 自己抓到这些问题。
