@@ -47,6 +47,12 @@
 > Request"（07:00 起先是 "Access denied by policy settings"）。用 gh 的两个账号
 > token 能认证但没有 gpt-5.6-sol。需要操作员以 lbx154 重新 `copilot login`；
 > Argus 隔离 home 会同步 token，daemon 无需重启。
+> 07:12 UTC 续：codex 07:10 启动的 daemon（`5920babe3`）在后端全挂时把两个已答复的
+> mission 跑成了 error，已 `--daemon-stop --drain` 干净停掉；`8bd66b8be` 把 "Failed to
+> load models / Access denied by policy settings" 也归入供应商冷却暂停，已推 main，
+> 恢复 checkout detach 到该 rev，07:13 UTC 重启 FuseHead（pid 3198853，
+> `source_root_matches_config=true`），实测首个 mission 结算为 `paused_provider_cooldown`，
+> backlog 10 pending + 1 paused，登录恢复后自动续跑。
 
 > 另外两点更正/未处理：本文"今日花费约 $1,148"实为 cost-control.jsonl
 > 自 08-28 起的累计（09-05 当天约 $111，FuseHead 当天 $7.9）；FuseHead 的
