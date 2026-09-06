@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -71,6 +72,51 @@ class _StageDecisionMixin:
     # ------------------------------------------------------------------
     # Private helpers — each covers one logical phase of decide_stage_transition
     # ------------------------------------------------------------------
+
+    def _stage_context_fingerprint(self, root: Path) -> str:
+        """Bind a verdict to the pipeline and campaign that supplied its evidence."""
+        import hashlib
+
+        from ..core.pipeline_state import read_pipeline_state
+        from .control_state import CampaignControlStore
+
+        control = CampaignControlStore(self.manager_session_root, project_root=root)
+        head = control.read_head()
+        payload = {
+            "pipeline": read_pipeline_state(root),
+            "campaign": asdict(control.campaign_identity()),
+            "control_head": asdict(head) if head is not None else None,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _commit_stage_decision_if_current(
+        self,
+        decision: Any,
+        cur: str,
+        root: Path,
+        *,
+        expected_context: str,
+        source: str = "manager_llm",
+    ) -> "StageTransition":  # noqa: F821
+        """Compare and commit under the same lock used by intent replacements."""
+        from ..core.pipeline_state import read_pipeline_state
+        from ._core import StageTransition
+
+        with self.pipeline_lock():
+            if self._stage_context_fingerprint(root) != expected_context:
+                current = str(read_pipeline_state(root).get("current_stage") or cur)
+                return StageTransition(
+                    "hold",
+                    current,
+                    "project stage or campaign changed while deciding; recheck "
+                    "the current evidence",
+                    current_stage=current,
+                    source="stale_stage_context_hold",
+                    diagnostic="stage_context_changed",
+                )
+            return self._apply_stage_decision_to_disk(decision, cur, root, source=source)
 
     @staticmethod
     def _is_clean_reviewer_acceptance(review: Any) -> bool:
@@ -810,9 +856,11 @@ class _StageDecisionMixin:
         root = Path(project_root) if project_root is not None else self.project_root
 
         # --- Phase 1: Gather context (may return early on config hold) ---
-        ctx = self._gather_stage_context(root)
-        if isinstance(ctx, StageTransition):
-            return ctx
+        with self.pipeline_lock():
+            ctx = self._gather_stage_context(root)
+            if isinstance(ctx, StageTransition):
+                return ctx
+            expected_context = self._stage_context_fingerprint(root)
         cur, order, checklist_contract = ctx
 
         if (
@@ -980,10 +1028,11 @@ class _StageDecisionMixin:
                         "deterministic_reviewer_done",
                     )
                 if decision is not None:
-                    return self._apply_stage_decision_to_disk(
+                    return self._commit_stage_decision_if_current(
                         decision,
                         cur,
                         root,
+                        expected_context=expected_context,
                         source="manager_deterministic",
                     )
             except Exception:  # noqa: BLE001 - ambiguity retains Manager semantics
@@ -1073,7 +1122,9 @@ class _StageDecisionMixin:
             )
 
         # --- Phase 8: Apply decision to disk ---
-        return self._apply_stage_decision_to_disk(decision, cur, root)
+        return self._commit_stage_decision_if_current(
+            decision, cur, root, expected_context=expected_context
+        )
 
     # ---- progress view ----
     def current_stage(self) -> str:

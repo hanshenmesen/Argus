@@ -1485,18 +1485,14 @@ class Backlog:
         reason: str,
         superseded_by_plan_id: str,
     ) -> tuple[str, ...]:
-        """Atomically retire named items, leaving running and terminal work alone."""
+        """Retire named pending items, preserving paused and running work."""
         selected = set(item_ids)
         superseded: list[str] = []
         with self._locked():
             items = self._load()
             now = time.time()
             for item in items:
-                if (
-                    item.id not in selected
-                    or item.status in _TERMINAL_STATUSES
-                    or item.status == "running"
-                ):
+                if item.id not in selected or item.status != "pending":
                     continue
                 item.status = "superseded"
                 item.finished_ts = now

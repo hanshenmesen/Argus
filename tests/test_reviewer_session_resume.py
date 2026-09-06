@@ -162,6 +162,40 @@ def test_review_artifact_changes_keep_session_and_refresh_delta(tmp_path: Path) 
     assert [tid for label, tid in backend.resume_history if label == "reviewer"] == [None, "rv1"]
 
 
+def test_live_gpu_and_checkpoint_changes_keep_reviewer_session(tmp_path: Path, monkeypatch) -> None:
+    from argus_skill.core.pipeline_state import read_pipeline_state, write_pipeline_state
+    from argus_skill.skills.vertical_select import persist_vertical
+    from argus_skill.verticals.research import prompt_policy
+
+    persist_vertical(tmp_path, "research")
+    state = read_pipeline_state(tmp_path)
+    state["current_stage"] = "experiment"
+    write_pipeline_state(tmp_path, state)
+    gpu = ["GPU 0: 8 GB free"]
+    models = ["cached-checkpoint-old"]
+    monkeypatch.setattr(prompt_policy, "local_hardware_block", lambda: gpu[0])
+    monkeypatch.setattr(prompt_policy, "local_model_inventory_block", lambda _root=None: models[0])
+    backend = MemoryBackend()
+    backend.queue("reviewer", CannedResponse(message=_review_json(), thread_id="rv1"))
+    backend.queue("reviewer", CannedResponse(message=_review_json("done"), thread_id="rv1"))
+    reviewer = Reviewer(backend)
+    config = ReviewerConfig(working_dir=str(tmp_path), active_vertical="research")
+    first = _evaluate(reviewer, config=config)
+    gpu[0] = "GPU 0: 32 GB free"
+    models[0] = "cached-checkpoint-new"
+    second = _evaluate(
+        reviewer, config=config, round_index=2, resume_thread_id="rv1",
+        prior_static_fingerprint=first.static_fingerprint,
+    )
+    prompts = [prompt for label, prompt, _ in backend.history if label == "reviewer"]
+    assert "8 GB free" in prompts[0] and "cached-checkpoint-old" in prompts[0]
+    assert "32 GB free" in prompts[1] and "cached-checkpoint-new" in prompts[1]
+    assert "8 GB free" not in prompts[1] and "cached-checkpoint-old" not in prompts[1]
+    assert first.static_fingerprint == second.static_fingerprint
+    assert _STATIC_MARKER not in prompts[1]
+    assert [tid for label, tid in backend.resume_history if label == "reviewer"] == [None, "rv1"]
+
+
 def test_stage_change_still_uses_a_fresh_full_prompt() -> None:
     backend = MemoryBackend()
     backend.queue("reviewer", CannedResponse(message=_review_json(), thread_id="rv1"))
