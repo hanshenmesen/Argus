@@ -1,15 +1,15 @@
 ---
-name: "Experiment Results Review"
-description: "Review current experimental evidence and decide the next method-development action."
+name: "What the experiments establish"
+description: "Read the current experimental evidence and decide how the method should develop next."
 ---
 
-# Experiment Results Review
+# What the experiments establish
 
 Use this in Experiment. Read direct code, configuration, raw results, positive
 controls, evaluator outputs, and strong baseline results. Do not write a
 separate result-review file.
 
-## Decide
+## Questions that determine the next experiment
 
 - Is the executed path faithful to the selected mechanism?
 - Did the evaluator and positive control work?
@@ -19,7 +19,7 @@ separate result-review file.
 - Does the benchmark exercise the claimed mechanism, and does it hold up on
   its own: label provenance, a constant-answer baseline, targets that the
   items can separate, no shortcut in the context, and a score whose meaning
-  is known? Open `reviewer/experiment-audit.md` when any of these is unclear.
+  is known? Open `reviewer/reading-the-evidence.md` when any of these is unclear.
 - Is the observed difference larger than relevant uncertainty?
 - Is the evidence at the scale the claim needs: families and sizes for a claim
   about models, independent items or tasks for a claim about a phenomenon, the
@@ -31,8 +31,8 @@ separate result-review file.
   another variant of the same objective?
 - Which concrete method or experiment change has the highest information value?
 
-A weak result first triggers implementation, evaluator, benchmark, scale, or
-method diagnosis. Keep the selected Idea and current stage. The experiment
+When a result is weak, first diagnose the implementation, evaluator, benchmark,
+scale, or method. Keep the selected Idea and current stage. The experiment
 programme may change from development evidence.
 
 Recommend Paper when credible evidence, at the scale the claim needs, improves

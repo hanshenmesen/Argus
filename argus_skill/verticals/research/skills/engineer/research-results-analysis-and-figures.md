@@ -1,12 +1,12 @@
 ---
-name: "Research Results Analysis And Figures"
-description: "Turn raw outputs into direct paper tables and figures through PPT Master, HTML/SVG, ECharts, Recharts, Vega, FigureSpec, or the single SciencePlots/Matplotlib data-figure path."
+name: "Turning results into tables and figures"
+description: "Turn raw outputs into paper tables and figures using PPT Master, HTML/SVG, ECharts, Recharts, Vega, FigureSpec, or the single SciencePlots/Matplotlib approach for data figures."
 ---
 
-# Research Results Analysis and Figures
+# Turning results into tables and figures
 
 Read the executed code, explicit configuration, raw outputs, evaluator results,
-and current `HANDOFF.md`. Produce only analysis code, paper tables, editable
+and the current research notes in `RESEARCH_NOTES.md`. Produce only analysis code, paper tables, editable
 figure sources, and final exports used by `paper/main.tex`.
 
 ## Analysis
@@ -23,7 +23,7 @@ figure sources, and final exports used by `paper/main.tex`.
 
 - Use the single SciencePlots/Matplotlib data-figure path for quantitative paper
   charts.
-- Use Research SVG Pipeline (`research-svg-pipeline.md`) for method/architecture
+- Use Drawing the method in SVG (`research-svg-pipeline.md`) for method/architecture
   pipelines: synthesize compact horizontal, staggered SVG from code and paper,
   with Times New Roman and an included vector PDF.
 - Use PPT Master, HTML/SVG, ECharts, Recharts, Vega, or FigureSpec for other conceptual
@@ -35,4 +35,4 @@ figure sources, and final exports used by `paper/main.tex`.
   penetration, overlap, clipping, and ambiguous direction.
 
 Embed every claim-bearing table and figure in `paper/main.tex`. Final
-scientific, visual, and language acceptance happens together in Review.
+judgments about the science, figures, and language are made together in Review.

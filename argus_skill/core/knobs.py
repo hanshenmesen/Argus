@@ -195,6 +195,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("ARGUS_SKILL_FEISHU_ALLOWED_USERS", "(unset)", "comma-separated Feishu open_ids allowed to drive the daemon; unset allows everyone the bot can see", "telemetry"),
     Knob("ARGUS_SKILL_FEISHU_DOMAIN", "feishu", "Feishu open-platform host: 'feishu' (mainland), 'lark' (international), or a full URL", "telemetry"),
     Knob("ARGUS_SKILL_SHOW_REASONING", "0", "stream the agent's reasoning to the cockpit", "telemetry", cockpit=True),
+    Knob("ARGUS_SKILL_LETTER_INTERVAL_HOURS", "8", "hours between Argus's letters to the operator, written to the transcript and LETTERS.md; 0 turns the letters off", "telemetry"),
 )
 
 # A model knob carries a bare model id (``gpt-5.6-sol``, ``copilot/opus-5``) or a

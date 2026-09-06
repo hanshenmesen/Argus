@@ -1,27 +1,27 @@
 ---
-name: "Research Visualization Router"
-description: "Choose a direct, evidence-faithful renderer for each paper figure and leave strict visual acceptance to Review."
+name: "Choosing how to draw a research figure"
+description: "Choose a renderer that faithfully represents the evidence for each paper figure; Review makes the strict visual judgment."
 ---
 
-# Research Visualization Router
+# Choosing how to draw a research figure
 
 Use this in Paper before creating a figure. Choose the renderer from the
 figure's semantics, then create only its source and final included export.
 
-## Figure 1 is a paper deliverable
+## What Figure 1 must show
 
 Every complete paper needs a real Figure 1 that communicates the problem,
 mechanism, and claim-bearing flow at a glance. Embed an exported PDF, SVG, or
 high-resolution PNG through `\includegraphics` or `\includesvg`; a boxed
 paragraph or table inside a figure environment does not count.
 
-## Route by semantics
+## Choose from what the figure needs to express
 
 | Need | Route |
 |---|---|
-| Any paper data/metric/result chart, including uncertainty or ablation | Matplotlib/SciencePlots through Paper Chart Styling |
-| Method pipeline or architecture overview | Research SVG Pipeline: synthesize compact horizontal SVG from the current code and paper, with staggered layout and Times New Roman |
-| Other conceptual or teaser figure | Paper Framework Figure Studio; editable native PPTX through PPT Master when appropriate |
+| Any paper data/metric/result chart, including uncertainty or ablation | Matplotlib/SciencePlots through Styling data figures for publication |
+| Method pipeline or architecture overview | Drawing the method in SVG: synthesize compact horizontal SVG from the current code and paper, with staggered layout and Times New Roman |
+| Other conceptual or teaser figure | Composing a conceptual paper figure; editable native PPTX through PPT Master when appropriate |
 | Exact load-bearing topology | FigureSpec, Draw.io, Graphviz, or browser SVG |
 | Rich browser composition | Self-contained HTML/CSS/SVG rendered with `research_visual_scripts/browser_render.py` |
 | Non-claim-bearing illustrative asset | image-2 only when configured; compose it inside an editable deterministic figure |
@@ -70,4 +70,4 @@ rather than trigger `figure root contains no SVG`.
 Paper is responsible for complete figures and a successful manuscript compile,
 not a separate visual check. During final Review, inspect every page and every
 figure at actual publication size; repair the source and rerender until the
-strict visual pass and integrated review accept the paper.
+strict visual assessment and integrated review find that the paper holds.

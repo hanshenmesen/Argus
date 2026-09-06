@@ -168,6 +168,16 @@ export function renderEvent(ev: EventMsg, locale: Locale = 'en'): Rendered | nul
     const target = S(ev, 'target_stage') || S(ev, 'stage') || S(ev, 'current_stage');
     return { role: 'manager', label: 'Manager', glyph: '🧭', text: `${S(ev, 'action')}${target ? ` → ${target}` : ''} ${trunc(S(ev, 'reason'), 120)}`, tone: 'info' };
   }
+  if (t === 'life.research.second_reading') {
+    const layer = S(ev, 'agent_layer') || 'manager';
+    const supported = trunc(S(ev, 'supported'), 160);
+    const base = l('reread the evidence and reworked the plan', '重读了证据并重排了计划');
+    return { role: layer, label: roleLabel(layer), glyph: '📖', text: supported ? `${base} · ${supported}` : base, tone: 'info' };
+  }
+  if (t === 'life.letter.written') {
+    const layer = S(ev, 'agent_layer') || 'manager';
+    return { role: layer, label: roleLabel(layer), glyph: '✉', text: l('wrote you a letter', '给你写了一封信'), tone: 'accent' };
+  }
 
   // ── Planner
   if (t === 'life.planner.start')

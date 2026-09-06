@@ -194,10 +194,10 @@ def test_structured_role_fields_are_explicitly_operator_facing(tmp_path) -> None
         assert "field names or status tokens in their values" in planner_prompt
     for engineer_prompt in (engineer, continuation):
         assert "one or two operator-facing sentences in the operator's language" in engineer_prompt
-        assert "what changed, the decisive check, and any remaining blocker" in engineer_prompt
-        assert "do not repeat footer or status fields" in engineer_prompt
+        assert 'what changed, the decisive check, and any remaining obstacle' in engineer_prompt
+        assert 'do not repeat decision or status fields' in engineer_prompt
     assert "REASON, NEXT_ACTION, and OPERATOR_QUESTION are human-facing" in reviewer
-    assert "Avoid enum and template names" in reviewer
+    assert 'Omit internal values and template names' in reviewer
 
 
 def test_role_prompts_are_byte_identical_for_identical_state(tmp_path) -> None:
@@ -327,7 +327,7 @@ def test_research_final_review_uses_only_review_stage_checklist(
     assert "Visual:" in context.role_banner
     assert "Language:" in context.role_banner
     assert "inspect every rendered page" in context.role_banner
-    assert "Do not load HANDOFF.md" in context.role_banner
+    assert "Do not load the research notes" in context.role_banner
     assert "`research-review-playbook.md`" in context.role_banner
     assert "Do not edit files or change stage state" in context.role_banner
     assert "single workflow playbook" in context.role_banner

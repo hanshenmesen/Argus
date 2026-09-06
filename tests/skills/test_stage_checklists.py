@@ -101,23 +101,23 @@ def test_experiment_completion_does_not_depend_on_a_handoff_file(
     # file is missing.
     assert stage_completion_issues("experiment", tmp_path) == ()
 
-    (tmp_path / "HANDOFF.md").write_text(
-        "# HANDOFF — EXPERIMENT\n\nImplementation, evaluator, and results are ready.",
+    (tmp_path / "RESEARCH_NOTES.md").write_text(
+        "# Research notes — Experiment stage\n\nImplementation, evaluator, and results are ready.",
         encoding="utf-8",
     )
     assert stage_completion_issues("experiment", tmp_path) == ()
 
 
-def test_paper_completion_issues_do_not_mention_the_handoff_file(
+def test_paper_completion_issues_do_not_mention_the_notes_file(
     tmp_path: Path,
 ) -> None:
     issues = stage_completion_issues("paper", tmp_path)
     assert issues
-    assert not any("HANDOFF" in issue for issue in issues)
+    assert not any("HANDOFF" in issue or "RESEARCH_NOTES" in issue for issue in issues)
 
 
-def test_review_uses_review_not_handoff_or_history(tmp_path: Path) -> None:
-    (tmp_path / "HANDOFF.md").write_text("OLD HANDOFF", encoding="utf-8")
+def test_review_uses_review_not_notes_or_history(tmp_path: Path) -> None:
+    (tmp_path / "RESEARCH_NOTES.md").write_text("OLD NOTES", encoding="utf-8")
     review = tmp_path / "paper" / "REVIEW.md"
     review.parent.mkdir()
     review.write_text("CURRENT REVIEW", encoding="utf-8")
@@ -139,7 +139,7 @@ def test_review_uses_review_not_handoff_or_history(tmp_path: Path) -> None:
     assert "CURRENT REVIEW" not in prompt
     prompt += active_research_context("review", tmp_path)
     assert "CURRENT REVIEW" in prompt
-    assert "OLD HANDOFF" not in prompt
+    assert "OLD NOTES" not in prompt
     assert "OLD REPORT" not in prompt
     assert "executed code" in prompt
     assert "raw rows" in prompt

@@ -115,6 +115,8 @@ class EventType(StrEnum):
     LIFE_PLAN_REVISION_REJECTED = "life.plan.revision.rejected"
     LIFE_PLAN_REVISION_COMMITTED = "life.plan.revision.committed"
     LIFE_PLAN_NODE_SUPERSEDED = "life.plan.node.superseded"
+    LIFE_RESEARCH_SECOND_READING = "life.research.second_reading"
+    LIFE_LETTER_WRITTEN = "life.letter.written"
     LIFE_BUDGET_PAUSE = "life.budget.pause"
     LIFE_LIFECYCLE_BLOCK = "life.lifecycle.block"
     LIFE_LIFECYCLE_TRANSITION = "life.lifecycle.transition"
@@ -227,6 +229,8 @@ SIGNAL_EVENT_TYPES: frozenset[str] = frozenset({
     EventType.LIFE_PLAN_REVISION_REJECTED,
     EventType.LIFE_PLAN_REVISION_COMMITTED,
     EventType.LIFE_PLAN_NODE_SUPERSEDED,
+    EventType.LIFE_RESEARCH_SECOND_READING,
+    EventType.LIFE_LETTER_WRITTEN,
     EventType.LIFE_BUDGET_PAUSE,
     EventType.BUDGET_RESERVATION_DENIED,
     EventType.BUDGET_UNPRICED_BLOCKED,

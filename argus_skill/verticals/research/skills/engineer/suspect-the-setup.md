@@ -1,9 +1,9 @@
 ---
-name: "Suspect the Setup Before the Idea"
-description: "Set an experiment up so it can succeed, and diagnose it when the number comes back wrong. Covers generation budgets, RL and SFT post-training configuration, protocol steps, scorers, and how to reason about settings not listed here."
+name: "Suspect the setup before the idea"
+description: "Set an experiment up so it can succeed, and diagnose it when the number comes back wrong. Covers generation budgets, RL and SFT post-training configuration, experimental protocol steps, scorers, and reasoning about settings not listed here."
 ---
 
-# Suspect the Setup Before the Idea
+# Suspect the setup before the idea
 
 ## Why this exists
 
@@ -13,8 +13,8 @@ took it to 76.4%. Two settings, an order of magnitude, and at every stage the
 number looked like a scientific finding — it was written into a paper as a
 "boundary result" before anyone checked.
 
-A wrong setting and a wrong idea produce the same artifact: a low number with
-clean plumbing. Nothing about the run announces which one you have. So a result
+A wrong setting and a wrong idea can look the same: a low number from
+an apparently well-run experiment. Nothing about the run announces which one you have. So a result
 far from what this model, method or benchmark is known to do is a defect report
 until proven otherwise, and the work is to find the defect, not to interpret the
 number.
@@ -51,7 +51,7 @@ truncate looks healthy on the loss curve.
 
 The signature to watch for afterwards is unmistakable and easy to miss: **every
 trained variant scoring below the untrained starting checkpoint.** That is not a
-result about which variant is better, it is a report that the training pipeline
+result about which variant is better, it shows that training
 degraded the model, and comparing the variants to each other buries it. One run
 here trained four RLVR variants that landed at 0.736-0.742 against an untrained
 base at 0.756, with 97% of its training completions clipped and a mean training
@@ -79,8 +79,8 @@ visible in ten generations and invisible in an aggregate score.
 ## When the number comes back wrong
 
 Ask one question: **which single setting, if wrong, would produce exactly the
-number in front of me?** Then go and look at that setting. Not a checklist sweep
-— one hypothesis, one inspection, repeat.
+number in front of me?** Then go and look at that setting. Form one hypothesis,
+inspect what would settle it, and repeat; do not sweep through settings indiscriminately.
 
 Two anchors make the question answerable:
 
@@ -132,10 +132,10 @@ Check device placement and observed throughput on the first few examples.
 The listed ones are only the failures already seen. The general form is: **any
 setting that bounds what the model is allowed to produce, or that stands between
 the model's output and the score, can destroy a result while leaving the
-pipeline looking healthy.**
+experiment looking healthy.**
 
 When you meet a surprising number, enumerate the settings of that shape in
-*your* pipeline and rank them by how much of the gap each could explain. A
+*your* experiment and rank them by how much of the gap each could explain. A
 setting that could explain the whole gap is worth an hour; one that could
 explain a point is not, yet.
 

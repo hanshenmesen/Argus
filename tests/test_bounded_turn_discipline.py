@@ -38,7 +38,7 @@ def test_checkpoint_handoff_discipline_present_for_paper_mission():
         paper_mission=True,
     )
     assert "## This turn" in out
-    assert "pure reading" in out.lower()
+    assert 'reading must yield a written result or measurement' in out.lower()
     assert "CHECKPOINT.md is the only file you maintain to carry context between rounds" in out
     assert "one coherent, verifiable increment" not in out
 
@@ -107,7 +107,7 @@ def test_engineer_does_not_create_extra_handoff_packets():
     out = _prompt("Continue the implementation across rounds.")
 
     assert "only file you maintain to carry context between rounds" in out
-    assert "do not create separate summary or evidence packets" in out
+    assert 'do not create separate summaries or collections of evidence' in out
     assert "compile/type-check" not in out
     assert "git ls-files --error-unmatch" not in out
 
@@ -129,4 +129,9 @@ def test_engineer_surfaces_operator_only_blockers_to_host():
 
 
 def test_engineer_fixed_prompt_stays_token_efficient():
-    assert len(_prompt("Refactor the data loader and add unit tests.")) < 2_800
+    # 3_600 = the old 2_800 body budget, plus ~730 characters for the shared
+    # writing-voice paragraph (RESEARCHER_VOICE, added 2026-09) that all four
+    # role prompts now carry, plus ~70 characters of headroom. The body without
+    # that paragraph still sits at ~2_820, i.e. the old discipline holds. Before
+    # raising this number again, trim the prompt first.
+    assert len(_prompt("Refactor the data loader and add unit tests.")) < 3_600

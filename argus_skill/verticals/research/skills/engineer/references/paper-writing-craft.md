@@ -1,4 +1,4 @@
-# Paper Writing Craft
+# The craft of writing a paper
 
 Read this while drafting or revising a manuscript. It says how strong accepted
 papers are written, so that the writer can make the same choices, not so that a
@@ -16,11 +16,11 @@ register from the paper's job and hold it; do not drift between them.
 
 The one sentence to settle first: "This paper shows that X, because Y, as
 evidenced by Z." If that sentence cannot be written, the problem is not prose.
-Go back to the evidence and the thesis in HANDOFF.md.
+Go back to the evidence and the thesis in the research notes, `RESEARCH_NOTES.md`.
 
 ## 2. The introduction is written twice
 
-**Draft 0** comes first, from the HANDOFF thesis, before the results section
+**Draft 0** comes first, from the thesis in the research notes, before the results section
 exists in prose: the stakes, the structural gap, the key idea, a one-paragraph
 mental model of the method, and the contribution claims. It is scaffolding. Its
 purpose is to fix what the evaluation must establish.
@@ -111,10 +111,11 @@ and metrics.
 | "This is non-causal / post hoc / preregistered ..." repeated per result | Say once what the design does and does not identify, then report results as results. |
 | Paragraph ending on "Nevertheless, the method is not without limitations." | End on the paragraph's finding; discuss the limit where it matters. |
 
-The manuscript never contains the words of the workflow that produced it:
-bounded, certified, gate, artifact, mission, round, handoff, validator, audit,
-checklist, or the evidence-role labels (headline, mechanism, control, scope,
-completeness) used while planning it.
+The manuscript never contains the terms used to organize its writing: names
+for internal task limits, declarations of readiness, stage decisions,
+generated outputs, missions, rounds, transfers between roles, checking tools,
+inspections, or lists of required checks. The evidence-role labels (headline,
+mechanism, control, scope, completeness) used while planning it also stay out.
 
 ## 6. Sentences and paragraphs
 

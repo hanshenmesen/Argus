@@ -53,6 +53,8 @@ RETIRED_NANOCHAT_SKILLS = {
 }
 
 RESEARCH_BASE_SKILLS = {
+    "engineer/citation-check.md",
+    "engineer/claims-against-evidence.md",
     "engineer/figure_spec_scripts/figure_renderer.py",
     "engineer/hypothesis-implementation-contract.md",
     "engineer/research-grind.md",
@@ -66,6 +68,8 @@ RESEARCH_BASE_SKILLS = {
     "research-experiment-playbook.md",
     "research-paper-playbook.md",
     "research-review-playbook.md",
+    "reviewer/reading-the-evidence.md",
+    "reviewer/strongest-argument-against.md",
 }
 _RESEARCH_MOVE_MARKER = json.loads(
     (

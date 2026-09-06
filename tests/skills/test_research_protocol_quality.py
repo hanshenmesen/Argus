@@ -92,8 +92,8 @@ def test_paper_produces_a_complete_draft_before_final_review() -> None:
     assert "only in review" in paper
     assert "strong open-access accepted" in playbook
     assert "best paper examples" in playbook
-    assert "not a separate scientific, visual" in playbook
-    assert "those happen together in review" in playbook
+    assert "do not make them separately in paper" in playbook
+    assert "judgments are made together in review" in playbook
     assert "selected venue" in venue_format
     assert "academic_language_review" not in venue_format
     assert "paper_layout_review" not in venue_format
@@ -124,7 +124,7 @@ def test_review_combines_parallel_scientific_visual_and_language_passes() -> Non
     assert "strict page-by-page visual quality" in playbook
     assert "academic language" in playbook
     assert "do not create separate scientific" in playbook
-    assert "recursively crawl old reports or history" in prompt
+    assert "crawl old reports or history" in prompt
     assert "never reopen selection or move backward" in prompt
 
 
@@ -201,8 +201,8 @@ def test_playbooks_progressively_disclose_existing_specialist_skills() -> None:
 
     for stage in STAGE_PLAYBOOK_PATHS:
         text = _playbook(stage)
-        assert "progressive disclosure" in text
-        assert "do not preload the table" in text
+        assert "when another skill would help" in text
+        assert "do not read all the sources in advance" in text
         references = re.findall(
             r"`((?:engineer|reviewer)/[^`]+\.md)`",
             text,

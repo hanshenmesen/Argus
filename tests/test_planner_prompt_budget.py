@@ -106,11 +106,11 @@ def test_math_scope_prompt_is_compact_and_deduplicated(
     assert "waiting_contract" not in prompt
     assert prompt.count("PROJECT_DONE=false") == 1
     assert "TASK_KEY=k1" in prompt
-    assert "not a routing command" in prompt
+    assert 'prerequisites, not directions' in prompt
     assert prompt.count(
-        "Integrity and reproducibility are admission constraints"
+        'reproducibility\n  are prerequisites'
     ) == 1
-    assert "delegate implementation to Engineer" in prompt
+    assert 'Engineer implements, runs commands and tests, and iterates' in prompt
     assert "JSON matching the provided schema" not in prompt
 
 
@@ -120,7 +120,7 @@ def test_math_scope_prompt_excludes_unrelated_modules(
 ) -> None:
     prompt, _objective = _build_math_scope_prompt(tmp_path, monkeypatch)
 
-    assert "## Planner read-only delegation contract" in prompt
+    assert '## Assigning work' in prompt
     assert "## Current workflow stage" in prompt
     assert "current: `scope`" in prompt
     assert "## Stage checklist (scope)" in prompt
@@ -149,7 +149,7 @@ def test_direct_workflow_suppresses_stage_artifact_ceremony(
     )
 
     assert "## Direct workflow — objective first" in prompt
-    assert "semantic context, not a mandatory artifact phase" in prompt
+    assert 'describes the kind of work, without requiring a separate set of files' in prompt
     assert "## Stage checklist (scope)" not in prompt
     assert "## Stage gate" not in prompt
     assert "KERNEL_SCOPE.md" not in prompt
@@ -169,10 +169,10 @@ def test_planner_keeps_operator_actions_ahead_of_optional_hardening(
         open_ended=False,
     )
 
-    assert "Follow the operator's requested actions and order" in prompt
-    assert "a usable" in prompt
-    assert "alternative do not replace the first unmet requested action" in prompt
-    assert "Optional hardening never keeps a finite objective alive" in prompt
+    assert 'Follow requested actions in order' in prompt
+    assert 'outputs or alternatives' in prompt
+    assert 'outputs or alternatives cannot replace an\n  unmet action' in prompt
+    assert 'Do not prolong completed\n  finite work for optional hardening' in prompt
 
 
 def test_bounded_planner_rejects_tautological_acceptance_checks() -> None:
@@ -375,7 +375,7 @@ def test_research_planner_prompt_drops_frozen_plan_block(
         state_root=tmp_path,
     )
 
-    assert "## Research plan (living document)" not in prompt
+    assert '## Research plan' not in prompt
     assert "PLAN_UPDATE" not in prompt
 
 
@@ -392,8 +392,8 @@ def test_planner_prompt_marks_absent_or_corrupt_plan_for_creation(tmp_path) -> N
 
 
 def test_research_plan_contract_avoids_hard_result_gates() -> None:
-    assert "without fixed numeric pass/fail thresholds" in _RESEARCH_PLAN_CONTRACT
-    assert "scientifically valuable improvement" in _RESEARCH_PLAN_CONTRACT
+    assert 'no fixed numeric pass/fail thresholds' in _RESEARCH_PLAN_CONTRACT
+    assert 'scientific gain toward a scoped paper' in _RESEARCH_PLAN_CONTRACT
 
 
 def test_oversize_research_plan_keeps_head_and_next_milestone_with_hard_cap(

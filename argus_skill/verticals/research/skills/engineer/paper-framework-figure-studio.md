@@ -1,12 +1,12 @@
 ---
-name: "Paper Framework Figure Studio"
-description: "Create one publication-ready conceptual figure from the current paper and direct evidence, composed the way strong published figures are."
+name: "Composing a conceptual paper figure"
+description: "Create one publication-ready conceptual figure from the current paper and direct evidence, composed as strong published figures are."
 ---
 
-# Paper Framework Figure Studio
+# Composing a conceptual paper figure
 
 Use this in Paper for Figure 1 or another conceptual, method, architecture, or
-taxonomy figure. Read `HANDOFF.md`, the current manuscript, the executed method,
+taxonomy figure. Read the research notes in `RESEARCH_NOTES.md`, the current manuscript, the executed method,
 and direct result sources. Create only the editable figure source and the final
 export included by the paper.
 
@@ -47,7 +47,7 @@ fits the paper's actual claim before drawing anything:
    Use compact nested groups and additional horizontal bands when needed;
    preserve readable type and move explanatory prose into the caption.
 6. Where it helps comprehension, run one concrete example through the diagram —
-   an actual input and its intermediate artifacts — rather than only abstract
+   an actual input and its intermediate representations — rather than only abstract
    labels.
 7. Write the caption to stand alone: open with the takeaway (bold it when the
    venue style allows), walk the panels in reading order, decode every color,
@@ -58,7 +58,7 @@ fits the paper's actual claim before drawing anything:
 ## Geometry and typography
 
 - one entry point and one exit, with a single dominant left-to-right reading
-  direction; return or training arrows are the sanctioned exception and must
+  direction; return or training arrows are the permitted exception and must
   look different (dashed or a distinct color);
 - connectors terminate at explicit node boundaries; no shaft or arrowhead
   enters an unrelated node, label, or panel; if arrows must cross, fix the
@@ -77,19 +77,20 @@ fits the paper's actual claim before drawing anything:
 - every visible name, direction, and value matches the paper and executed
   method verbatim; regenerate the figure when notation changes.
 
-## Production route
+## From an editable source to the finished figure
 
 Never generate the figure as a raster image in one shot: emit an editable
-structured source, render it, inspect the render, and revise until it passes.
+structured source, render it, inspect the render, and revise until it meets
+the figure requirements.
 Decompose complex figures — build panels and modules separately, then compose.
 
 | Composition | Primary route |
 |---|---|
-| Pipeline strip or method architecture | Research SVG Pipeline (`research-svg-pipeline.md`): model-authored compact horizontal SVG grounded in code and paper, staggered geometry, Times New Roman, cropped vector PDF export |
+| Pipeline strip or method architecture | Drawing the method in SVG (`research-svg-pipeline.md`): model-authored compact horizontal SVG grounded in code and paper, staggered geometry, Times New Roman, cropped vector PDF export |
 | Contrast diptych, lineage panels | Editable native objects through PPT Master; for a contrast diptych draw one diagram and apply the delta programmatically so the panels are guaranteed identical except the edit |
 | Panels of verbatim text (prompts, trajectories, rubrics) | HTML/CSS with inline SVG rendered headlessly to vector PDF — the only route with a real text-layout engine; verify the render visually since headless failures are silent |
 | Exact load-bearing topology, taxonomy trees | Graphviz for layout coordinates, restyled through SVG; or FigureSpec, Draw.io, browser SVG |
-| Results teaser | Matplotlib through Paper Chart Styling |
+| Results teaser | Matplotlib through Styling data figures for publication |
 
 Inspect every render at actual publication size against the design rules above:
 reading direction, one highlighting device, decodable legend, text budget,
@@ -98,4 +99,4 @@ walk, and color decode.
 
 Paper needs a complete, credible figure and a successful compile. Do not create
 layout reports, exemplar collections, provenance records, or visual-review
-files. Strict page-by-page visual acceptance happens once, in Review.
+files. The strict page-by-page visual judgment is made once, in Review.

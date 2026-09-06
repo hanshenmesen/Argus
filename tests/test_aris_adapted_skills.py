@@ -66,9 +66,9 @@ def test_every_builtin_skill_has_frontmatter() -> None:
 @pytest.mark.parametrize(
     "skill_path,expected_name",
     [
-        ("engineer/citation-audit.md", "Citation Verification"),
-        ("engineer/claims-evidence-audit.md", "Claim Check"),
-        ("engineer/figure-spec.md", "Figure Spec (deterministic SVG)"),
+        ("engineer/citation-check.md", "Checking citations against primary sources"),
+        ("engineer/claims-against-evidence.md", "Reading claims against the evidence"),
+        ("engineer/figure-spec.md", "FigureSpec: drawing exact diagrams from JSON"),
     ],
 )
 def test_aris_adapted_skills_are_present(skill_path: str, expected_name: str) -> None:
@@ -81,7 +81,7 @@ def test_aris_adapted_skills_are_present(skill_path: str, expected_name: str) ->
 
 def test_claim_check_requires_fresh_source_level_verification() -> None:
     text = (
-        RESEARCH_ROOT / "engineer" / "claims-evidence-audit.md"
+        RESEARCH_ROOT / "engineer" / "claims-against-evidence.md"
     ).read_text(encoding="utf-8")
 
     assert "fresh-context" in text

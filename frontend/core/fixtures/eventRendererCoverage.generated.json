@@ -25,6 +25,7 @@
     "life.engineer.backend_resolved",
     "life.inbox.drained",
     "life.inbox.queued",
+    "life.letter.written",
     "life.lifecycle.block",
     "life.lifecycle.transition",
     "life.manager.backend_resolved",
@@ -59,6 +60,7 @@
     "life.planner.verification_probe",
     "life.planner.waiting",
     "life.planner.waiting_woken",
+    "life.research.second_reading",
     "life.reviewer.backend_resolved",
     "life.runtime_failure.canary_passed",
     "life.runtime_failure.circuit_blocked",
@@ -112,7 +114,7 @@
       "counts": {
         "handled": 21,
         "hidden": 0,
-        "missing": 85
+        "missing": 87
       },
       "fallback": "greppable",
       "handled": [
@@ -164,6 +166,7 @@
         "life.engineer.backend_resolved",
         "life.inbox.drained",
         "life.inbox.queued",
+        "life.letter.written",
         "life.lifecycle.block",
         "life.lifecycle.transition",
         "life.manager.backend_resolved",
@@ -185,6 +188,7 @@
         "life.planner.verification_probe",
         "life.planner.waiting",
         "life.planner.waiting_woken",
+        "life.research.second_reading",
         "life.reviewer.backend_resolved",
         "life.runtime_failure.canary_passed",
         "life.runtime_failure.circuit_blocked",
@@ -229,7 +233,7 @@
     },
     "tui": {
       "counts": {
-        "handled": 33,
+        "handled": 35,
         "hidden": 0,
         "missing": 73
       },
@@ -242,6 +246,7 @@
         "life.budget.pause",
         "life.daemon.idle_timeout",
         "life.inbox.queued",
+        "life.letter.written",
         "life.lifecycle.block",
         "life.manager.intent.completed",
         "life.manager.intent.failed",
@@ -257,6 +262,7 @@
         "life.planner.task_added",
         "life.planner.task_skipped",
         "life.planner.verdict",
+        "life.research.second_reading",
         "loop.done",
         "loop.start",
         "provider.request.denied",
@@ -348,7 +354,7 @@
     },
     "web": {
       "counts": {
-        "handled": 30,
+        "handled": 32,
         "hidden": 1,
         "missing": 75
       },
@@ -360,6 +366,7 @@
         "life.budget.pause",
         "life.daemon.idle_timeout",
         "life.inbox.queued",
+        "life.letter.written",
         "life.manager.intent.completed",
         "life.manager.intent.failed",
         "life.manager.intent.started",
@@ -374,6 +381,7 @@
         "life.planner.task_added",
         "life.planner.task_skipped",
         "life.planner.verdict",
+        "life.research.second_reading",
         "loop.done",
         "loop.start",
         "round.escalated",

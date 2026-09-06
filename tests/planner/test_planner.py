@@ -367,19 +367,19 @@ def test_planner_accepts_json_decision_without_event_prefix(text: str) -> None:
 
 
 def test_planner_prompt_requires_read_only_delegation_and_minimal_footer() -> None:
-    assert "Planner read-only delegation contract" in _PLANNER_CORE_CONTRACT
-    assert "Do not edit project files" in _PLANNER_CORE_CONTRACT
-    assert "Engineer owns edits" in _PLANNER_CORE_CONTRACT
+    assert 'Assigning work' in _PLANNER_CORE_CONTRACT
+    assert 'do not edit.' in _PLANNER_CORE_CONTRACT
+    assert 'Engineer implements, runs commands and tests, and iterates' in _PLANNER_CORE_CONTRACT
     assert "ARGUS_ROLE_DECISION=" not in _PLANNER_CORE_CONTRACT
     assert "PROJECT_DONE=false" in _PLANNER_CORE_CONTRACT
     assert "TASK_KEY=k1" in _PLANNER_CORE_CONTRACT
     assert "RETIRE_TASK=<item id> | <one-sentence reason>" in _PLANNER_CORE_CONTRACT
-    assert "running work and done work cannot be retired" in _PLANNER_CORE_CONTRACT
+    assert 'never retire running or done work' in _PLANNER_CORE_CONTRACT
     assert "`wake_on`" in _PLANNER_CORE_CONTRACT
-    assert "semantically" in _PLANNER_CORE_CONTRACT
+    assert '`wake_on` (synonyms/combined sources)' in _PLANNER_CORE_CONTRACT
     assert "synonyms/combined sources" in _PLANNER_CORE_CONTRACT
-    assert "a timed recheck" in _PLANNER_CORE_CONTRACT
-    assert "In-flight background work launched by Argus is a valid external wait" in _PLANNER_CORE_CONTRACT
+    assert 'timed rechecks' in _PLANNER_CORE_CONTRACT
+    assert 'When only Argus running/paused_external_work dependencies remain' in _PLANNER_CORE_CONTRACT
     assert "`WAITING=true`" in _PLANNER_CORE_CONTRACT
     assert "`WAIT_ID=<live subagent id>`" in _PLANNER_CORE_CONTRACT
     assert "no `TASK_*` blocks" in _PLANNER_CORE_CONTRACT
@@ -394,17 +394,17 @@ def test_planner_prompt_requires_read_only_delegation_and_minimal_footer() -> No
     ):
         assert field not in _PLANNER_CORE_CONTRACT
     assert "`TASK_SCOPE`" in _PLANNER_CORE_CONTRACT
-    assert "optional (default `bounded`)" in _PLANNER_CORE_CONTRACT
-    assert "optional (omit to hold)" in _PLANNER_CORE_CONTRACT
+    assert '`TASK_SCOPE`\n  defaults to `bounded`' in _PLANNER_CORE_CONTRACT
+    assert 'Optional `ADVANCE_TO_STAGE` must be Host-valid; omit to hold' in _PLANNER_CORE_CONTRACT
     assert "enqueue-time validation/normalization" not in _PLANNER_CORE_CONTRACT
     assert "external algorithm" in _PLANNER_CORE_CONTRACT
-    assert "primary-source grounding" in _PLANNER_CORE_CONTRACT
-    assert "starting context, not a" in _PLANNER_CORE_CONTRACT
-    assert "fresh paper/source/issue/hardware investigation" in _PLANNER_CORE_CONTRACT
-    assert "When related attempts repeatedly fail" in (
+    assert 'Ground external algorithms beyond Wiki/Skills in primary sources' in _PLANNER_CORE_CONTRACT
+    assert 'beyond Wiki/Skills' in _PLANNER_CORE_CONTRACT
+    assert 'Consult papers,\n  source, issues, or hardware when consequential' in _PLANNER_CORE_CONTRACT
+    assert 'Repeated failures require rereading' in (
         _PLANNER_CORE_CONTRACT
     )
-    assert "official implementations" in _PLANNER_CORE_CONTRACT
+    assert 'official code' in _PLANNER_CORE_CONTRACT
 
 
 @pytest.mark.parametrize(
@@ -449,11 +449,11 @@ def test_planner_forbids_binary_outcome_labels_and_standing_keeps_exploring(
     )
 
     assert "accepted " + "no" + "-go" not in finite.lower()
-    assert "bare launch verdict" in finite.lower()
+    assert 'never a bare work announcement' in finite.lower()
     assert "what happened" in finite
-    assert "timing/profiling" in finite
-    assert "This campaign remains active until the operator stops it" not in finite
-    assert "This campaign remains active until the operator stops it" in standing
+    assert 'timing, profiling' in finite
+    assert 'Continue until stopped by the operator' not in finite
+    assert 'Continue until stopped by the operator' in standing
 
 
 def test_parse_planner_allows_binary_outcome_words_inside_a_task() -> None:

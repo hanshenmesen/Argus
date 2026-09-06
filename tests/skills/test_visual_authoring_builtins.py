@@ -59,7 +59,7 @@ def test_presentation_and_figure_descriptions_preserve_routing_guidance() -> Non
     )
     assert "research-paper conceptual" in presentation["description"]
     assert "image-2 is unavailable" in presentation["description"]
-    assert "Research Visualization Router" in figure["description"]
+    assert "Choosing how to draw a research figure" in figure["description"]
     assert "PPT Master" in figure["description"]
     assert "update_repo.py" in presentation_body
     assert '"${ARGUS_SKILL_PYTHON:-python3}"' in presentation_body

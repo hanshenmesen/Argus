@@ -168,8 +168,8 @@ def test_planner_structured_stage_request_advances_before_enqueue(
         json.dumps({"vertical": "research", "current_stage": "idea"}),
         encoding="utf-8",
     )
-    (project_root / "HANDOFF.md").write_text(
-        "# HANDOFF — IDEA\n\nThe idea is selected and ready to implement.",
+    (project_root / "RESEARCH_NOTES.md").write_text(
+        "# Research notes — Idea stage\n\nThe idea is selected and ready to implement.",
         encoding="utf-8",
     )
     supervisor = _make_supervisor(

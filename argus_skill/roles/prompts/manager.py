@@ -13,6 +13,7 @@ from ...core.model_visible_text import (
 from ...core.role_decision import decision_footer_instruction
 from ..task_contract import format_native_shell_command
 from .types import ChecklistMode, RoleName, RolePromptRequest
+from .voice import RESEARCHER_VOICE
 
 FRONT_DOOR = "front_door"
 SELF_REPLY = "self_reply"
@@ -25,33 +26,31 @@ LIVE_VIEW = "live_view"
 PENDING_QUESTION = "pending_question"
 
 _RESEARCH_DELIVERABLE_ROUTING = (
-    "Intent boundary: when the operator supplies an idea or hypothesis and asks "
-    "for a full paper, choose staged research with direction locked. When the "
-    "operator asks only to propose, compare, or review ideas and does not request "
-    "implementation, experiments, or a paper, choose direct research; use broad "
-    "for idea discovery and locked for one supplied idea. Research target level "
-    "sets the requested quality bar and never expands an idea-only deliverable "
-    "into a paper. Figures, plots, diagrams, a Figure 1, a section, a draft, or "
-    "a revision of a research manuscript are `research`. When the operator asks "
-    "only for that part and excludes a full campaign, choose `direct` and produce "
-    "exactly that part; add no manuscript, experiments, or literature review. "
-    "A direct research request names START_STAGE for its deliverable: `idea` for "
-    "proposing, comparing, or reviewing ideas and surveys; `experiment` for a "
-    "bounded empirical study or implementation with real runs and no manuscript; "
-    "`paper` for figures, drafts, sections, and manuscript revisions.\n\n"
-    "Optional START_STAGE=<stage name or empty> is used only with "
-    "WORKFLOW_MODE=direct and must be one of the chosen vertical's stages. "
-    "Empty means its first stage. A staged workflow always starts at its first "
-    "stage.\n\n"
+    "For a supplied idea or hypothesis requested as a full paper, choose staged "
+    "research with direction locked. For proposing, comparing, or reviewing ideas "
+    "without implementation, experiments, or a paper, choose direct research: broad "
+    "for discovery, locked for one supplied idea. Target level sets quality and "
+    "never expands an idea-only request into a paper. Research figures, plots, "
+    "diagrams, Figure 1, sections, drafts, and manuscript revisions are `research`. "
+    "If only that part is requested and a full campaign excluded, choose `direct`; "
+    "produce that part without adding a manuscript, experiments, or literature review. "
+    "Set START_STAGE to `idea` for proposing, comparing, or reviewing ideas or surveys; "
+    "`experiment` for bounded empirical studies or implementations with real runs "
+    "and no manuscript; `paper` for figures, drafts, sections, or revisions.\n\n"
+    "Optional START_STAGE=<stage name or empty> applies only to WORKFLOW_MODE=direct: "
+    "choose a stage of that vertical, or leave empty for its first stage. Staged "
+    "work always begins at its first stage.\n\n"
 )
 
 _MIN_PLAN_STEPS = 3
 _MAX_PLAN_STEPS = 8
 
 _USER_FACING_STYLE = (
+    RESEARCHER_VOICE + "\n\n"
     "Lead with the answer in plain language, and match the depth, tone, and detail the "
-    "operator's request calls for. Mention evidence when it matters, not internal role "
-    "traffic or tool choreography. If blocked, say why and what happens next. "
+    "operator's request calls for. Mention evidence when it matters; leave out internal "
+    "exchanges between roles and the sequence of tool calls. If work cannot proceed, "
+    "say why and what happens next. "
     "Ask one clear question only when the operator must decide. Satisfy the stated "
     "outcome fully; do not invent future requirements.\n\n"
 )
@@ -85,10 +84,10 @@ def build_route_prompt(text: str) -> str:
         "SELF = conversational or read-only Manager work: greetings, acks, "
         "capability/status questions, explanations with no durable side effect, "
         "guided reading/tutoring, a quick read-only look-up, one low-risk "
-        "summary/note/report artifact, or operator control of the mission already "
+        "summary, note, or report, or operator control of the mission already "
         "running.\n"
         "TEAM = any code/project modification, command execution, substantive "
-        "research/engineering, multiple coordinated artifacts, or change to Argus "
+        "research/engineering, several related outputs, or change to Argus "
         "itself.\n"
         "Use SELF unless the requested outcome genuinely needs the team. Never "
         "route work that needs independent review to a lone worker.\n\n"
@@ -143,7 +142,7 @@ def build_simple_prompt(
             "## Grounding workspace\n"
             f"Operator launch workspace: {operator_workspace.strip()}\n"
             "For any claim about the current project, source tree, configuration, "
-            "or artifacts, inspect this workspace with tools before "
+            "or outputs, inspect this workspace with tools before "
             "answering. Do not substitute generic prior knowledge for current "
             "workspace evidence. You are the Manager and may modify state or use "
             "tools when that is required to carry out the operator's instruction.\n\n"
@@ -157,7 +156,7 @@ def build_simple_prompt(
     return (
         f"You are Argus Manager, using one {runner_backend_label()} worker. "
         "Answer the request yourself and use tools only when needed. You may inspect "
-        "or change state, but do not invent extra tasks or artifacts. For tutoring, "
+        "or change state, but do not invent extra tasks or outputs. For tutoring, "
         "teach one useful chunk, ask at most one question, then wait. Check primary "
         "sources only when an external technical claim matters. For data analysis, "
         "always follow marginal summaries with time-by-category cross-slices; separate "
@@ -181,8 +180,9 @@ def build_simple_prompt(
 def build_pending_question_prompt(item: Any, answer: str) -> str:
     question = str(getattr(item, "pending_question", "") or "").strip()
     return (
-        "You are the Manager resolving an operator-only blocker for an existing "
-        "mission. Interpret the operator response in the blocked mission context. "
+        "You are the Manager resolving a question that only the operator can answer "
+        "for an existing mission. Interpret the response in the context of why work paused. "
+        f"\n\n{RESEARCHER_VOICE}\n\n"
         "REPLY must use the operator's language and plain language: one question, "
         "why it is needed, and what happens next; never return a bare internal status. "
         "End your reply with these lines; DECISION and REPLY may run over "
@@ -198,7 +198,7 @@ def build_pending_question_prompt(item: Any, answer: str) -> str:
         "information for the team to continue. DECISION must then be an explicit, "
         "role-clean instruction for Planner/Engineer. The latest operator response "
         "is binding wherever it conflicts with inherited mission details. When it "
-        "changes a method, scope, tool, or acceptance requirement, explicitly name "
+        "changes a method, scope, tool, or requirement for completion, explicitly name "
         "the inherited constraint that is superseded instead of trying to satisfy "
         "both. If it is unrelated or insufficient, set resolved=false, keep "
         "decision empty, and use reply to ask one concise clarification question.\n\n"
@@ -230,7 +230,7 @@ def build_front_door_prompt(text: str, *, active_mission: bool = False) -> str:
         "explicit continue/resume after a pause is not a control token; resumed "
         "paused tasks with those effects are TEAM. Ambiguity defaults to no control. "
         "Controls use ROUTE SELF.\n\n"
-        "AUTHORIZATION: AUTHORIZE only an explicit grant for an active blocker: "
+        "AUTHORIZATION: AUTHORIZE only an explicit grant addressing what currently prevents progress: "
         "validator_repair,"
         "acceptance_retry,provenance_repair,artifact_refresh,resume_blocked_work. "
         "Questions/quotes are NONE. Use SELF.\n\n"
@@ -244,11 +244,12 @@ def build_front_door_prompt(text: str, *, active_mission: bool = False) -> str:
         "SELF; live research, ambiguity, parallel, or review-sensitive work is TEAM.\n\n"
         "SELF_MODE: REPLY=no tools; INSPECT=grounded answer; MICRO=tiny checked mutation; "
         "IMPLEMENT=local implementation+tests; DEBUG=diagnosis/fix+tests; "
-        "REVIEW=local review artifact; SYNTHESIZE=one artifact "
+        "REVIEW=local review report; SYNTHESIZE=one synthesis "
         "from supplied sources. Prefer DEBUG over IMPLEMENT for fixes/regressions. "
         "TEAM uses NONE. REPLY is the complete human-facing answer for SELF/REPLY. "
         "Write it in the operator's language. Lead with the answer in ordinary words; "
         "never expose route, control, lifetime, or role-protocol labels.\n\n"
+        f"{RESEARCHER_VOICE}\n\n"
         "LIFETIME: TEAM: default BOUNDED for finite or casual unscoped work absent "
         "ongoing intent; BOUNDED_INCREMENT for a limited stage; STANDING only with "
         "ongoing intent. SELF: NONE.\n\n"
@@ -291,7 +292,7 @@ def build_steer_confirmation_prompt(text: str, *, active_mission: bool) -> str:
         "idea, or an implied preference. Questions and information requests are SELF, "
         "including questions asking whether profiling exists, whether a technique is "
         "supported, what the team is doing, why it chose a path, or whether another "
-        "approach might work. A separate new task is also SELF for this gate because it "
+        "approach might work. A separate new task is also SELF for this decision because it "
         "does not mutate the active mission.\n\n"
         "Reply with exactly one word: STEER or SELF.\n\n"
         f"ACTIVE_MISSION: {'YES' if active_mission else 'NO'}\n\n"
@@ -330,9 +331,9 @@ def build_fast_vertical_decision_prompt(
         "authority, scope, system risk, repository context, or a new capability is "
         "uncertain, choose grounded so you can investigate freely in the next call. "
         "Do not plan implementation.\n\n"
-        "Choose workflow_mode=direct for one coherent Engineer package; coupled output "
+        "Choose workflow_mode=direct for one coherent Engineer task; related output "
         "files that one Engineer produces and one Reviewer checks together are still one "
-        "package. Use staged only for dependent phases or independently decided evidence "
+        "task. Use staged only for dependent phases or independently decided evidence "
         "tracks. `domain` may only name an "
         "optional research domain listed above. An existing project domain is itself "
         "a vertical: put its exact slug in `vertical` and leave `domain` empty. Never "
@@ -350,6 +351,7 @@ def build_fast_vertical_decision_prompt(
         "defaults on; set `require_independent_review=false` only for an authorized "
         "deliberate waiver and state the reason in `RATIONALE`.\n\n"
         + _RESEARCH_DELIVERABLE_ROUTING
+        + RESEARCHER_VOICE + "\n\n"
         + decision_footer_instruction(
             "CHOICE=existing\n"
             "VERTICAL=software\n"
@@ -410,46 +412,42 @@ def build_vertical_decision_prompt(
     )
     target_verticals = ", ".join(f"`{name}`" for name in sorted(research_target_verticals)) or "(none)"
     return (
-        "Choose the capability VERTICAL and independent execution WORKFLOW. "
+        "Choose VERTICAL and, independently, WORKFLOW. "
         "A vertical is a stable reusable staged capability, not a Planner DAG.\n\n"
-        "This is a read-only routing decision: inspect only when the fit is unclear; "
-        "no task work or Live View.\n\n"
-        "Pick the closest existing capability by the requested action, not incidental "
-        "words in filenames or logs. Prefer a matching formal project domain, then a "
-        "built-in, then a candidate project domain. Use `new` only when none fits; a "
-        "new vertical needs only a reusable slug. The Host owns its generic candidate "
-        "lifecycle; do not propose or revise stage names.\n\n"
-        "`domain` may only name an optional research domain listed above. An existing "
-        "project domain is itself a vertical: put its exact slug in `vertical` and "
-        "leave `domain` empty. Do not combine `vertical=research` with a project-domain "
-        "slug in `domain`.\n\n"
-        "Choose workflow separately: `direct` for one coherent Engineer work package; "
-        "coupled output files produced and reviewed together remain one package. "
-        "Reviewer is Host-invoked after Engineer and never creates an execution stage. "
-        "`staged` requires multiple dependent Engineer phases or independently decided "
-        "work tracks. "
+        "Decide by reading only; inspect if the fit is unclear. Do no task work or Live View.\n\n"
+        "Pick the closest existing capability by requested action, not words in filenames "
+        "or logs. Prefer a matching formal project domain, then a built-in, then a "
+        "candidate domain. Use `new` only if none fits; it needs only a reusable slug. "
+        "Host manages candidate development; do not propose or revise stage names.\n\n"
+        "`domain` names only a listed optional research domain. For an existing project "
+        "domain, put its exact slug in `vertical` and leave `domain` empty. Never pair "
+        "`vertical=research` with a project-domain slug in `domain`.\n\n"
+        "Choose workflow separately: `direct` for one coherent Engineer task, including "
+        "related output files produced and reviewed together. Host invokes Reviewer "
+        "after Engineer; review creates no execution stage. `staged` requires dependent "
+        "Engineer phases or independently decided work tracks. "
         "Repository work is usually `software`, but accelerator runtime, inference "
         "serving, communication, memory-movement, and kernel performance campaigns are "
         "`kernel_engineering`; Argus runtime changes are `argus_maintenance`; papers and "
         "surveys are `research`; original mathematical work is `math`.\n\n"
-        "Use exploratory for a well-defined investigation, publishable only when "
-        "publication-level original work is requested, and doctoral only when explicit. "
-        "For research_direction_mode, use only `broad` when the direction is still "
-        "being discovered or `locked` when the operator fixed the hypothesis/direction; "
+        "Use exploratory for well-defined investigation, publishable for requested original work "
+        "at publication level, and doctoral only when explicit. "
+        "For research_direction_mode, use `broad` while discovering a direction or "
+        "`locked` for an operator-fixed hypothesis/direction; "
         "values such as `exploratory`, `publishable`, or `experimental_validation` are "
-        "invalid. Never infer a venue. Set independent review on by default. Set "
-        "`require_independent_review=false` only for an authorized deliberate waiver "
-        "and state why in `rationale`.\n\n"
+        "invalid. Never infer a venue. Independent review defaults on; "
+        "`require_independent_review=false` needs an authorized deliberate waiver "
+        "explained in `rationale`.\n\n"
         + _RESEARCH_DELIVERABLE_ROUTING
+        + RESEARCHER_VOICE + "\n\n"
         + "State `choice`, `vertical`, `domain`, `workflow_mode`, and `rationale` "
-        "at the end. Omit `execution_task` for a standalone existing route; include it only when "
-        "the task text must be rewritten as standalone instructions or for a new "
-        "vertical. Preserve stated paths, commands, order, and stopping conditions. "
-        "For a research-target vertical, always add `research_target_level` and "
-        "`research_direction_mode`; add `target_venue` only when the operator stated "
-        "one. For a new vertical also add `confidence`, "
-        "`precise_constraints`, `exclusions`, and `ambiguities`; copy these from the "
-        "operator's words.\n\n"
+        "at the end. Include `execution_task` only to make the instructions standalone "
+        "or for a new vertical; omit it for a standalone existing route. Preserve "
+        "paths, commands, order, and stopping conditions. "
+        "For research-target verticals, add `research_target_level` and "
+        "`research_direction_mode`; use `target_venue` only if operator-stated. "
+        "For a new vertical add `confidence`, `precise_constraints`, `exclusions`, "
+        "and `ambiguities` from the operator's words.\n\n"
         + decision_footer_instruction(
             "CHOICE=existing\n"
             "VERTICAL=software\n"
@@ -460,8 +458,7 @@ def build_vertical_decision_prompt(
             "RATIONALE=brief reason"
         )
         + "\n"
-        "Never invent a constraint; a missing number is an ambiguity, not permission "
-        "to guess.\n\n"
+        "Do not invent constraints or missing numbers; report uncertainty.\n\n"
         "## Built-in verticals\n"
         f"{menu}\n\n"
         "## Optional research domains\n"
@@ -485,7 +482,7 @@ def build_research_target_prompt(
 ) -> str:
     """Ask the Manager for a success bar when research routing is fixed."""
     return (
-        "You are the MANAGER of a targeted research pipeline. The operator has "
+        "You are the Manager guiding research toward a stated goal. The operator has "
         "already fixed the vertical; do not revisit routing. Decide only the "
         "requested research success bar from the task below. Judge what outcome "
         "the operator requires, not the problem's apparent difficulty.\n\n"
@@ -496,7 +493,7 @@ def build_research_target_prompt(
         "nontrivial technical core, verified originality, "
         "formal/causal grounding, and field-level significance.\n"
         "- doctoral: success explicitly requires doctoral/thesis-level original "
-        "research. Reports, literature review, finite checks, and local validation "
+        "research. Reports, literature review, finite checks, and local verification "
         "alone are not success.\n"
         "Do not choose exploratory merely because it makes an honest negative report "
         "easy to close. A request to develop a submission-quality paper, find a "
@@ -507,6 +504,7 @@ def build_research_target_prompt(
         f"{(task or '').strip()}\n\n"
         "Allowed levels for this vertical: "
         f"{', '.join(supported_levels)}.\n\n"
+        + RESEARCHER_VOICE + "\n\n"
         + decision_footer_instruction(
             "RESEARCH_TARGET_LEVEL=publishable\n"
             "RATIONALE=brief reason tied to the requested success bar"
@@ -525,7 +523,7 @@ def build_plan_prompt(
     obj = (objective or "").strip()
     first_rule = (
         "1. Inspect the repository with tools as needed to ground the plan, but "
-        "do NOT implement the fix or modify production artifacts. The tool "
+        "do NOT implement the fix or modify production files. The tool "
         "working directory is already the repository root; use focused "
         "relative-path reads/searches and never search the filesystem root."
         if allow_repository_inspection
@@ -548,6 +546,7 @@ def build_plan_prompt(
         "## Objective\n"
         f"{obj}\n\n"
         "## Your answer\n"
+        f"{RESEARCHER_VOICE}\n\n"
         "Answer as a numbered list, one step per line, each as "
         "`<imperative title> — <what/why>`:\n"
         "1. <imperative title> — <what/why>\n"
@@ -591,7 +590,7 @@ def build_prompt_rewrite_prompt(
         "operator's words is a failed rewrite: the team would have to guess the "
         "same things the operator left implicit. Organise the request so it "
         "states, in the operator's own terms:\n"
-        "- the outcome wanted and the concrete deliverable it implies;\n"
+        "- the outcome wanted and the concrete work it requires;\n"
         "- the subject/scope, grounded in the real project below when given "
         "(actual paths, files, components) rather than left abstract;\n"
         "- what would count as done, derived from what the operator asked for.\n\n"
@@ -625,6 +624,7 @@ def build_prompt_rewrite_prompt(
         'over an open prompt ("what coverage do you want?").\n\n'
         "Keep it compact — a short paragraph or a few bullet lines a teammate "
         "can act on, not a specification document.\n\n"
+        f"{RESEARCHER_VOICE}\n\n"
     )
     if context:
         prompt += f"## Project context (advisory, may be empty)\n{context}\n\n"
@@ -663,6 +663,7 @@ def build_skill_placements_prompt(
         f"Candidate verticals: {', '.join(candidates) or '(none)'}\n\n"
         "Skills to classify (input data):\n"
         f"{json.dumps(list(skills), ensure_ascii=False)}\n\n"
+        f"{RESEARCHER_VOICE}\n\n"
         "State one block per input skill, in this shape, exactly one row per "
         "input:\n"
         "CANDIDATE_ID=<exact input candidate_id>\n"
@@ -699,14 +700,14 @@ def manager_workspace_capability_prompt(
         f"{json.dumps(context, ensure_ascii=False, sort_keys=True)}\n"
         "The canonical workspace is where project outputs live and where every render path "
         "is resolved. The state_root is private session memory/control state; never "
-        "select a state-root file as a workspace artifact. You own the right-side "
+        "select a state-root file as a project output. You own the right-side "
         "content choice. Inspect current files, choose the most useful existing "
-        "artifact, or author a presentation under the presentation_root. For an "
+        "file, or author a presentation under the presentation_root. For an "
         "operator-facing chat turn, inspect or change the view with:\n"
         f"- `{tool} status`\n"
         f"- `{tool} set --title <title> --reason <reason> --path <workspace-relative-path> [--path ...]`\n"
         f"- `{tool} clear`\n"
-        "Path order is presentation order and the first selected Manager artifact "
+        "Path order is presentation order and the first file selected by Manager "
         "is the default right-side content. Never claim rendering succeeded until "
         "the tool returns `ok: true` with `exists: true`.\n"
     )
@@ -788,31 +789,31 @@ def build_stage_decision_prompt(
     source_instructions = ""
     if review_source == "engineer_self_review":
         source_instructions = (
-            "The Engineer used the self-review allowed for small tasks. The empty "
-            "Reviewer checklist is therefore expected, not a failure. The waiver "
-            "itself is not evidence: inspect CHECKPOINT.md and the project artifacts "
-            "against every applicable current-stage checklist item. You "
+            "The Engineer used the self-review allowed for small tasks. No "
+            "Reviewer assessment is therefore expected. The waiver "
+            "itself is not evidence: inspect CHECKPOINT.md and the project outputs "
+            "against every applicable requirement for the current stage. You "
             "MAY ADVANCE when that evidence genuinely satisfies the stage; HOLD "
             "otherwise. A final-submission or explicitly independent-review task "
-            "still requires a real Reviewer checklist.\n"
+            "still requires a real Reviewer assessment.\n"
         )
 
     open_ended_block = ""
     if open_ended:
         if allow_rollback:
             open_ended_block = (
-                "## Open-ended campaign contract\n"
+                "## Open-ended research objective\n"
                 "This is an open-ended campaign. Completing the final-stage checkpoint "
                 "does not complete the operator objective by itself. If the original "
                 "objective remains unresolved and the Planner identifies further "
                 "high-impact work that belongs to an earlier stage, ROLL BACK to the "
                 "earliest stage needed for that work. HOLD only when no legal work can "
                 "run yet; do not mark the campaign complete merely because a report or "
-                "review artifact exists.\n\n"
+                "review file exists.\n\n"
             )
         else:
             open_ended_block = (
-                "## Open-ended campaign contract\n"
+                "## Open-ended research objective\n"
                 "This is an open-ended forward-only campaign. Completing a checkpoint "
                 "does not complete the operator objective by itself. Keep the current "
                 "stage and schedule any remaining repair work there; never move to an "
@@ -835,23 +836,23 @@ def build_stage_decision_prompt(
         rollback_sentence = (
             "ROLL BACK only when earlier-stage evidence is genuinely broken; "
             if allow_rollback
-            else "never move this forward-only pipeline backward; "
+            else "never move this sequence of stages backward; "
         )
         mission_scope_block = (
             "## Mission-scope arbitration\n"
             "The Reviewer found that the proposed next work cannot legally run "
-            "as another Engineer round under the current mission contract. "
+            "as another Engineer round within the current mission's agreed scope. "
             "Reviewer advice is not authorization. HOLD the current stage when "
             "the repair belongs in this stage so Planner can replace the mission; "
             f"{rollback_sentence}"
-            "ADVANCE only when the current checklist is independently complete. "
+            "ADVANCE only when independent review finds every current-stage requirement met. "
             "Do not rewrite implementation details yourself.\n\n"
         )
 
     wait_resolution_block = ""
     if planner_waiting:
         operator_boundary = (
-            "This blocker requires fresh OPERATOR action. You cannot create or "
+            "Work cannot resume without fresh OPERATOR action. You cannot create or "
             "expand operator authorization; set `resolves_wait=false`. "
             if operator_action_required
             else "You may set `resolves_wait=true` only when PRE-EXISTING operator "
@@ -869,9 +870,9 @@ def build_stage_decision_prompt(
             f"{operator_boundary}"
             "If this Manager ruling identifies such existing authority or changed "
             "evidence, keep the stage on HOLD and set `resolves_wait=true` so "
-            "the Planner immediately replans without the stale waiting contract. "
-            "This does not advance the stage or certify its checklist. Set "
-            "`resolves_wait=false` when the blocker remains unchanged.\n\n"
+            "the Planner immediately replans without the outdated reason for waiting. "
+            "This does not advance the stage or establish that its requirements are met. Set "
+            "`resolves_wait=false` when the obstacle remains unchanged.\n\n"
         )
 
     actions = "ADVANCE, HOLD, ROLLBACK, or COMPLETE" if allow_rollback else (
@@ -894,7 +895,7 @@ def build_stage_decision_prompt(
     completion_rule = (
         "- COMPLETE at the current stage when the independently reviewed direct "
         "objective is fully satisfied. Do not ADVANCE merely because later stages "
-        "exist; they are outside this direct deliverable. Open-ended campaigns never "
+        "exist; they are outside this direct request. Open-ended campaigns never "
         "complete automatically.\n"
         if allow_early_completion
         else (
@@ -903,10 +904,13 @@ def build_stage_decision_prompt(
         )
     )
     return (
-        "Decide the pipeline stage from the evidence below. Reviewer and Planner "
-        f"advise; Manager chooses {actions}.\n\n"
+        "Decide how the work should proceed from the evidence below. Reviewer and Planner "
+        f"advise; Manager chooses {actions}. ADVANCE (`advance`) means move on to the "
+        "next stage; HOLD (`hold`) means stay and keep working; ROLLBACK (`rollback`) "
+        "means go back to an earlier stage when allowed; COMPLETE (`complete`) means "
+        "finish the objective.\n\n"
         "## Your decision\n"
-        "- ADVANCE only when the checklist is supported by concrete evidence.\n"
+        "- ADVANCE only when concrete evidence supports the stage's requirements.\n"
         "- HOLD when work remains or evidence is unclear, including when Reviewer asks "
         "for replanning inside this stage.\n"
         + rollback_rule
@@ -916,10 +920,11 @@ def build_stage_decision_prompt(
         "- Judge the science, not the bookkeeping. A missing or outdated note for the "
         "next stage, review file, template detail, or file marker is repair work for the "
         "next round; it is never by itself a reason to HOLD a stage whose work "
-        "the Reviewer accepted.\n"
-        "- Evidence scale is part of the science. A checklist can be nominally met by a "
+        "the Reviewer found sound.\n"
+        "- Evidence scale is part of the science. The stated requirements may appear met by a "
         "handful of items or one model; when the objective's claim is broader than what "
         "was measured, HOLD for the wider evidence rather than ADVANCE on a narrow win.\n\n"
+        + RESEARCHER_VOICE + "\n\n"
         + decision_footer_instruction(
             "ACTION=hold\n"
             "TARGET_STAGE=current stage\n"
@@ -927,7 +932,7 @@ def build_stage_decision_prompt(
             "whether the stage moves, and what happens next; do not repeat status tokens"
         )
         + (
-            "\nInclude `resolves_wait` when a Planner waiting contract is active."
+            "\nInclude `resolves_wait` when the Planner is waiting for a stated condition."
             if planner_waiting
             else ""
         )
@@ -956,7 +961,7 @@ def build_stage_decision_prompt(
         f"Current stage: `{current_stage}`\n"
         f"Legal ADVANCE targets (later stages): {legal_advance}\n"
         f"{rollback_targets}"
-        "## Current-stage checklist\n"
+        "## What the current stage requires\n"
         f"{checklist_md}\n\n"
         "## Latest completion evidence\n"
         f"source: {review_source}\n"
@@ -1009,7 +1014,7 @@ def build_project_completion_report_prompt(
         "Use the operator's language. Lead with whether the requested project "
         "completed. Then summarize the complete stage progression, including the "
         "purpose and outcome of every stage, important rollbacks or repeated work, "
-        "the final deliverables/evidence, and any remaining limitations the operator "
+        "the final outputs and evidence, and any remaining limitations the operator "
         "should know. Do not omit an earlier stage merely because the final stage "
         "passed. Do not expose internal protocol field names or raw JSON.\n\n"
         f"## Operator objective\n{objective.strip() or '(not recorded)'}\n\n"

@@ -1,5 +1,8 @@
 # Argus 当前 Prompt 中文人工审阅译本
 
+> **已过期**：role prompts（manager/planner/reviewer/engineer 及 task_contract）于
+> 2026-09-06 重写为自然的研究者语言，本译本尚未跟进，待对照源码重新翻译。
+
 > 本文件只呈现模型实际看到的自然语言 Prompt 的简体中文译文，不包含 Python 实现代码。
 > `{{...}}` 表示运行时替换的任务、状态、vertical、证据、配置或项目路径。
 > 字段名、枚举、机器协议字面量、命令和路径保持源码原样。

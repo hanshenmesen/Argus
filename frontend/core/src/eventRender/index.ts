@@ -218,6 +218,16 @@ export function renderEvent(event: TypedArgusEvent, context: RenderContext): Ren
       const target = stringField(event, 'target_stage') || stringField(event, 'stage') || stringField(event, 'current_stage');
       return model('manager', 'role.manager', '🧭', `${stringField(event, 'action')}${target ? ` → ${target}` : ''} ${clean(stringField(event, 'reason'), context.density === 'full' ? 140 : 120)}`, 'info');
     }
+    case 'life.research.second_reading': {
+      const role = roleFor(event, 'manager');
+      const supported = clean(stringField(event, 'supported'), 160);
+      const base = localized(context, 'reread the evidence and reworked the plan', '重读了证据并重排了计划');
+      return model(role, `role.${role}`, '📖', supported ? `${base} · ${supported}` : base, 'info');
+    }
+    case 'life.letter.written': {
+      const role = roleFor(event, 'manager');
+      return model(role, `role.${role}`, '✉', localized(context, 'wrote you a letter', '给你写了一封信'), 'accent');
+    }
     case 'life.planner.start':
       return model('planner', 'role.planner', '📋', `${localized(context, 'planning', '正在规划')} ${clean(stringField(event, 'objective'), context.density === 'full' ? 160 : 140)}`, 'accent');
     case 'life.planner.verdict': {

@@ -27,10 +27,10 @@ def test_research_vertical_bundles_visual_router_and_renderer() -> None:
     texts = dict(iter_vertical_skill_texts("research"))
     front, body = _front_and_body(texts["engineer/research-visualization-router.md"])
     assert set(front) == {"name", "description"}
-    assert front["name"] == "Research Visualization Router"
+    assert front["name"] == "Choosing how to draw a research figure"
     assert "image-2" in body
     assert "PPT Master" in body
-    assert "Paper Framework Figure Studio" in body
+    assert "Composing a conceptual paper figure" in body
     assert "manifest" not in body.lower()
     assert "hash" not in body.lower()
     assert "engineer/paper-framework-figure-studio.md" in texts
@@ -44,7 +44,7 @@ def test_router_keeps_image2_optional_and_non_semantic() -> None:
     assert "when configured" in content
     assert "non-claim-bearing" in content
     image2 = texts["engineer/paper-illustration-image2.md"].lower()
-    assert "absence never blocks the paper" in image2
+    assert "the paper can proceed without it" in image2
     assert "registration files" in image2
 
 
@@ -53,7 +53,7 @@ def test_router_requires_real_deterministic_figure1_fallback() -> None:
     _front, body = _front_and_body(texts["engineer/research-visualization-router.md"])
     content = body.lower()
 
-    assert "figure 1 is a paper deliverable" in content
+    assert "what figure 1 must show" in content
     assert "ppt master" in content
     assert "browser svg" in content
     assert "boxed\nparagraph or table" in content
@@ -66,7 +66,7 @@ def test_router_requires_real_deterministic_figure1_fallback() -> None:
     assert "final single- or double-column width" in studio_flat
     assert "PPT Master" in studio
     assert (
-        "Strict page-by-page visual acceptance happens once, in Review"
+        "The strict page-by-page visual judgment is made once, in Review"
         in studio_flat
     )
 
@@ -157,5 +157,5 @@ def test_concept_figures_leave_strict_acceptance_to_review() -> None:
     assert "source and final included export" in router
     assert "not a separate visual check" in router
     assert "Create only the editable figure source and the final" in studio
-    assert "Strict page-by-page visual acceptance happens once, in Review" in studio
+    assert "The strict page-by-page visual judgment is made once, in Review" in studio
     assert "visual-review\nfiles" in studio

@@ -1,9 +1,9 @@
 ---
-name: "Academic Paper Peer Review Benchmark"
-description: "Read-only scientific completeness pass inside the final integrated paper Review."
+name: "Reading the paper as a venue reviewer"
+description: "Assess scientific completeness during the final integrated paper Review, without editing the work."
 ---
 
-# Academic Paper Peer Review Benchmark
+# Reading the paper as a venue reviewer
 
 Review the current paper as a constructive top-venue area chair. Start with
 `paper/main.tex` and the rendered paper, then follow only direct
@@ -12,7 +12,7 @@ baselines, bibliography, figures, and primary sources.
 
 Do not edit files, recursively inspect project history, or require separate
 review reports. Return findings through the current Reviewer response; the
-integrated verdict is written only to `paper/REVIEW.md`.
+integrated judgment is written only to `paper/REVIEW.md`.
 
 ## Scientific assessment
 
@@ -31,7 +31,7 @@ integrated verdict is written only to `paper/REVIEW.md`.
 6. **Paper value** — the manuscript makes one confident positive argument rather
    than reporting development chronology or failed attempts.
 
-## Hard blockers
+## Problems that mean the paper does not hold yet
 
 - fabricated evidence or citations;
 - unresolved citations that support a material claim;
@@ -41,6 +41,7 @@ integrated verdict is written only to `paper/REVIEW.md`.
 - a thesis contradicted by the relevant results;
 - an incomplete or unreadable rendered paper.
 
-Return the strongest accept case, reject-level issues, and concrete repairs.
+Explain the strongest case for a venue reviewer to accept the paper, the
+issues that would justify rejection at the venue, and the concrete repairs.
 The visual and language passes run concurrently; after one Engineer applies all
 findings, the integrated Reviewer reassesses the repaired paper.

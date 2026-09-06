@@ -82,7 +82,7 @@ def test_figure_review_uses_good_enough_non_looping_standard() -> None:
         venue=EIGHT_PAGE_CONFERENCE,
     )
 
-    assert "good-looking-enough" in prompt
+    assert "visually good enough for publication should stand" in prompt
     assert "at most one targeted aesthetic repair" in prompt
     assert "Optional renderer metadata may help" in prompt
     assert "Wrong, reversed, missing, or unsupported arrows" in prompt

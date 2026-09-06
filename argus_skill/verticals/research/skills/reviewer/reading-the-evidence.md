@@ -1,15 +1,16 @@
 ---
-name: "Experiment Evidence Audit"
-description: "Read-only inspection of the code, configuration, evaluator, and raw evidence behind a research claim."
+name: "Reading the evidence behind a claim"
+description: "Read the code, configuration, evaluator, and raw evidence behind a research claim without changing them."
 ---
 
-# Experiment Evidence Audit
+# Reading the evidence behind a claim
 
 Use this inside Experiment or as part of the final scientific Review. Inspect
 the direct code path, explicit run configuration, evaluator, positive control,
-baseline execution, and raw result rows. Do not create an audit file.
+baseline execution, and raw result rows. Do not create a separate file to
+record the inspection.
 
-Block interpretation when:
+The evidence cannot yet support interpretation when:
 
 - the executed method differs from the claimed method;
 - gold or scorer information leaks into predictions;

@@ -145,10 +145,10 @@ def test_research_data_figures_have_one_renderer_path() -> None:
     assert "Any paper data/metric/result chart" in normalized_router
     assert (
         "Other conceptual or teaser figure | "
-        "Paper Framework Figure Studio"
+        "Composing a conceptual paper figure"
     ) in normalized_router
     assert (
-        "Method pipeline or architecture overview | Research SVG Pipeline"
+        "Method pipeline or architecture overview | Drawing the method in SVG"
     ) in normalized_router
 
 

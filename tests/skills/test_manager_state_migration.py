@@ -89,6 +89,7 @@ def test_split_research_import_does_not_materialize_handoff_in_source_worktree(
     assert migrate_legacy_manager_state(state_root, workdir) is True
 
     assert source.read_text(encoding="utf-8") == before
+    assert not (workdir / "RESEARCH_NOTES.md").exists()
     assert not (workdir / "HANDOFF.md").exists()
     imported = read_pipeline_state(state_root)
     assert imported["current_stage"] == "idea"

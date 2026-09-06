@@ -151,8 +151,8 @@ def test_research_advances_from_idea_to_experiment(tmp_path) -> None:
     state_root = tmp_path / "state"
     workdir = tmp_path / "worktree"
     workdir.mkdir()
-    (workdir / "HANDOFF.md").write_text(
-        "# HANDOFF — IDEA\n\nSelected idea.",
+    (workdir / "RESEARCH_NOTES.md").write_text(
+        "# Research notes — Idea stage\n\nSelected idea.",
         encoding="utf-8",
     )
     persist_vertical(state_root, "research", workflow_mode="staged")
