@@ -182,6 +182,9 @@ class RoundReviewerMixin:
                 narrative_snapshot_root=(
                     supervised_config.narrative_snapshot_root or None
                 ),
+                review_policy_context="\n".join(
+                    (objective, original_objective or objective, scope, *operator_messages)
+                ),
             ),
         )
         if preliminary_review is not None:
@@ -204,9 +207,13 @@ class RoundReviewerMixin:
                 for part in (
                     reviewer_background_context,
                     "## Independent final-paper passes\n"
-                    "These fresh read-only assessments are evidence for your integrated "
+                    "These current host-provided read-only assessments are evidence for your integrated "
                     "verdict. Resolve conflicts yourself; only your verdict controls the "
-                    "round and is persisted to paper/REVIEW.md. "
+                    "round and is persisted to paper/REVIEW.md. The host reuses PDF-only "
+                    "assessments only when their exact rendered input and policy match. "
+                    "Do not launch duplicate specialist passes or repeat a complete PDF "
+                    "inspection; use targeted checks for a concrete contradiction. Always "
+                    "independently check material changes to code, raw evidence, and claims. "
                     + authority_note
                     + "\n"
                     + preliminary_review.reason,

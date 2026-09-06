@@ -30,20 +30,27 @@ claim-critical references without recursively inspecting history.
 2. Run `narrative_edit` as a fresh-context Engineer operation. It selects and
    packages evidence for each section while preserving exact facts, complete
    coverage, the five-sentence/170-word abstract, and numerical captions.
-3. After the edit, run three independent read-only passes concurrently:
+3. After the edit, the host runs the independent read-only passes concurrently.
+   Engineer and integrated Reviewer must not spawn a duplicate review team:
    - `science_loss_check` compares before/after scientific completeness,
      meaning, and carriers;
-   - strict page-by-page visual quality inspects the current rendered paper;
+   - strict page-by-page visual quality inspects the isolated current PDF;
    - `cold_read` judges argument hierarchy and academic language from the
      isolated rendered PDF only.
-4. Give these internal findings to the normal integrated Reviewer. Only that
+   An identical verified before/after snapshot needs no semantic-loss model call.
+   The host may reuse PDF-only visual/cold-read assessments only for identical
+   rendered bytes and review policy. Scientific evidence and the integrated
+   verdict are always evaluated for the current round.
+4. Give these internal findings to the normal integrated Reviewer. Adjudicate
+   current supplied assessments; repeat an inspection only for a concrete
+   contradiction or changed input, using the smallest decisive check. Only that
    Reviewer controls the round and overwrites `paper/REVIEW.md`; preliminary
    passes create no project-visible report or history. Semantic-loss and cold-
    read findings begin in shadow mode: until calibration explicitly enables
    enforcement, they may guide or corroborate an existing review criterion but
    cannot be the sole reason to block.
-5. Have the Engineer resolve any scientific/readability conflict, recompile,
-   and repeat the post-edit passes before integrated certification.
+5. Have the Engineer resolve any scientific/readability conflict and recompile.
+   The host refreshes affected post-edit passes before integrated certification.
 
 All scientific, experiment, visual, and language defects are repaired inside
 Review. The stage never rolls back.

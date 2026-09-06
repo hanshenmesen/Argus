@@ -223,10 +223,13 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             id="review.parallel",
             statement=(
                 "Before narrative editing, preserve an immutable source/PDF snapshot in "
-                "internal mission state. After the fresh-context edit, run three independent "
+                "internal mission state. After the fresh-context edit, the host obtains independent "
                 "read-only passes in parallel: before/after scientific semantic-loss, strict "
                 "rendered visual quality, and a cold read whose isolated input contains only "
-                "the current rendered PDF. Keep pass results internal; the integrated Reviewer "
+                "the current rendered PDF. The host skips semantic loss for identical verified "
+                "snapshots and reuses PDF-only assessments only for identical input and policy. "
+                "Engineer and Reviewer must not spawn duplicate passes. Keep pass results "
+                "internal; the integrated Reviewer "
                 "records their adjudicated result only in `paper/REVIEW.md`. Until calibration "
                 "promotes them, new semantic-loss and cold-read diagnostics run in shadow mode "
                 "and cannot be the sole reason to block."

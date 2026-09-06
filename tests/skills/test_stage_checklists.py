@@ -24,6 +24,7 @@ from argus_skill.skills.stage_machine import (
 from argus_skill.skills.vertical_select import persist_vertical
 from argus_skill.verticals.research.prompt_policy import (
     active_context_paths,
+    active_research_context,
     render_role_prompt_fragment,
 )
 from argus_skill.verticals.research.stages import (
@@ -133,6 +134,10 @@ def test_review_uses_review_not_handoff_or_history(tmp_path: Path) -> None:
     )
 
     assert active_context_paths("review") == ("paper/REVIEW.md",)
+    # The live document is injected into the round delta, never the static
+    # policy fragment whose fingerprint controls Reviewer session reuse.
+    assert "CURRENT REVIEW" not in prompt
+    prompt += active_research_context("review", tmp_path)
     assert "CURRENT REVIEW" in prompt
     assert "OLD HANDOFF" not in prompt
     assert "OLD REPORT" not in prompt

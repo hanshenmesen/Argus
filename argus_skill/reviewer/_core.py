@@ -33,7 +33,7 @@ def _parallel_final_review_passes(
     runner: RunnerBackend,
     config: "ReviewerConfig",
 ) -> ReviewDecision | None:
-    """Run the three initial final-paper inspections on one immutable draft."""
+    """Obtain current specialist evidence; the integrated review still runs."""
     workdir = Path(config.artifact_root or config.working_dir or ".").resolve()
     state_root = Path(config.vertical_state_root or workdir).resolve()
     vertical = str(config.active_vertical or "").strip().lower()
@@ -87,6 +87,14 @@ def _parallel_final_review_passes(
                 next_action="Compile the current manuscript before the PDF-only cold read.",
             )
 
+    from ._paper_pass_cache import (
+        identical_snapshot_pair,
+        paper_pass_key,
+        pdf_sha256,
+    )
+
+    pdf_digest = pdf_sha256(workdir)
+    pdf_only_visual = (workdir / "paper" / "main.pdf").is_file()
     common = (
         "Read the current paper in read-only mode. Do not edit files. Start from "
         "paper/main.tex and its rendered output, then follow only direct references "
@@ -174,6 +182,49 @@ def _parallel_final_review_passes(
             ),
         }
 
+    # These two passes judge the rendered artifact. Isolating both makes their
+    # entire evidence boundary explicit, so reuse never hides changed code or
+    # raw evidence from the integrated scientific Reviewer.
+    if pdf_only_visual:
+        prompts["Visual"] = (
+            "Read only paper/main.pdf in this isolated read-only workspace. "
+            "Inspect every rendered page and every included figure and table at "
+            "publication scale. Reject visible overlap, clipping, overflow, connector "
+            "penetration, wrong arrows, unreadable labels, malformed tables, visually "
+            "misleading plots, abnormal whitespace, broken float placement, or "
+            "inconsistent typography. Return concise pass/fail findings with page "
+            "locations. The integrated Reviewer separately checks scientific claims "
+            "against source code and raw evidence; do not launch other reviewers."
+        )
+    findings: dict[str, str] = {}
+    if comparison is not None and identical_snapshot_pair(comparison):
+        prompts.pop("ScientificLoss", None)
+        findings["ScientificLoss"] = (
+            "No semantic-loss call was needed: the host verified identical before/after "
+            "manuscript source and rendered bytes. This proves no edit-induced loss, "
+            "not scientific correctness; independently judge the current work."
+        )
+    pass_keys = {
+        label: paper_pass_key(
+            pdf_digest=pdf_digest, prompt=prompt, config=config, runner=runner
+        )
+        for label, prompt in prompts.items()
+        if label in {"Visual", "ColdRead"} and pdf_digest
+    }
+    for label, key in pass_keys.items():
+        if not key:
+            continue
+        previous = config.paper_pass_cache.get(label)
+        if previous is not None and previous[0] == key:
+            findings[label] = previous[1]
+            del prompts[label]
+    if not prompts:
+        return ReviewDecision(
+            status="continue",
+            reason="\n\n".join(f"{label}: {text}" for label, text in findings.items()),
+            next_action="Adjudicate these current assessments in the integrated review.",
+        )
+
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
@@ -220,12 +271,16 @@ def _parallel_final_review_passes(
 
     workspace_stack = ExitStack()
     working_dirs = {label: workdir for label in prompts}
-    if comparison is not None:
+    if pdf_only_visual or comparison is not None:
         from ..core.manuscript_narrative_runtime import isolated_pdf_workspace
 
-        working_dirs["ColdRead"] = workspace_stack.enter_context(
-            isolated_pdf_workspace(workdir)
-        )
+        for label in ("Visual", "ColdRead"):
+            if label in prompts and (label == "ColdRead" or pdf_only_visual):
+                working_dirs[label] = workspace_stack.enter_context(
+                    isolated_pdf_workspace(workdir)
+                )
+                if pdf_sha256(working_dirs[label]) != pdf_digest:
+                    pass_keys.pop(label, None)
 
     def inspect(label: str) -> Any:
         return gateway_run_exec(
@@ -344,10 +399,10 @@ def _parallel_final_review_passes(
             premium_requests=premium_requests,
             **usage,
         )
-    findings = {
+    findings.update({
         label: "\n".join(results[label].agent_messages or []).strip()
         for label in prompts
-    }
+    })
     empty = next((label for label, text in findings.items() if not text), "")
     if empty:
         return ReviewDecision(
@@ -359,9 +414,15 @@ def _parallel_final_review_passes(
             premium_requests=premium_requests,
             **usage,
         )
+    # A provider may have run while another process updated the artifact.
+    # Keep its result for adjudication, but never reuse it under the new bytes.
+    if pdf_digest and pdf_sha256(workdir) == pdf_digest:
+        for label, key in pass_keys.items():
+            if key:
+                config.paper_pass_cache[label] = (key, findings[label])
     return ReviewDecision(
         status="continue",
-        reason="\n\n".join(f"{label}: {findings[label]}" for label in prompts),
+        reason="\n\n".join(f"{label}: {text}" for label, text in findings.items()),
         next_action=(
             "Apply the scientific, visual, and reader-facing findings to the paper, "
             "recompile it, then request the integrated final review."
@@ -445,6 +506,12 @@ class ReviewerConfig:
     artifact_root: str | None = None
     vertical_state_root: str | None = None
     narrative_snapshot_root: str | None = None
+    review_policy_context: str = ""
+    # Host memory only: project/agent-writable artifacts cannot forge reuse.
+    # One latest entry per PDF-only pass; cached calls incur zero new usage.
+    paper_pass_cache: dict[str, tuple[str, str]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
 
 def _load_wiki_curator_skill_if_present(

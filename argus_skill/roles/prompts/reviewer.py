@@ -364,6 +364,13 @@ def render_reviewer_prompt(
         if review_libraries.block:
             matched_review_skill_block = review_libraries.block + "\n\n"
     stage = prompt_context.stage
+    research_context_block = ""
+    if prompt_context.vertical == "research" and operation == EVALUATE:
+        from ...verticals.research.prompt_policy import active_research_context
+
+        research_context_block = active_research_context(
+            stage, resolve_project_root(working_dir) if working_dir else _proot
+        )
     direct_workflow = resolve_workflow_mode(_proot) == "direct"
     _measured = not _requires_engineering_audit and os.environ.get(
         "ARGUS_SKILL_MEASURED_MODE", ""
@@ -706,7 +713,6 @@ def render_reviewer_prompt(
         + wiki_curator_skill_block
         + direct_memory_edit_block
         + matched_review_skill_block
-        + review_validity_block
         + stage_checklist
         + "\n\n"
         + rollback_block
@@ -725,6 +731,9 @@ def render_reviewer_prompt(
     # Reviewers receive this after the full static rubric every time.
     delta = (
         (_REEVALUATE_HEADER if resumed else "")
+        + research_context_block
+        + ("\n\n" if research_context_block else "")
+        + review_validity_block
         + search_altitude_block
         + f"{checkpoint_block}"
         + f"{escalate_block}"
@@ -756,6 +765,7 @@ def render_reviewer_prompt(
             "research_target": verification_instruction,
             "surprise_judgment": surprise_judgment_block,
             "manuscript_review_validity": review_validity_block,
+            "research_context": research_context_block,
             "objective_context": objective_context,
             "checkpoint": checkpoint_block,
             "execution_log_audit": engineer_log_audit_block,

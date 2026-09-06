@@ -116,7 +116,7 @@ def _stage_playbook_block(stage: str) -> str:
     )
 
 
-def _active_context_block(stage: str, project_root: Path | None) -> str:
+def active_research_context(stage: str, project_root: Path | None) -> str:
     if project_root is None:
         return ""
     paths = active_context_paths(stage)
@@ -154,8 +154,11 @@ def academic_paper_review_block() -> str:
         "Follow direct claim-critical references to executed code, explicit "
         "configuration, raw rows, the real evaluator, positive controls, strong "
         "same-information baselines, citations, "
-        "and primary sources, and inspect every rendered page and included figure and table "
-        "at publication size. Report scientific correctness and importance, rendered layout, visual "
+        "and primary sources. Use the host's current independent page-by-page and cold-read "
+        "assessments when supplied; do not launch duplicate passes or repeat their whole-paper "
+        "inspection. Resolve a concrete contradiction with a targeted check. When no current "
+        "assessment is supplied, inspect every rendered page, figure, and table at publication "
+        "size. Report scientific correctness and importance, rendered layout, visual "
         "quality, academic argument and language, and venue compliance. Do not load "
         "HANDOFF.md or recursively crawl old reports or history. Put all three results "
         "inside the verdict's `REASON=` value as "
@@ -194,7 +197,7 @@ def _planner_fragment(stage: str, project_root: Path | None) -> str:
         block
         for block in (
             _stage_playbook_block(stage),
-            _active_context_block(stage, project_root),
+            active_research_context(stage, project_root),
             _hardware_block_for_stage(stage),
             (
                 "## Planner responsibility\n"
@@ -233,7 +236,7 @@ def _engineer_fragment(
     narrative_edit = operation == "narrative_edit"
     # Narrative editing intentionally starts without review wording or history.
     # HANDOFF remains the complete evidence-role map even though the stage is Review.
-    context = _active_context_block(
+    context = active_research_context(
         "paper" if narrative_edit else stage,
         project_root,
     )
@@ -242,7 +245,8 @@ def _engineer_fragment(
         "Execute the current playbook directly. Use code, explicit configuration, raw "
         "outputs, figures, bibliography, manuscript source, and rendered output as work "
         "products. Do not create substitute handoffs or process reports, and do not "
-        "change stage state."
+        "change stage state. The host runs independent preliminary paper reviews after your "
+        "turn; do not spawn a second scientific, visual, or cold-read review team."
     )
     narrative_packaging = (
         _paper_narrative_packaging_block()
@@ -308,7 +312,6 @@ def _reviewer_fragment(
             "Any veto must name the exact lost reasoning step or its missing carrier. "
             "Do not edit either snapshot."
         )
-    context = _active_context_block(stage, project_root)
     if stage == "review" or scope == "final_submission":
         policy = academic_paper_review_block()
     else:
@@ -320,7 +323,9 @@ def _reviewer_fragment(
         )
     return "\n\n".join(
         block
-        for block in (_stage_playbook_block(stage), context, policy)
+        # Live HANDOFF/REVIEW contents belong to the Reviewer's round delta, not
+        # this static policy fragment used to decide whether a session resumes.
+        for block in (_stage_playbook_block(stage), policy)
         if block
     )
 
@@ -357,7 +362,7 @@ def render_role_prompt_fragment(
         return (
             _stage_playbook_block(normalized_stage)
             + "\n\n"
-            + _active_context_block(normalized_stage, project_root)
+            + active_research_context(normalized_stage, project_root)
             + "\n\n## Forward-only stage authority\n"
             "Research stages never roll back. Hold the current stage and schedule "
             "repairs there, or advance when its checklist is satisfied."
@@ -367,6 +372,7 @@ def render_role_prompt_fragment(
 
 __all__ = [
     "academic_paper_review_block",
+    "active_research_context",
     "active_context_paths",
     "local_hardware_block",
     "render_role_prompt_fragment",
