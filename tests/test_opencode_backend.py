@@ -59,6 +59,27 @@ def test_opencode_full_auto_uses_explicit_full_access_agent() -> None:
     assert config["agent"]["argus-full-access"]["permission"] == {"*": "allow"}
 
 
+@pytest.mark.parametrize("reasoning_effort", [None, "high", "max", "xhigh"])
+def test_opencode_ox_alpha_uses_stable_low_variant(reasoning_effort) -> None:
+    command = _runner()._build_opencode_command(
+        resume_thread_id=None,
+        options=RunnerOptions(
+            model="opencode/x-preview-f-free",
+            reasoning_effort=reasoning_effort,
+        ),
+    )
+
+    assert command[command.index("--variant") + 1] == "low"
+
+
+def test_opencode_no_tools_uses_restricted_agent_without_sandbox() -> None:
+    child_env = _runner()._child_env(RunnerOptions(disable_tools=True))
+
+    assert child_env is not None
+    config = json.loads(child_env["OPENCODE_CONFIG_CONTENT"])
+    assert config["agent"]["argus-no-tools"]["permission"] == {"*": "deny"}
+
+
 def test_opencode_defers_bare_model_to_its_own_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -144,8 +165,11 @@ def test_opencode_delivers_plain_prompt_on_stdin() -> None:
 
 
 def test_opencode_event_consumer_tracks_session_text_and_completion() -> None:
+    from argus_skill.agent_cli._event_consumers import _OpenCodeWriteState
+
     runner = _runner()
     messages: list[str] = []
+    write_state = _OpenCodeWriteState()
     state = runner._consume_opencode_event(
         event={
             "type": "text",
@@ -154,6 +178,7 @@ def test_opencode_event_consumer_tracks_session_text_and_completion() -> None:
         },
         thread_id=None,
         agent_messages=messages,
+        write_state=write_state,
         turn_completed=False,
         turn_failed=False,
         fatal_error=None,
@@ -166,6 +191,7 @@ def test_opencode_event_consumer_tracks_session_text_and_completion() -> None:
         },
         thread_id=state[0],
         agent_messages=messages,
+        write_state=write_state,
         turn_completed=state[1],
         turn_failed=state[2],
         fatal_error=state[3],
@@ -176,10 +202,13 @@ def test_opencode_event_consumer_tracks_session_text_and_completion() -> None:
 
 
 def test_opencode_tool_step_is_not_terminal() -> None:
+    from argus_skill.agent_cli._event_consumers import _OpenCodeWriteState
+
     state = _runner()._consume_opencode_event(
         event={"type": "step_finish", "part": {"reason": "tool-calls"}},
         thread_id=None,
         agent_messages=[],
+        write_state=_OpenCodeWriteState(),
         turn_completed=False,
         turn_failed=False,
         fatal_error=None,
@@ -190,10 +219,13 @@ def test_opencode_tool_step_is_not_terminal() -> None:
 
 @pytest.mark.parametrize("reason", ["length", "content-filter", "error", "unknown"])
 def test_opencode_non_success_finish_reasons_fail_closed(reason: str) -> None:
+    from argus_skill.agent_cli._event_consumers import _OpenCodeWriteState
+
     state = _runner()._consume_opencode_event(
         event={"type": "step_finish", "part": {"reason": reason}},
         thread_id=None,
         agent_messages=[],
+        write_state=_OpenCodeWriteState(),
         turn_completed=False,
         turn_failed=False,
         fatal_error=None,
@@ -478,6 +510,8 @@ def test_opencode_recovers_from_database_when_export_is_truncated(
 
 
 def test_opencode_nested_error_is_preserved() -> None:
+    from argus_skill.agent_cli._event_consumers import _OpenCodeWriteState
+
     state = _runner()._consume_opencode_event(
         event={
             "type": "error",
@@ -486,6 +520,7 @@ def test_opencode_nested_error_is_preserved() -> None:
         },
         thread_id=None,
         agent_messages=[],
+        write_state=_OpenCodeWriteState(),
         turn_completed=False,
         turn_failed=False,
         fatal_error=None,

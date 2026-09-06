@@ -11,6 +11,7 @@ import {
 } from './missionOutcome.js';
 import type {
   ArtifactInfo,
+  DeliveryReceipt,
   EventMsg,
   MissionAchievement,
   MissionDagNode,
@@ -32,13 +33,27 @@ const N = (event: EventMsg, key: string): number | null => {
   return Number.isFinite(value) ? value : null;
 };
 
+export function formatMissionRouting(routing: MissionView['routing']): string {
+  const parts = [
+    routing.route ? routing.route.toUpperCase() : '',
+    routing.vertical,
+    routing.workflow_mode ? routing.workflow_mode.toUpperCase() : '',
+  ].filter(Boolean);
+  if (routing.lifetime === 'standing') parts.push('STANDING · OPEN-ENDED');
+  else if (routing.lifetime === 'bounded_increment') parts.push('BOUNDED INCREMENT');
+  else if (routing.lifetime === 'bounded' && routing.continuous) {
+    parts.push('BOUNDED · FINITE CONTINUOUS');
+  } else if (routing.lifetime) parts.push(routing.lifetime.toUpperCase());
+  return parts.join(' · ');
+}
+
 function copyView(view: MissionView): MissionView {
   return JSON.parse(JSON.stringify(view)) as MissionView;
 }
 
 export function emptyMissionView(): MissionView {
   return {
-    schema_version: 4,
+    schema_version: 6,
     bootstrapped: false,
     mission: {
       id: '',
@@ -54,6 +69,14 @@ export function emptyMissionView(): MissionView {
       campaign_elapsed_seconds: 0,
     },
     stage: { id: '', label: '' },
+    routing: {
+      route: '',
+      vertical: '',
+      workflow_mode: '',
+      lifetime: '',
+      continuous: false,
+      open_ended: false,
+    },
     round: { current: 0, max: 0 },
     active_role: '',
     roles: ROLE_NAMES.map((role) => ({ role, status: 'waiting', label: 'Waiting', updated_at: 0 })),
@@ -77,6 +100,7 @@ export function emptyMissionView(): MissionView {
     achievement: null,
     review: { status: '', reason: '', rejected_attempts: 0 },
     frontier: { change: '', summary: '', updated_at: 0 },
+    delivery: null,
     outcome: {},
     last_event_ts: 0,
     updated_at: 0,
@@ -200,6 +224,10 @@ export function reduceMissionViewEvent(view: MissionView, event: EventMsg): Miss
     view.mission.id = S(event, 'item_id') || S(event, 'intent_id');
     view.mission.title = S(event, 'objective').slice(0, 240);
     view.mission.objective = S(event, 'objective');
+    view.mission.summary = '';
+    view.mission.final_output = '';
+    view.mission.started_at = null;
+    view.mission.completed_at = null;
     view.mission.status = 'grounding';
     setRole(view, 'manager', 'active', 'Grounding project', ts);
     addTimeline(view, event, 'manager', 'Project grounding started', S(event, 'objective'));
@@ -208,7 +236,17 @@ export function reduceMissionViewEvent(view: MissionView, event: EventMsg): Miss
     view.mission.id = S(event, 'item_id');
     view.mission.title = S(event, 'objective').slice(0, 240);
     view.mission.objective = S(event, 'objective');
+    view.mission.summary = '';
+    view.mission.final_output = '';
+    view.mission.started_at = null;
+    view.mission.completed_at = null;
     view.mission.status = 'framed';
+    view.routing.route = S(event, 'route') || view.routing.route || 'team';
+    view.routing.vertical = S(event, 'vertical') || view.routing.vertical;
+    view.routing.workflow_mode = S(event, 'workflow_mode') || view.routing.workflow_mode;
+    view.routing.lifetime = S(event, 'lifetime') || view.routing.lifetime;
+    if ('continuous' in event) view.routing.continuous = event.continuous === true;
+    if ('open_ended' in event) view.routing.open_ended = event.open_ended === true;
     const currentStage = S(event, 'current_stage');
     const stages = Array.isArray(event.stages) ? event.stages : [];
     if (currentStage) {
@@ -273,12 +311,22 @@ export function reduceMissionViewEvent(view: MissionView, event: EventMsg): Miss
       parent_branch_id: S(event, 'parent_branch_id') || null,
     };
     upsert(view.dag as Array<MissionDagNode & Record<string, unknown>>, 'id', id, node as MissionDagNode & Record<string, unknown>);
-    setRole(view, 'planner', 'done', 'Research branch added', ts);
-    addTimeline(view, event, 'planner', 'Research branch added', node.title, 'info');
+    const label = view.routing.vertical === 'research' ? 'Research branch added' : 'Task added';
+    setRole(view, 'planner', 'done', label, ts);
+    addTimeline(view, event, 'planner', label, node.title, 'info');
     addRoleWork(view, event, 'planner', 'task', node.title || 'Task added', node.objective, 'pending');
   } else if (type === EVENT_TYPES.LIFE_PLANNER_VERDICT) {
     const projectDone = Boolean(event.project_done);
-    const label = projectDone ? 'Project reviewed' : 'Planning complete';
+    const delivery = projectDone && event.delivery && typeof event.delivery === 'object' && !Array.isArray(event.delivery)
+      ? JSON.parse(JSON.stringify(event.delivery)) as DeliveryReceipt
+      : null;
+    const label = delivery ? 'Task completed' : projectDone ? 'Project reviewed' : 'Planning complete';
+    if (delivery) {
+      view.delivery = delivery;
+      view.mission.status = 'complete';
+      view.mission.summary = delivery.summary || '';
+      view.mission.completed_at = ts;
+    }
     setRole(view, 'planner', 'done', label, ts);
     addTimeline(view, event, 'planner', label, S(event, 'reason'), projectDone ? 'success' : 'neutral');
     addRoleWork(view, event, 'planner', 'verdict', label, S(event, 'reason'), projectDone ? 'done' : 'planned');
@@ -289,6 +337,7 @@ export function reduceMissionViewEvent(view: MissionView, event: EventMsg): Miss
     addRoleWork(view, event, 'planner', 'waiting', 'Planner waiting', detail, 'waiting');
   } else if (type === EVENT_TYPES.LIFE_MISSION_STARTED) {
     view.review = { status: '', reason: '', rejected_attempts: 0 };
+    view.delivery = null;
     view.mission.campaign_started_at ??= ts;
     view.mission = {
       ...view.mission,
@@ -318,9 +367,13 @@ export function reduceMissionViewEvent(view: MissionView, event: EventMsg): Miss
     if (
       role === 'engineer'
       && ['assistant_message', 'agent_message', 'message'].includes(kind)
+      && event.final_delivery === true
+      && view.mission.started_at != null
+      && view.mission.completed_at == null
+      && ts >= view.mission.started_at
+      && (!event.item_id || S(event, 'item_id') === view.mission.id)
     ) {
-      const candidate = visibleAgentText(event.text);
-      if (candidate) view.mission.final_output = candidate;
+      view.mission.final_output = visibleAgentText(event.text);
     }
     const detail = S(event, 'action_summary') || S(event, 'text');
     if (detail && !isReasoning(event) && !isStructuredAgentPayload(event)) {
@@ -489,15 +542,26 @@ export function reduceMissionViewEvent(view: MissionView, event: EventMsg): Miss
     const presentation = type === EVENT_TYPES.LIFE_MISSION_FAILED
       ? missionOutcomePresentation({ ...event, outcome_class: 'failed', status: S(event, 'status') || 'failed', success: false })
       : missionOutcomePresentation(event);
+    const finalOutput = 'final_output' in event
+      ? S(event, 'final_output')
+      : S(event, 'item_id') === view.mission.id
+        && view.mission.started_at != null
+        && (view.mission.completed_at == null || view.mission.completed_at === ts)
+        ? view.mission.final_output || ''
+        : '';
     view.mission.id = S(event, 'item_id') || view.mission.id;
     view.mission.title = S(event, 'title') || view.mission.title;
     view.mission.objective = S(event, 'objective') || view.mission.objective;
     view.mission.summary = S(event, 'summary');
-    view.mission.final_output = visibleAgentText(event.final_output)
-      || view.mission.final_output
-      || '';
+    view.mission.final_output = finalOutput;
     view.mission.status = presentation.missionStatus;
     view.mission.completed_at = ts;
+    const delivery = event.delivery;
+    if (event.success === true && delivery && typeof delivery === 'object' && !Array.isArray(delivery)) {
+      view.delivery = JSON.parse(JSON.stringify(delivery));
+    } else if (event.success !== true) {
+      view.delivery = null;
+    }
     view.outcome = missionOutcomeDimensions(event);
     setRole(
       view,
@@ -542,6 +606,14 @@ function mergeSnapshot(view: MissionView, snapshot: Snapshot, artifacts: Artifac
     || view.mission.id
     || !['', 'idle'].includes(view.mission.status),
   );
+  if (snapshot.continuous?.enabled) {
+    view.routing.route = view.routing.route || 'team';
+    view.routing.continuous = true;
+    view.routing.open_ended = snapshot.continuous.open_ended === true;
+    view.routing.lifetime = view.routing.open_ended
+      ? 'standing'
+      : view.routing.lifetime || 'bounded';
+  }
   const objective = selected?.objective
     || selected?.title
     || (snapshot.continuous?.enabled ? snapshot.continuous.objective : '')
@@ -555,6 +627,16 @@ function mergeSnapshot(view: MissionView, snapshot: Snapshot, artifacts: Artifac
     else if (!view.mission.title) view.mission.title = objective.split('\n')[0].slice(0, 240);
   }
   if (active) {
+    if (
+      active.id !== view.mission.id
+      || (active.started_ts != null && active.started_ts !== view.mission.started_at)
+      || view.mission.completed_at != null
+    ) {
+      view.mission.summary = '';
+      view.mission.final_output = '';
+      view.mission.started_at = active.started_ts ?? null;
+      view.mission.completed_at = null;
+    }
     view.mission.id = active.id;
     view.mission.status = 'working';
     view.mission.started_at = view.mission.started_at ?? active.started_ts ?? null;
@@ -620,6 +702,7 @@ function mergeSnapshot(view: MissionView, snapshot: Snapshot, artifacts: Artifac
       kind: artifact.kind,
       why: artifact.why,
       exists: artifact.exists,
+      storage_path: artifact.storage_path,
       source: artifact.source,
     });
   });
@@ -672,18 +755,20 @@ export function projectMissionView(
   view.storage.wiki_retired_bytes_saved ??= 0;
   view.learned_wiki_pages ??= [];
   view.role_work ??= [];
+  view.delivery ??= null;
   view.outcome ??= {};
   const seedTs = view.last_event_ts;
   // The snapshot is a baseline. Events newer than mission_view.last_event_ts
   // are authoritative and must not be overwritten by an older backlog/role
   // projection that happened to arrive in the same refresh.
   const missionContext = mergeSnapshot(view, snapshot, artifacts);
-  events
+  const orderedEvents = [...events]
+    .sort((left, right) => Number(left.ts ?? 0) - Number(right.ts ?? 0));
+  orderedEvents
     .filter((event) => event.ts == null || Number(event.ts) > seedTs)
-    .sort((left, right) => Number(left.ts ?? 0) - Number(right.ts ?? 0))
     .forEach((event) => reduceMissionViewEvent(view, event));
   if (!view.mission.final_output) {
-    view.mission.final_output = recoverMissionFinalOutput(events, view.mission.id);
+    view.mission.final_output = recoverMissionFinalOutput(orderedEvents, view.mission);
   }
   finalizeSnapshot(view, snapshot, artifacts, missionContext);
   return view;
@@ -693,42 +778,17 @@ export function projectMissionView(
  * dedicated ``final_output`` field.  The compact snapshot can be newer than
  * the REST event window, so inspect that window explicitly instead of relying
  * on the incremental reducer to replay older rows. */
-function recoverMissionFinalOutput(events: EventMsg[], missionId: string): string {
-  let completionIndex = -1;
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (canonicalEventType(event.type) !== EVENT_TYPES.LIFE_MISSION_COMPLETED) continue;
-    if (missionId && S(event, 'item_id') !== missionId) continue;
-    completionIndex = index;
-    break;
-  }
-  if (completionIndex < 0) return '';
-
-  let startIndex = -1;
-  for (let index = completionIndex - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (canonicalEventType(event.type) !== EVENT_TYPES.LIFE_MISSION_STARTED) continue;
-    if (missionId && S(event, 'item_id') !== missionId) continue;
-    startIndex = index + 1;
-    break;
-  }
-  if (startIndex < 0) return '';
-
-  let output = '';
-  let finalOutput = '';
-  for (let index = startIndex; index < completionIndex; index += 1) {
-    const event = events[index];
-    if (canonicalEventType(event.type) !== EVENT_TYPES.ENGINEER_PROGRESS) continue;
-    const role = S(event, 'agent_layer') || S(event, 'actor');
-    const kind = S(event, 'kind');
-    if (!['engineer', 'main'].includes(role)) continue;
-    if (!['assistant_message', 'agent_message', 'message'].includes(kind)) continue;
-    const candidate = visibleAgentText(event.text);
-    if (!candidate) continue;
-    output = candidate;
-    if (event.final_delivery === true) finalOutput = candidate;
-  }
-  return finalOutput || output;
+function recoverMissionFinalOutput(events: EventMsg[], mission: MissionView['mission']): string {
+  if (!mission.id || ['working', 'queued', 'grounding', 'framed'].includes(mission.status)) return '';
+  const recovered = events.reduce(reduceMissionViewEvent, emptyMissionView()).mission;
+  if (
+    recovered.id !== mission.id
+    || recovered.started_at == null
+    || recovered.completed_at == null
+    || (mission.started_at != null && recovered.started_at !== mission.started_at)
+    || (mission.completed_at != null && recovered.completed_at !== mission.completed_at)
+  ) return '';
+  return recovered.final_output || '';
 }
 
 /**

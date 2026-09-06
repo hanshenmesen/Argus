@@ -1,9 +1,14 @@
 ---
 name: "Kernel Benchmark Measurement Integrity — Isolation Is the Whole Game"
-description: "{'A hard-won, worked trace on why a \"speedup\" can be a total illusion — concurrent evals on shared hardware inflate the measured latency 3-5x and corrupt the optimization signal. How to think about WHERE the measured time comes from (GPU clocks locked, CPU shared), why per-GPU isolation isn\\'t enough for CPU-heavy kernels, and the only fix that makes numbers official-comparable': 'isolated serial measurement. Never report a speedup measured under load.'}"
+description: "A hard-won, worked trace on why a \"speedup\" can be a total illusion — concurrent evals on shared hardware inflate the measured latency 3-5x and corrupt the optimization signal. How to think about WHERE the measured time comes from (GPU clocks locked, CPU shared), why per-GPU isolation isn't enough for CPU-heavy kernels, and the only fix that makes numbers official-comparable: isolated serial measurement. Never report a speedup measured under load."
 ---
 
 # Kernel Benchmark Measurement Integrity
+
+This discipline applies when a performance result will be claimed or retained. It is
+not a gate on research or exploratory screening. One clean isolated run is enough to
+screen an idea; do not require multiple seeds or repeated trials until a candidate is
+promising enough to certify.
 
 **The single most expensive lesson:** a kernel's measured latency is only meaningful
 if it was measured in **isolation**. Measure it while other work shares the hardware

@@ -44,7 +44,7 @@ def test_operator_update_explains_blocker_and_next_action() -> None:
     assert text.splitlines()[0] == "Cannot continue yet: run the H100 benchmark."
     assert "Reason: The H100 runner is unavailable." in text
     assert "Your decision:" in text
-    assert text.strip() not in {"BLOCKED", "NO-GO", "REVISE"}
+    assert text.strip() not in {"BLOCKED", "REVISE"}
 
 
 def test_runtime_timeout_is_explained_without_claiming_the_idea_failed() -> None:

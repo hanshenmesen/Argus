@@ -120,6 +120,37 @@ def test_copilot_manager_acp_defaults_on_with_explicit_rollback(monkeypatch) -> 
     assert runner._acp_enabled("simple-1") is False
 
 
+def test_prewarm_honors_acp_rollback_and_label_override(monkeypatch) -> None:
+    runner = AgentCliRunner("copilot-bin", backend=BACKEND_COPILOT)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        copilot_acp,
+        "get_client",
+        lambda *_args, **_kwargs: calls.append("started"),
+    )
+
+    monkeypatch.setenv("ARGUS_SKILL_COPILOT_ACP", "0")
+    runner.prewarm_acp_client(
+        run_label="manager-frontdoor-classify",
+        model="gpt-5.4-mini",
+        reasoning_effort="low",
+        lean=True,
+        cwd="/workspace",
+    )
+    assert calls == []
+
+    monkeypatch.setenv("ARGUS_SKILL_COPILOT_ACP", "1")
+    monkeypatch.setenv("ARGUS_SKILL_COPILOT_ACP_LABELS", "simple-1")
+    runner.prewarm_acp_client(
+        run_label="manager-frontdoor-classify",
+        model="gpt-5.4-mini",
+        reasoning_effort="low",
+        lean=True,
+        cwd="/workspace",
+    )
+    assert calls == []
+
+
 def test_front_door_label_takes_acp_and_never_spawns_cli(monkeypatch) -> None:
     monkeypatch.setenv("ARGUS_SKILL_COPILOT_ACP", "1")
     acp_proc = _FakeAcpProc()
@@ -152,7 +183,7 @@ def test_front_door_label_takes_acp_and_never_spawns_cli(monkeypatch) -> None:
             "--acp",
             "--no-custom-instructions",
             "--disable-builtin-mcps",
-            "--available-tools=",
+            "--available-tools=__argus_no_tools__",
         ]
     ]
     assert any(w.get("method") == "session/prompt" for w in acp_proc.written)
@@ -193,7 +224,7 @@ def test_lean_acp_failure_does_not_fall_back_to_full_context_cli(
         "--acp",
         "--no-custom-instructions",
         "--disable-builtin-mcps",
-        "--available-tools=",
+        "--available-tools=__argus_no_tools__",
     ]]
 
 
@@ -228,7 +259,7 @@ def test_manager_fast_route_takes_lean_acp_and_never_spawns_cli(monkeypatch) -> 
         "low",
         "--no-custom-instructions",
         "--disable-builtin-mcps",
-        "--available-tools=",
+        "--available-tools=__argus_no_tools__",
     ]]
 
 

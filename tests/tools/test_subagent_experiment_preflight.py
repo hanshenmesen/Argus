@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 import time
 from pathlib import Path
 
@@ -9,11 +11,13 @@ from argus_skill.tools.subagent._experiment_preflight import (
     release_experiment_launch_claim,
 )
 
+PYTHON = shlex.quote(sys.executable)
+
 
 def test_preflight_rejects_missing_local_input(tmp_path: Path) -> None:
     rejected, concern = experiment_launch_preflight(
         task_id="missing-input",
-        command="python worker.py --tasks benchmarks/missing.jsonl",
+        command=f"{PYTHON} worker.py --tasks benchmarks/missing.jsonl",
         cwd=str(tmp_path),
         run_dir=None,
     )
@@ -29,7 +33,7 @@ def test_preflight_rejects_existing_stop_file(tmp_path: Path) -> None:
 
     rejected, concern = experiment_launch_preflight(
         task_id="stopped",
-        command="python -c 'print(1)'",
+        command=f"{PYTHON} -c 'print(1)'",
         cwd=str(tmp_path),
         run_dir=str(run_dir),
     )
@@ -38,7 +42,7 @@ def test_preflight_rejects_existing_stop_file(tmp_path: Path) -> None:
     assert "STOP file is present" in concern
 
 
-def test_preflight_reconciles_stale_running_status(tmp_path: Path) -> None:
+def test_preflight_reconciles_ownerless_running_status(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     status_path = run_dir / "status.json"
@@ -49,20 +53,19 @@ def test_preflight_reconciles_stale_running_status(tmp_path: Path) -> None:
 
     rejected, concern = experiment_launch_preflight(
         task_id="relaunch",
-        command="python -c 'print(1)'",
+        command=f"{PYTHON} -c 'print(1)'",
         cwd=str(tmp_path),
         run_dir=str(run_dir),
-        stale_after_seconds=10,
     )
 
     assert rejected is False
     assert concern == ""
     status = json.loads(status_path.read_text(encoding="utf-8"))
     assert status["state"] == "failed"
-    assert status["error"] == "stale running status reconciled before relaunch"
+    assert status["error"] == "running status has no live owner; reconciled before relaunch"
 
 
-def test_preflight_refuses_ambiguous_recent_running_status(tmp_path: Path) -> None:
+def test_preflight_reconciles_recent_ownerless_running_status(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "status.json").write_text(
@@ -72,20 +75,19 @@ def test_preflight_refuses_ambiguous_recent_running_status(tmp_path: Path) -> No
 
     rejected, concern = experiment_launch_preflight(
         task_id="duplicate",
-        command="python -c 'print(1)'",
+        command=f"{PYTHON} -c 'print(1)'",
         cwd=str(tmp_path),
         run_dir=str(run_dir),
-        stale_after_seconds=60,
     )
 
-    assert rejected is True
-    assert "without a registered live owner" in concern
+    assert rejected is False
+    assert concern == ""
 
 
 def test_preflight_allows_remote_dataset_identifier(tmp_path: Path) -> None:
     rejected, concern = experiment_launch_preflight(
         task_id="remote-data",
-        command="python -c 'print(1)' --data allenai/c4",
+        command=f"{PYTHON} -c 'print(1)' --data allenai/c4",
         cwd=str(tmp_path),
         run_dir=None,
     )
@@ -97,7 +99,7 @@ def test_preflight_allows_remote_dataset_identifier(tmp_path: Path) -> None:
 def test_preflight_understands_env_unset_option(tmp_path: Path) -> None:
     rejected, concern = experiment_launch_preflight(
         task_id="env-unset",
-        command="env -u ARGUS_SKILL_VERTICAL python -c 'print(1)'",
+        command=f"env -u ARGUS_SKILL_VERTICAL {PYTHON} -c 'print(1)'",
         cwd=str(tmp_path),
         run_dir=None,
     )
@@ -113,7 +115,7 @@ def test_preflight_does_not_misresolve_inputs_after_shell_cd(tmp_path: Path) -> 
 
     rejected, concern = experiment_launch_preflight(
         task_id="shell-cd",
-        command="cd nested && python worker.py --tasks tasks.jsonl",
+        command=f"cd nested && {PYTHON} worker.py --tasks tasks.jsonl",
         cwd=str(tmp_path),
         run_dir=None,
     )
@@ -126,13 +128,13 @@ def test_run_directory_claim_is_atomic_across_tasks(tmp_path: Path) -> None:
     run_dir = tmp_path / "shared-run"
     first_rejected, _ = experiment_launch_preflight(
         task_id="first",
-        command="python -c 'print(1)'",
+        command=f"{PYTHON} -c 'print(1)'",
         cwd=str(tmp_path),
         run_dir=str(run_dir),
     )
     second_rejected, second_concern = experiment_launch_preflight(
         task_id="second",
-        command="python -c 'print(1)'",
+        command=f"{PYTHON} -c 'print(1)'",
         cwd=str(tmp_path),
         run_dir=str(run_dir),
     )
@@ -148,7 +150,7 @@ def test_run_directory_claim_is_atomic_across_tasks(tmp_path: Path) -> None:
     )
     retry_rejected, retry_concern = experiment_launch_preflight(
         task_id="second",
-        command="python -c 'print(1)'",
+        command=f"{PYTHON} -c 'print(1)'",
         cwd=str(tmp_path),
         run_dir=str(run_dir),
     )

@@ -39,19 +39,24 @@ def test_checkpoint_handoff_discipline_present_for_paper_mission():
     )
     assert "## This turn" in out
     assert "pure reading" in out.lower()
-    assert "CHECKPOINT.md is the only role-maintained cross-round handoff file" in out
+    assert "CHECKPOINT.md is the only file you maintain to carry context between rounds" in out
     assert "one coherent, verifiable increment" not in out
 
 
 def test_turn_discipline_present_even_for_nonpaper_task():
     # The bounded-progress contract is universal (it guards context growth for
-    # any mission), not gated on the paper-objective heuristic.
+    # any mission), not gated on the paper-objective heuristic. Engineer used to
+    # be told not to spawn subagents, which -- next to a 24-call ceiling and no
+    # authority to re-plan -- left wide work with nowhere to go but its own
+    # context. Delegation is now the way that ceiling is respected.
     out = _prompt("Refactor the data loader and add unit tests.")
     assert "## This turn" in out
     assert "do not write planning/spec/brief" in out.lower()
     assert "initialize git" in out.lower()
     assert "commit" in out.lower()
-    assert "spawn subagents" in out.lower()
+    assert "planner owns the campaign plan" in out.lower()
+    assert "delegate wide" in out.lower()
+    assert "the answer, not the transcript" in out.lower()
 
 
 def test_long_experiment_protocol_is_in_every_engineer_turn():
@@ -64,10 +69,12 @@ def test_long_experiment_protocol_is_in_every_engineer_turn():
     )
 
     for out in (full, compact):
-        assert "launch a supervised subagent" in out
-        assert "supervised subagent" in out.lower()
-        assert "foreground shell execution" in out.lower()
-        assert "polling" in out.lower()
+        assert "argus_skill.tools.subagent submit" in out
+        assert "--mode direct" in out
+        assert "--mode supervised" in out
+        assert "launch a supervised subagent" not in out
+        assert "session-owned background shell" in out.lower()
+        assert "do not poll in the foreground" in out.lower()
 
 
 def test_engineer_must_not_spawn_a_subagent_to_impersonate_reviewer():
@@ -82,11 +89,25 @@ def test_engineer_must_not_spawn_a_subagent_to_impersonate_reviewer():
     assert "yield" in out.lower()
 
 
+def test_performance_claims_require_causal_attribution() -> None:
+    full = _prompt("Diagnose the data throughput bottleneck.")
+    compact = SkillLoop._build_engineer_prompt(
+        task="Diagnose the data throughput bottleneck.",
+        skill_text="",
+        next_action="Continue the causal diagnosis.",
+        include_static=False,
+    )
+
+    for out in (full, compact):
+        assert "Performance root-cause/bottleneck/replacement claims need" in out
+        assert "hot-path/live-resource evidence plus timing/profiling or controlled A/B" in out
+
+
 def test_engineer_does_not_create_extra_handoff_packets():
     out = _prompt("Continue the implementation across rounds.")
 
-    assert "only role-maintained cross-round handoff file" in out
-    assert "do not create handoff or evidence packets" in out
+    assert "only file you maintain to carry context between rounds" in out
+    assert "do not create separate summary or evidence packets" in out
     assert "compile/type-check" not in out
     assert "git ls-files --error-unmatch" not in out
 
@@ -101,10 +122,11 @@ def test_engineer_surfaces_operator_only_blockers_to_host():
     )
 
     for out in (full, compact):
-        assert "OPERATOR_QUESTION=" in out
-        assert "OPERATOR_OPTIONS=" in out
+        assert "operator_question" in out
+        assert "operator_options" in out
+        assert "MILESTONE_STATUS=done" in out
         assert "parks the task" in out or "Never keep opening fresh rounds" in out
 
 
 def test_engineer_fixed_prompt_stays_token_efficient():
-    assert len(_prompt("Refactor the data loader and add unit tests.")) < 2_300
+    assert len(_prompt("Refactor the data loader and add unit tests.")) < 2_800

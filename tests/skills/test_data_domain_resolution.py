@@ -15,6 +15,7 @@ from argus_skill.verticals import _data_domain as dd
 
 def _write_store(root, *, vertical: str, stages: dict) -> None:
     path = root / "research" / "CHECKLISTS.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps({"revision": 1, "vertical": vertical, "stages": stages}),
         encoding="utf-8",
@@ -27,12 +28,13 @@ def test_undecided_legacy_project_keeps_research_seed(tmp_path, monkeypatch):
     b = tmp_path / "proj_b"
     a.mkdir()
     b.mkdir()
-    # Two undecided legacy projects keep the historical research seed.
+    # Two undecided projects keep the current five-stage research seed.
     body_a = sc.format_full_pipeline_checklist(role="reviewer", project_root=a)
     body_b = sc.format_full_pipeline_checklist(role="reviewer", project_root=b)
     assert body_a == body_b
-    assert "research.literature" in body_a
-    assert "submission.readiness" in body_a
+    assert "idea.portfolio" in body_a
+    assert "review.terminal" in body_a
+    assert "submission.readiness" not in body_a
 
 
 def test_data_domain_resolves_and_seeds_first_stage(tmp_path, monkeypatch):
@@ -69,7 +71,7 @@ def test_current_stage_uses_data_domain_under_default_research_env(tmp_path, mon
         tmp_path, "robotics_sim", stages=["scope", "simulate", "measure", "report"]
     )
     vs.persist_vertical(tmp_path, "robotics_sim")
-    state_path = tmp_path / "research" / "PIPELINE_STATE.json"
+    state_path = tmp_path / ".argus" / "PIPELINE_STATE.json"
     payload = json.loads(state_path.read_text(encoding="utf-8"))
     payload["current_stage"] = "simulate"
     state_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -137,29 +139,23 @@ def test_data_domain_can_advance_past_first_stage(tmp_path, monkeypatch):
     assert sc.current_stage(tmp_path) == "build"  # advanced, not stuck on scope
 
 
-def test_store_custom_item_merges_with_seed_for_research_stage(tmp_path, monkeypatch):
-    # Read compatibility: a historical custom item MERGES with the seed for that
-    # stage (non-protected edits). Other stages keep their seed unchanged.
+def test_store_custom_item_is_ignored_for_five_stage_research(tmp_path, monkeypatch):
     monkeypatch.delenv("ARGUS_SKILL_VERTICAL", raising=False)
     vs.persist_vertical(tmp_path, "research")
     _write_store(
         tmp_path,
         vertical="research",
         stages={
-            "research": [
+            "idea": [
                 {
-                    "id": "research.custom",
+                    "id": "idea.custom",
                     "statement": "a custom research gate",
                     "evidence_hint": "x",
                 }
             ]
         },
     )
-    body = sc.format_stage_checklist("research", role="reviewer", project_root=tmp_path)
-    assert "research.custom" in body
-    # 'research.literature' is the seed; seeds are merged (not replaced) so it
-    # is still present alongside the custom item.
-    assert "research.literature" in body
-    # A stage with no store entry still renders its seed.
-    plan_body = sc.format_stage_checklist("plan", role="reviewer", project_root=tmp_path)
-    assert "plan.experiment" in plan_body
+    body = sc.format_stage_checklist("idea", role="reviewer", project_root=tmp_path)
+    assert "idea.custom" not in body
+    assert "idea.portfolio" in body
+    assert (tmp_path / "research" / "CHECKLISTS.json").is_file()

@@ -26,10 +26,12 @@ export function PendingReplyDialog({
   );
   const [optionId, setOptionId] = useState(defaultOption);
   const [note, setNote] = useState('');
+  const [validationError, setValidationError] = useState('');
   useEffect(() => {
     if (!open) return;
     setOptionId(defaultOption);
     setNote('');
+    setValidationError('');
   }, [defaultOption, open, reply?.id]);
   if (!reply) return null;
 
@@ -39,7 +41,13 @@ export function PendingReplyDialog({
     ? Boolean(note.trim())
     : Boolean(selected && (!selected.requires_note || note.trim()));
   const submit = () => {
-    if (!busy && canSubmit) onSubmit(freeform ? 'custom' : optionId, note.trim());
+    if (busy) return;
+    if (!canSubmit) {
+      setValidationError(t('decision.noteRequired'));
+      return;
+    }
+    setValidationError('');
+    onSubmit(freeform ? 'custom' : optionId, note.trim());
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (isImeComposing(event)) return;
@@ -83,7 +91,10 @@ export function PendingReplyDialog({
             <button
               key={option.id}
               type="button"
-              onClick={() => setOptionId(option.id)}
+              onClick={() => {
+                setOptionId(option.id);
+                setValidationError('');
+              }}
               disabled={busy}
               className={`w-full rounded-md border p-3 text-left ${
                 optionId === option.id ? 'border-blue bg-blue/5' : 'border-line bg-bg/30'
@@ -100,7 +111,10 @@ export function PendingReplyDialog({
           <textarea
             data-autofocus
             value={note}
-            onChange={(event) => setNote(event.target.value)}
+            onChange={(event) => {
+              setNote(event.target.value);
+              setValidationError('');
+            }}
             onKeyDown={onKeyDown}
             rows={3}
             disabled={busy}
@@ -108,15 +122,18 @@ export function PendingReplyDialog({
             className="w-full resize-y rounded-lg border border-line bg-bg px-3 py-2 text-sm leading-relaxed text-ink outline-none focus:border-blue disabled:opacity-60"
           />
         ) : null}
+        {validationError ? (
+          <p role="alert" className="text-xs text-err">{validationError}</p>
+        ) : null}
 
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-ink-faint">{t('decision.resumeHint')}</span>
           <div className="flex gap-2">
             <button type="button" onClick={onClose} disabled={busy} className="rounded-md px-3 py-2 text-xs text-ink-dim hover:bg-bg disabled:opacity-50">{t('decision.later')}</button>
-            <button type="button" onClick={submit} disabled={busy || !canSubmit} className="rounded-md bg-blue-deep px-3 py-2 text-xs font-medium text-white hover:bg-blue-deep/85 disabled:opacity-50">
+            <button type="button" onClick={submit} disabled={busy} className="rounded-md border border-blue/35 bg-blue/8 px-3 py-2 text-xs font-medium text-blue hover:border-blue-deep hover:bg-blue-deep hover:text-white disabled:opacity-50">
               {busy
                 ? t('decision.applying')
-                : freeform
+                : freeform || optionId === 'custom'
                   ? t('decision.sendAnswer')
                   : optionId === 'stop'
                     ? t('decision.stopCampaign')

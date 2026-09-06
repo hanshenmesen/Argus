@@ -24,7 +24,7 @@ conditions, and validity range explicit where they matter. Preserve exact
 inputs, software versions, seeds, commands, raw outputs, failures, and hardware
 or instrument context.
 
-Treat `research/PIPELINE_STATE.json` and other Manager-owned lifecycle files as
+Treat `.argus/PIPELINE_STATE.json` and other Manager-owned lifecycle files as
 control state, never as scientific model inputs. Do not freeze their whole-file
 hashes in source/model integrity guards: a legitimate Manager stage transition
 changes those bytes between model and execute. Hash immutable data, code, model,

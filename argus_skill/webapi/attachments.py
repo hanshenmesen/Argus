@@ -14,10 +14,10 @@ import os
 import re
 import stat
 import time
-from contextlib import suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from .artifacts import project_workspace
@@ -110,6 +110,9 @@ def upload_attachments(
         )
     _require_secure_attachment_storage()
 
+    if os.name == "nt":
+        return _upload_attachments_windows(workspace, sid, prepared)
+
     session_fd = _open_attachment_session_root(workspace, sid, create=True)
     written_ids: list[str] = []
     out: list[dict[str, Any]] = []
@@ -154,6 +157,9 @@ def resolve_attachment_refs(
     if workspace is None:
         raise FileNotFoundError(f"unknown project workdir for session {sid}")
     _require_secure_attachment_storage()
+
+    if os.name == "nt":
+        return _resolve_attachment_refs_windows(workspace, sid, refs)
 
     seen: set[str] = set()
     attachments: list[dict[str, Any]] = []
@@ -359,6 +365,8 @@ def _decode_text_attachment(content: bytes, original_name: str) -> str:
 
 
 def _require_secure_attachment_storage() -> None:
+    if os.name == "nt":
+        return
     if os.name != "posix":
         raise RuntimeError(
             "secure attachment storage requires POSIX dir_fd and O_NOFOLLOW support"
@@ -367,6 +375,324 @@ def _require_secure_attachment_storage() -> None:
         raise RuntimeError(
             "secure attachment storage requires O_NOFOLLOW and O_DIRECTORY support"
         )
+
+
+if os.name == "nt":  # pragma: no cover - definitions are exercised on Windows
+    import ctypes
+    from ctypes import wintypes
+
+    _WIN_FILE_READ_ATTRIBUTES = 0x0080
+    _WIN_GENERIC_READ = 0x80000000
+    _WIN_FILE_SHARE_READ = 0x00000001
+    _WIN_FILE_SHARE_WRITE = 0x00000002
+    _WIN_OPEN_EXISTING = 3
+    _WIN_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+    _WIN_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+    _WIN_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _WIN_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    _WIN_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class _WinByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    _WIN_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _WIN_CREATE_FILE = _WIN_KERNEL32.CreateFileW
+    _WIN_CREATE_FILE.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    _WIN_CREATE_FILE.restype = wintypes.HANDLE
+    _WIN_GET_FILE_INFORMATION = _WIN_KERNEL32.GetFileInformationByHandle
+    _WIN_GET_FILE_INFORMATION.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_WinByHandleFileInformation),
+    ]
+    _WIN_GET_FILE_INFORMATION.restype = wintypes.BOOL
+    _WIN_CLOSE_HANDLE = _WIN_KERNEL32.CloseHandle
+    _WIN_CLOSE_HANDLE.argtypes = [wintypes.HANDLE]
+    _WIN_CLOSE_HANDLE.restype = wintypes.BOOL
+
+
+@contextmanager
+def _windows_guard_path(path: Path, *, directory: bool) -> Iterator[None]:
+    """Hold a Windows path open and reject symlinks/junctions atomically.
+
+    Omitting ``FILE_SHARE_DELETE`` prevents the verified object from being
+    renamed or replaced while its guard is held. ``OPEN_REPARSE_POINT`` makes
+    the handle refer to the link/junction itself so the attribute check cannot
+    be raced into silently opening its target.
+    """
+    if os.name != "nt":  # pragma: no cover - Windows-only helper
+        yield
+        return
+    flags = _WIN_FILE_FLAG_OPEN_REPARSE_POINT
+    if directory:
+        flags |= _WIN_FILE_FLAG_BACKUP_SEMANTICS
+    handle = _WIN_CREATE_FILE(
+        str(path),
+        _WIN_FILE_READ_ATTRIBUTES,
+        _WIN_FILE_SHARE_READ | _WIN_FILE_SHARE_WRITE,
+        None,
+        _WIN_OPEN_EXISTING,
+        flags,
+        None,
+    )
+    if handle == _WIN_INVALID_HANDLE_VALUE:
+        raise OSError(ctypes.get_last_error(), f"cannot securely open {path}")
+    try:
+        info = _WinByHandleFileInformation()
+        if not _WIN_GET_FILE_INFORMATION(handle, ctypes.byref(info)):
+            raise OSError(ctypes.get_last_error(), f"cannot inspect {path}")
+        attributes = int(info.dwFileAttributes)
+        if attributes & _WIN_FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError(f"attachment storage must not traverse reparse points: {path}")
+        is_directory = bool(attributes & _WIN_FILE_ATTRIBUTE_DIRECTORY)
+        if directory and not is_directory:
+            raise ValueError(f"attachment storage path is not a directory: {path}")
+        if not directory and is_directory:
+            raise ValueError(f"attachment path is not a regular file: {path}")
+        yield
+    finally:
+        _WIN_CLOSE_HANDLE(handle)
+
+
+def _windows_guard_directory_chain(path: Path, stack: ExitStack) -> Path:
+    """Guard every existing directory component from the drive root down."""
+    absolute = path.expanduser().absolute()
+    anchor = Path(absolute.anchor)
+    current = anchor
+    for part in absolute.parts[1:]:
+        current = current / part
+        stack.enter_context(_windows_guard_path(current, directory=True))
+    return absolute
+
+
+def _windows_open_attachment_session_root(
+    workspace: Path,
+    sid: str,
+    *,
+    create: bool,
+    stack: ExitStack,
+) -> Path:
+    _validate_storage_component(sid)
+    current = _windows_guard_directory_chain(workspace, stack)
+    for part in (*ATTACHMENT_ROOT.parts, sid):
+        _validate_storage_component(part)
+        child = current / part
+        if create:
+            try:
+                child.mkdir()
+            except FileExistsError:
+                pass
+        stack.enter_context(_windows_guard_path(child, directory=True))
+        current = child
+    return current
+
+
+def _windows_write_file_atomic(parent: Path, name: str, content: bytes) -> None:
+    _validate_storage_component(name)
+    temporary = parent / f".{name}.tmp-{os.getpid()}-{time.time_ns()}-{uuid4().hex}"
+    target = parent / name
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOINHERIT", 0),
+        )
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = None
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _windows_store_prepared_attachment(
+    session_root: Path,
+    sid: str,
+    item: _PreparedAttachment,
+) -> dict[str, Any]:
+    attachment_root = session_root / item.attachment_id
+    attachment_root.mkdir()
+    try:
+        with _windows_guard_path(attachment_root, directory=True):
+            relative_path = _attachment_payload_relative_path(
+                sid, item.attachment_id, item.stored_name
+            )
+            _windows_write_file_atomic(attachment_root, item.stored_name, item.content)
+            payload = {
+                "schema_version": ATTACHMENT_SCHEMA_VERSION,
+                "session_id": sid,
+                "attachment_id": item.attachment_id,
+                "relative_path": relative_path,
+                "original_name": item.original_name,
+                "stored_name": item.stored_name,
+                "mime": item.mime,
+                "size_bytes": item.size_bytes,
+                "created_at": time.time(),
+            }
+            _windows_write_file_atomic(
+                attachment_root,
+                "metadata.json",
+                (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+                    "utf-8"
+                ),
+            )
+            return payload
+    except Exception:
+        _windows_remove_tree_nofollow(attachment_root)
+        raise
+
+
+def _windows_remove_tree_nofollow(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    attributes = int(getattr(info, "st_file_attributes", 0))
+    if attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        path.unlink()
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        path.unlink()
+        return
+    for child in path.iterdir():
+        _windows_remove_tree_nofollow(child)
+    path.rmdir()
+
+
+def _upload_attachments_windows(
+    workspace: Path,
+    sid: str,
+    prepared: Sequence[_PreparedAttachment],
+) -> dict[str, Any]:
+    written: list[Path] = []
+    out: list[dict[str, Any]] = []
+    with ExitStack() as stack:
+        session_root = _windows_open_attachment_session_root(
+            workspace, sid, create=True, stack=stack
+        )
+        try:
+            for item in prepared:
+                out.append(_windows_store_prepared_attachment(session_root, sid, item))
+                written.append(session_root / item.attachment_id)
+        except Exception:
+            for path in reversed(written):
+                _windows_remove_tree_nofollow(path)
+            raise
+    return {"attachments": out, "limits": attachment_limits()}
+
+
+def _windows_read_regular_file(
+    path: Path,
+    *,
+    display_path: str,
+    max_bytes: int,
+) -> bytes:
+    try:
+        with _windows_guard_path(path, directory=False):
+            with path.open("rb") as handle:
+                content = handle.read(max_bytes + 1)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(display_path) from exc
+    if len(content) > max_bytes:
+        raise ValueError(f"attachment file is too large to read safely: {display_path}")
+    return content
+
+
+def _windows_load_attachment_metadata(
+    session_root: Path,
+    sid: str,
+    attachment_id: str,
+) -> dict[str, Any]:
+    attachment_root = session_root / attachment_id
+    try:
+        with _windows_guard_path(attachment_root, directory=True):
+            raw = _windows_read_regular_file(
+                attachment_root / "metadata.json",
+                display_path=f"{attachment_id}/metadata.json",
+                max_bytes=_ATTACHMENT_METADATA_MAX_BYTES,
+            )
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except ValueError as exc:
+                raise ValueError(f"attachment metadata is malformed for {attachment_id}") from exc
+            if not isinstance(payload, dict):
+                raise ValueError(f"attachment metadata is malformed for {attachment_id}")
+            stored_name = _validate_metadata_payload(payload, sid, attachment_id)
+            content = _windows_read_regular_file(
+                attachment_root / stored_name,
+                display_path=_attachment_payload_relative_path(sid, attachment_id, stored_name),
+                max_bytes=MESSAGE_ATTACHMENT_MAX_BYTES,
+            )
+    except FileNotFoundError as exc:
+        raise ValueError(f"unknown attachment_id for this session: {attachment_id}") from exc
+    try:
+        expected_size = int(payload.get("size_bytes") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"attachment metadata is malformed for {attachment_id}") from exc
+    if len(content) != expected_size:
+        raise ValueError(f"attachment payload size mismatch for {attachment_id}")
+    payload.pop("sha256", None)
+    payload.pop("integrity", None)
+    return payload
+
+
+def _resolve_attachment_refs_windows(
+    workspace: Path,
+    sid: str,
+    refs: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    attachments: list[dict[str, Any]] = []
+    total_bytes = 0
+    with ExitStack() as stack:
+        try:
+            session_root = _windows_open_attachment_session_root(
+                workspace, sid, create=False, stack=stack
+            )
+        except OSError as exc:
+            first = str(refs[0].get("attachment_id") or "").strip()
+            raise ValueError(f"unknown attachment_id for this session: {first}") from exc
+        for ref in refs:
+            attachment_id = str(ref.get("attachment_id") or "").strip()
+            if not _ATTACHMENT_ID_RE.fullmatch(attachment_id):
+                raise ValueError(f"invalid attachment_id: {attachment_id!r}")
+            if attachment_id in seen:
+                continue
+            seen.add(attachment_id)
+            metadata = _windows_load_attachment_metadata(
+                session_root, sid, attachment_id
+            )
+            total_bytes += int(metadata["size_bytes"])
+            attachments.append(metadata)
+    if total_bytes > MESSAGE_ATTACHMENT_TOTAL_MAX_BYTES:
+        raise ValueError(
+            "combined attachments exceed the "
+            f"{MESSAGE_ATTACHMENT_TOTAL_MAX_BYTES} byte total limit"
+        )
+    return attachments
 
 
 def _attachment_dir_relative_path(sid: str, attachment_id: str) -> str:
@@ -545,7 +871,6 @@ def _fsync_directory(descriptor: int) -> None:
 
 
 def _load_attachment_metadata(session_fd: int, sid: str, attachment_id: str) -> dict[str, Any]:
-    attachment_fd: int | None = None
     try:
         attachment_fd = _open_verified_directory(
             session_fd,
@@ -566,15 +891,10 @@ def _load_attachment_metadata(session_fd: int, sid: str, attachment_id: str) -> 
             stored_name,
             display_path=_attachment_payload_relative_path(sid, attachment_id, stored_name),
         )
-    except ValueError:
-        raise
-    except FileNotFoundError as exc:
-        raise ValueError(f"attachment payload is unavailable for {attachment_id}") from exc
     except OSError as exc:
         raise ValueError(f"attachment payload is unavailable for {attachment_id}") from exc
     finally:
-        if attachment_fd is not None:
-            os.close(attachment_fd)
+        os.close(attachment_fd)
 
     if actual_size != expected_size:
         raise ValueError(f"attachment payload size mismatch for {attachment_id}")
@@ -597,7 +917,7 @@ def _read_attachment_metadata_payload(attachment_fd: int, attachment_id: str) ->
         raise ValueError(f"cannot read attachment metadata for {attachment_id}") from exc
     try:
         payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError(f"attachment metadata is malformed for {attachment_id}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"attachment metadata is malformed for {attachment_id}")
@@ -698,7 +1018,6 @@ def _remove_tree_nofollow(parent_fd: int, name: str, *, display_path: str) -> No
         os.unlink(name, dir_fd=parent_fd)
         return
 
-    child_fd: int | None = None
     try:
         child_fd = _open_verified_directory(parent_fd, name, display_path=display_path)
     except FileNotFoundError:
@@ -717,8 +1036,7 @@ def _remove_tree_nofollow(parent_fd: int, name: str, *, display_path: str) -> No
                 display_path=f"{display_path}/{entry.name}",
             )
     finally:
-        if child_fd is not None:
-            os.close(child_fd)
+        os.close(child_fd)
     try:
         os.rmdir(name, dir_fd=parent_fd)
     except FileNotFoundError:

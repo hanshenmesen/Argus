@@ -1,5 +1,4 @@
-import { useRef, type ReactNode } from 'react';
-import { useMagneticMotion } from '../lib/motion';
+import type { ReactNode } from 'react';
 
 /** A steady status dot. Motion is reserved for real loading operations. */
 export function StatusDot({ ok, pulse = false, title }: { ok: boolean; pulse?: boolean; title?: string }) {
@@ -48,8 +47,6 @@ export function Button({
   title?: string;
   className?: string;
 }) {
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  useMagneticMotion(buttonRef, variant !== 'danger' && !disabled);
   const styles: Record<string, string> = {
     ghost: 'brand-button-ghost',
     primary: 'brand-button-primary',
@@ -57,7 +54,6 @@ export function Button({
   };
   return (
     <button
-      ref={buttonRef}
       type="button"
       title={title}
       disabled={disabled}
@@ -73,7 +69,7 @@ export function Button({
 export function PanelHeader({ title, right }: { title: string; right?: ReactNode }) {
   return (
     <div className="panel-header flex min-h-11 items-center justify-between border-b px-4">
-      <span className="text-xs font-semibold uppercase tracking-[0.06em] text-ink-faint">{title}</span>
+      <span className="text-sm font-medium text-ink-dim">{title}</span>
       {right}
     </div>
   );

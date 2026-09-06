@@ -74,7 +74,10 @@ def test_nanogpt_requires_target_loss_and_8xh100_timing(tmp_path):
     assert validate_nanogpt_evidence(tmp_path) == result
 
 
-def test_metric_evidence_rejects_out_of_project_symlink(tmp_path):
+def test_metric_evidence_rejects_out_of_project_symlink(
+    tmp_path,
+    require_symlink_support,
+):
     outside = tmp_path.parent / "outside-results.csv"
     _csv(outside, ["val_bpb"], [{"val_bpb": "3.28"}])
     link = tmp_path / "attempts" / "a" / "results.csv"

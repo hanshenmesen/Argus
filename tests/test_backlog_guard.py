@@ -123,11 +123,13 @@ def test_decision_evidence_keeps_the_routing_facts() -> None:
         stage = "run"
         workflow_mode = "bounded"
         research_target_level = "publishable"
+        require_independent_review = True
 
     evidence = decision_evidence(_Decision())
 
     assert evidence["routed"] is True
     assert evidence["vertical"] == "research"
+    assert evidence["require_independent_review"] is True
     assert evidence["research_target_level"] == "publishable"
 
 
@@ -174,6 +176,7 @@ def test_guard_reuses_the_daemon_manager_instead_of_building_a_runner(
         "vertical": "software",
         "stage": "implementation",
         "workflow_mode": "staged",
+        "require_independent_review": True,
         "routed": True,
     }
     assert needs_manager_decision(routed) is False
@@ -208,6 +211,7 @@ def test_guard_uses_injected_supervisor_runner(tmp_path, monkeypatch) -> None:
     assert routed.manager_decision == {
         "vertical": "research",
         "workflow_mode": "bounded",
+        "require_independent_review": True,
         "routed": True,
     }
 
@@ -246,6 +250,7 @@ def test_guard_reroutes_unknown_persisted_vertical(tmp_path, monkeypatch) -> Non
     assert routed.manager_decision == {
         "vertical": "software",
         "workflow_mode": "direct",
+        "require_independent_review": True,
         "routed": True,
     }
 
@@ -268,7 +273,7 @@ def test_the_supervisor_routes_before_executing() -> None:
     from argus_skill.life.supervisor import _mission_execution
 
     source = inspect.getsource(_mission_execution)
-    claim_at = source.index("claim_next()")
+    claim_at = source.index("claim_next(")
     guard_at = source.index("ensure_manager_decision(")
     context_at = source.index("_prepare_mission_context(")
 

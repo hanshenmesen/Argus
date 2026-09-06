@@ -10,6 +10,10 @@ from typing import Callable, Sequence
 
 from ..core.runtime_identity import source_root
 
+PUBLIC_REPOSITORY = "https://github.com/lbx154/Argus.git"
+_PUBLIC_MAIN_REF = "refs/heads/main"
+_PUBLIC_UPSTREAM = "lbx154/Argus/main"
+
 
 class UpdateError(RuntimeError):
     """Raised when an update cannot be completed without risking local work."""
@@ -27,13 +31,13 @@ class UpdateResult:
         return self.before_revision != self.after_revision
 
 
-CommandRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
+CommandRunner = Callable[[Sequence[str], Path, float | None], subprocess.CompletedProcess[str]]
 
 
 def _run_command(
     command: Sequence[str],
     cwd: Path,
-    timeout: float,
+    timeout: float | None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -57,7 +61,7 @@ def _checked(
     command: Sequence[str],
     *,
     cwd: Path,
-    timeout: float = 30.0,
+    timeout: float | None = None,
 ) -> str:
     result = runner(command, cwd, timeout)
     if result.returncode != 0:
@@ -72,7 +76,7 @@ def update_source_checkout(
     runner: CommandRunner = _run_command,
     python_executable: str | None = None,
 ) -> UpdateResult:
-    """Fast-forward and reinstall the checkout that loaded this Argus process."""
+    """Fast-forward from public main and reinstall the loaded source checkout."""
     checkout = (root or source_root()).expanduser().resolve()
     if not (checkout / "pyproject.toml").is_file():
         raise UpdateError(
@@ -106,13 +110,13 @@ def update_source_checkout(
     )
     if not branch:
         raise UpdateError("source checkout is detached; switch to a branch first")
-    upstream = _checked(
-        runner,
-        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-        cwd=checkout,
-    )
     before = _checked(runner, ["git", "rev-parse", "HEAD"], cwd=checkout)
-    _checked(runner, ["git", "pull", "--ff-only"], cwd=checkout, timeout=300.0)
+    _checked(
+        runner,
+        ["git", "pull", "--ff-only", PUBLIC_REPOSITORY, _PUBLIC_MAIN_REF],
+        cwd=checkout,
+        timeout=None,
+    )
     after = _checked(runner, ["git", "rev-parse", "HEAD"], cwd=checkout)
 
     if before != after:
@@ -121,12 +125,12 @@ def update_source_checkout(
             runner,
             [executable, "-m", "pip", "install", "-e", str(checkout)],
             cwd=checkout,
-            timeout=900.0,
+            timeout=None,
         )
 
     return UpdateResult(
         root=checkout,
-        upstream=upstream,
+        upstream=_PUBLIC_UPSTREAM,
         before_revision=before,
         after_revision=after,
     )
@@ -140,18 +144,11 @@ def run_update() -> int:
         return 2
 
     if result.changed:
-        print(
-            "Argus updated "
-            f"{result.before_revision[:12]} -> {result.after_revision[:12]} "
-            f"from {result.upstream}."
-        )
+        print(f"Argus updated from {result.upstream}.")
         print("Run `argus` to activate the updated cockpit and safe daemon handoff.")
     else:
-        print(
-            f"Argus is already up to date at {result.after_revision[:12]} "
-            f"({result.upstream})."
-        )
+        print(f"Argus is already up to date ({result.upstream}).")
     return 0
 
 
-__all__ = ["UpdateError", "UpdateResult", "run_update", "update_source_checkout"]
+__all__ = ["PUBLIC_REPOSITORY", "UpdateError", "UpdateResult", "run_update", "update_source_checkout"]

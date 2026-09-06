@@ -1,6 +1,6 @@
 import { isImeComposing } from '../lib/ime';
 import { useEffect, useState } from 'react';
-import { api, type MetricsSnapshot, type Snapshot, type TrashEntry } from '../api';
+import { api, type MetricsSnapshot, type ResourceStatus, type Snapshot, type TrashEntry } from '../api';
 import { Modal, ModalHeader } from './Modal';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
@@ -18,6 +18,7 @@ import {
   faTrashArrowUp,
 } from '@fortawesome/free-solid-svg-icons';
 import { useI18n } from '../i18n';
+import { ResourceStatusView } from './ResourceStatus';
 
 type QuickAction = 'task' | 'nudge' | 'note' | 'plan';
 type OperationTab = 'work' | 'runtime' | 'system' | 'recovery';
@@ -64,6 +65,8 @@ export function OperationsModal({
   const [output, setOutput] = useState('');
   const [skillsOutput, setSkillsOutput] = useState('');
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
+  const [resources, setResources] = useState<ResourceStatus | null>(null);
+  const [resourceError, setResourceError] = useState('');
   const [trash, setTrash] = useState<TrashEntry[]>([]);
   const [trashTotal, setTrashTotal] = useState(0);
   const [trashQuery, setTrashQuery] = useState('');
@@ -82,6 +85,16 @@ export function OperationsModal({
       (error) => setOutput(errorText(error)),
     );
   }, [open, snap.session.cwd, snap.session.workdir]);
+
+  useEffect(() => {
+    if (!open || tab !== 'system') return;
+    setResources(null);
+    setResourceError('');
+    void api.resources().then(
+      setResources,
+      (error) => setResourceError(errorText(error)),
+    );
+  }, [open, tab]);
 
   const run = async (key: string, operation: () => Promise<unknown>, success: string | null) => {
     if (busy) return;
@@ -136,6 +149,7 @@ export function OperationsModal({
   const externalDaemon = snap.daemon.alive && snap.daemon.control_available === false;
   const replacements = snap.daemon_admission?.running_daemons ?? [];
   const actionIcon = action === 'task' ? faListCheck : action === 'nudge' ? faPaperPlane : action === 'note' ? faNoteSticky : faDiagramProject;
+  const actionLabel = t(`operations.action.${action}`);
   const searchTrash = async () => {
     await run('trash-search', async () => {
       const result = await api.trash(trashQuery);
@@ -148,32 +162,32 @@ export function OperationsModal({
   return (
     <Modal open={open} onClose={() => !busy && onClose()} label={t('operations.title')} width="max-w-5xl">
       <ModalHeader title={t('operations.title')} sub={snap.session.display_name || sid} />
-      <div className="flex gap-1 border-b border-line bg-panel px-4 py-2">
+      <div className="flex gap-1 overflow-x-auto border-b border-line bg-panel px-4 py-2 scroll-thin">
         {([
           ['work', t('operations.work'), faListCheck],
           ['runtime', t('operations.runtime'), faGear],
           ['system', t('operations.system'), faChartLine],
           ['recovery', t('operations.recovery'), faTrashArrowUp],
         ] as const).map(([value, label, icon]) => (
-          <button key={value} type="button" onClick={() => { setTab(value); setOutput(''); }} title={label} aria-label={label} className={`flex h-8 w-9 items-center justify-center rounded-md text-xs ${tab === value ? 'bg-blue-deep text-white' : 'text-ink-faint hover:bg-bg hover:text-ink'}`}><FontAwesomeIcon icon={icon} /></button>
+          <button key={value} type="button" onClick={() => { setTab(value); setOutput(''); }} aria-current={tab === value ? 'page' : undefined} className={`flex h-8 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-xs font-medium ${tab === value ? 'bg-blue/10 text-blue' : 'text-ink-faint hover:bg-bg hover:text-ink'}`}><FontAwesomeIcon icon={icon} /><span>{label}</span></button>
         ))}
       </div>
       <div className="grid max-h-[76vh] gap-3 overflow-y-auto bg-bg p-3 scroll-thin lg:grid-cols-2">
         {tab === 'work' ? <section className="rounded-lg border border-line bg-panel p-4 lg:col-span-2">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-dim">{t('operations.workInput')}</h3>
           <p className="mt-1 text-xs text-ink-faint">{t('operations.workHint')}</p>
-          <div className="mt-3 flex gap-1">
+          <div className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-4">
             {([
               ['task', faListCheck],
               ['nudge', faPaperPlane],
               ['note', faNoteSticky],
               ['plan', faDiagramProject],
             ] as const).map(([value, icon]) => (
-              <button key={value} type="button" onClick={() => setAction(value)} title={value} aria-label={value} className={`flex h-8 w-9 items-center justify-center rounded text-xs capitalize ${action === value ? 'bg-blue-deep text-white' : 'bg-bg text-ink-dim'}`}><FontAwesomeIcon icon={icon} /></button>
+              <button key={value} type="button" onClick={() => setAction(value)} aria-pressed={action === value} className={`flex h-9 items-center justify-center gap-2 rounded px-2 text-xs font-medium ${action === value ? 'bg-blue/10 text-blue' : 'bg-bg text-ink-dim hover:text-ink'}`}><FontAwesomeIcon icon={icon} /><span>{t(`operations.action.${value}`)}</span></button>
             ))}
           </div>
           <textarea value={text} onChange={(event) => setText(event.target.value)} rows={5} placeholder={action === 'plan' ? t('operations.planPlaceholder') : t('operations.actionPlaceholder', { action })} className="mt-3 w-full resize-y rounded border border-line bg-bg p-3 text-sm text-ink outline-none focus:border-blue" />
-          <button type="button" onClick={() => void runQuickAction()} disabled={!!busy || !text.trim()} title={action === 'plan' ? t('operations.previewPlan') : t('operations.submitAction', { action })} aria-label={action === 'plan' ? t('operations.previewPlan') : t('operations.submitAction', { action })} className="mt-2 flex h-9 w-9 items-center justify-center rounded bg-blue-deep text-xs font-medium text-white disabled:opacity-40">{busy === 'quick' ? '…' : <FontAwesomeIcon icon={actionIcon} />}</button>
+          <button type="button" onClick={() => void runQuickAction()} disabled={!!busy || !text.trim()} className="mt-2 flex h-9 items-center justify-center gap-2 rounded border border-blue/35 bg-blue/8 px-3 text-xs font-medium text-blue hover:border-blue-deep hover:bg-blue-deep hover:text-white disabled:opacity-40">{busy === 'quick' ? '…' : <><FontAwesomeIcon icon={actionIcon} /><span>{action === 'plan' ? t('operations.previewPlan') : t('operations.submitAction', { action: actionLabel })}</span></>}</button>
         </section> : null}
 
         {tab === 'runtime' ? <section className="rounded-lg border border-line bg-panel p-4 lg:col-span-2">
@@ -218,6 +232,8 @@ export function OperationsModal({
           </div>
           {metrics ? <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-bg p-3 font-mono text-[10px] text-ink-dim scroll-thin">{JSON.stringify({ web: metrics.web, provider: metrics.provider, cost_control: metrics.cost_control }, null, 2)}</pre> : null}
         </section> : null}
+
+        {tab === 'system' ? <ResourceStatusView status={resources} error={resourceError} /> : null}
 
         {tab === 'recovery' ? <section className="rounded-lg border border-line bg-panel p-4 lg:col-span-2">
           <div className="flex flex-wrap items-center gap-2">

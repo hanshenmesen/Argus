@@ -1,8 +1,8 @@
 """In-fleet agent-runner fallback for the text reviewer gates.
 
-The ``paper_infrastructure_review`` and ``academic_language_review`` gates ask a
-strict reviewer *model* to inspect manuscript PROSE (never figures) and return a
-JSON verdict. Historically they required an OpenAI-compatible ``reviewer`` model
+The ``paper_infrastructure_review`` and ``academic_language_review`` tools ask a
+reviewer *model* to inspect manuscript PROSE (never figures) and return an
+advisory review. Historically they required an OpenAI-compatible ``reviewer`` model
 API route (api_key + base_url + model). On fleets that drive their agents through
 an agent-CLI runner (e.g. copilot) instead of a raw model-API vault, that route
 is often unconfigured, which hard-blocked the paper at ``model_review_unavailable``.
@@ -19,7 +19,7 @@ hard-block behaviour (require the model-API route). The fallback uses the same
 canonical Reviewer role configuration as the resident fleet:
 
 * ``ARGUS_SKILL_REVIEWER_BACKEND`` — runner backend to drive the review
-  (``codex`` / ``claude`` / ``copilot`` / ``opencode`` / ``pi`` / ``grok``),
+  (``codex`` / ``claude`` / ``copilot`` / ``cursor`` / ``opencode`` / ``pi`` / ``grok``),
   with the normal shared/persisted
   fallback chain.
 * ``ARGUS_SKILL_REVIEWER_RUNNER_BIN`` — role-specific runner binary, falling
@@ -31,7 +31,6 @@ canonical Reviewer role configuration as the resident fleet:
 """
 from __future__ import annotations
 
-import math
 import os
 import shlex
 import time
@@ -44,11 +43,11 @@ _EFFORT_ENV = "ARGUS_SKILL_REVIEWER_REASONING_EFFORT"
 _TRUE_TOKENS = {"1", "true", "yes", "on"}
 
 _RUNNER_PREAMBLE = (
-    "You are running as a strict, independent academic paper reviewer. Follow "
-    "the review instructions below EXACTLY. Reply with ONLY the single JSON "
-    "object the instructions request — no prose before or after, no Markdown "
-    "code fence, and do NOT call any tools or run any commands. Base your "
-    "verdict solely on the manuscript text supplied in the instructions.\n\n"
+    "You are running as an independent academic paper reviewer. Follow the "
+    "review instructions below and answer in clear prose. Put material findings "
+    "in severity order, with a location, evidence, and suggested fix for each. "
+    "Finish with any short named lines the review instructions request. Do not "
+    "call tools or run commands; base the review solely on the supplied manuscript.\n\n"
 )
 
 
@@ -66,37 +65,18 @@ def runner_fallback_enabled(env: Mapping[str, str] | None = None) -> bool:
     return str(source.get(_DISABLE_ENV, "")).strip().lower() not in _TRUE_TOKENS
 
 
-def _resolve_reviewer_runner_bin(source: Mapping[str, str]) -> str | None:
-    candidates = (
-        "ARGUS_SKILL_REVIEWER_RUNNER_BIN",
-        "ARGUS_SKILL_RUNNER_BIN",
-    )
-    for name in candidates:
-        value = str(source.get(name, "") or "").strip()
-        if value:
-            return value
-    from ...core.knob_store import read_persisted_knobs
-
-    persisted = read_persisted_knobs()
-    for name in candidates:
-        value = str(persisted.get(name, "") or "").strip()
-        if value:
-            return value
-    return None
-
-
 def run_reviewer_prompt_via_runner(
     prompt: str,
     *,
     run_label: str,
     working_dir: str | None = None,
     env: Mapping[str, str] | None = None,
-    timeout: float,
+    timeout: float | None,
 ) -> tuple[str, str]:
     """Run the reviewer PROMPT through the fleet agent-CLI runner.
 
     Returns ``(raw_text, model_label)`` where ``raw_text`` is the model's reply
-    (expected to be the reviewer JSON object) and ``model_label`` records which
+    and ``model_label`` records which
     runner/model produced it. Raises on any failure so the caller can fall back
     to the historic ``model_review_unavailable`` block.
     """
@@ -111,16 +91,10 @@ def run_reviewer_prompt_via_runner(
         resolve_role_backend,
         resolve_role_model,
         resolve_role_reasoning_effort,
+        resolve_runner_bin_setting,
     )
     from ...core.models import RunnerOptions
     from ...core.run_gateway import run_exec as gateway_run_exec
-
-    try:
-        timeout_s = float(timeout)
-    except (TypeError, ValueError) as exc:
-        raise ReviewerRunnerError(f"invalid reviewer timeout {timeout!r}") from exc
-    if not math.isfinite(timeout_s) or timeout_s <= 0:
-        raise ReviewerRunnerError(f"reviewer timeout must be positive; got {timeout!r}")
 
     try:
         backend_name = normalize_runner_backend(
@@ -139,7 +113,11 @@ def run_reviewer_prompt_via_runner(
             env=source,
             default="high",
         )
-        runner_bin = _resolve_reviewer_runner_bin(source)
+        runner_bin = resolve_runner_bin_setting(
+            "reviewer",
+            backend=backend_name,
+            env=source,
+        ) or None
         raw_extra = resolve_knob(
             "ARGUS_SKILL_RUNNER_EXTRA_ARGS",
             "",
@@ -152,11 +130,11 @@ def run_reviewer_prompt_via_runner(
         raise ReviewerRunnerError(
             f"invalid reviewer runner configuration: {type(exc).__name__}: {exc}"
         ) from exc
-    deadline = time.monotonic() + timeout_s
+    deadline = time.monotonic() + timeout if timeout is not None else None
 
     def _timeout_reason() -> str | None:
-        if time.monotonic() >= deadline:
-            return f"reviewer timeout after {timeout_s:.1f}s"
+        if deadline is not None and time.monotonic() >= deadline:
+            return f"reviewer timeout after {timeout:.1f}s"
         return None
 
     try:
@@ -174,8 +152,12 @@ def run_reviewer_prompt_via_runner(
                 skip_git_repo_check=True,
                 full_auto=True,
                 working_dir=working_dir,
-                external_interrupt_reason_provider=_timeout_reason,
-                watchdog_hard_idle_seconds=max(1, math.ceil(timeout_s)),
+                external_interrupt_reason_provider=(
+                    _timeout_reason if timeout is not None else None
+                ),
+                watchdog_hard_idle_seconds=(
+                    max(1, int(timeout)) if timeout is not None else 0
+                ),
             ),
             run_label=run_label,
         )

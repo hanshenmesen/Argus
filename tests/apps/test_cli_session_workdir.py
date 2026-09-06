@@ -8,6 +8,7 @@ import pytest
 from argus_skill.apps.cli import _core
 from argus_skill.core import paths as core_paths
 from argus_skill.core.session import SessionMeta, read_session_meta, write_session_meta
+from argus_skill.life import MemoryBundle
 
 
 def _args() -> SimpleNamespace:
@@ -50,6 +51,59 @@ def test_cli_resume_uses_persisted_workdir_not_shell_cwd(
     assert bundle.project_worktree == workspace.resolve()
     assert config.project_workdir == workspace.resolve()
     assert config.life_dir == state_dir
+
+
+def test_cli_explicit_provider_backend_uses_native_model_default(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    args = _args()
+    args.backend = "claude"
+    monkeypatch.setattr(
+        _core,
+        "_resolve_project_bundle",
+        lambda _args: SimpleNamespace(
+            project=SimpleNamespace(
+                root=tmp_path,
+                fingerprint="test-project",
+                label="test",
+            ),
+            global_root=tmp_path,
+            project_worktree=tmp_path,
+        ),
+    )
+    monkeypatch.delenv("ARGUS_SKILL_MODEL", raising=False)
+    monkeypatch.delenv("ARGUS_SKILL_ENGINEER_MODEL", raising=False)
+    monkeypatch.delenv("ARGUS_SKILL_REVIEWER_MODEL", raising=False)
+
+    config = _core._build_worker_config(args)
+
+    assert config.engineer_model == ""
+    assert config.reviewer_model == ""
+
+
+def test_cli_models_follow_role_specific_backends(monkeypatch, tmp_path) -> None:
+    args = _args()
+    args.backend = "codex"
+    monkeypatch.setenv("ARGUS_SKILL_REVIEWER_BACKEND", "claude")
+    monkeypatch.setattr(
+        _core,
+        "_resolve_project_bundle",
+        lambda _args: SimpleNamespace(
+            project=SimpleNamespace(
+                root=tmp_path,
+                fingerprint="test-project",
+                label="test",
+            ),
+            global_root=tmp_path,
+            project_worktree=tmp_path,
+        ),
+    )
+
+    config = _core._build_worker_config(args)
+
+    assert config.engineer_model == "gpt-5.5"
+    assert config.reviewer_model == ""
 
 
 def test_cli_management_auto_selects_newest_session_for_shell_workdir(
@@ -121,6 +175,70 @@ def test_cli_management_prefers_live_session_for_shell_workdir(
     assert bundle.project_worktree == workspace.resolve()
 
 
+def test_cli_management_uses_explicit_project_root_outside_workdir(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    other_cwd = tmp_path / "other"
+    workspace.mkdir()
+    other_cwd.mkdir()
+    sid = "s-explicit-workdir"
+    (root / "projects" / sid).mkdir(parents=True)
+    write_session_meta(
+        root,
+        SessionMeta(
+            id=sid,
+            created=10.0,
+            last_active=10.0,
+            workdir=str(workspace),
+        ),
+    )
+    monkeypatch.chdir(other_cwd)
+    monkeypatch.setattr(_core, "_resolve_global_root", lambda _args: root)
+    monkeypatch.setattr(
+        _core,
+        "_resolve_session_id",
+        lambda *_args, **_kwargs: (None, False),
+    )
+    args = _args()
+    args.project_root = str(workspace)
+
+    bundle = _core._resolve_project_bundle(args)
+
+    assert bundle.project.root == root / "projects" / sid
+    assert bundle.project_worktree == workspace.resolve()
+
+
+def test_cli_management_fallback_uses_explicit_project_root(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    other_cwd = tmp_path / "other"
+    workspace.mkdir()
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+    monkeypatch.setattr(_core, "_resolve_global_root", lambda _args: root)
+    monkeypatch.setattr(
+        _core,
+        "_resolve_session_id",
+        lambda *_args, **_kwargs: (None, False),
+    )
+    args = _args()
+    args.project_root = str(workspace)
+
+    bundle = _core._resolve_project_bundle(args)
+
+    assert bundle.project_worktree == workspace.resolve()
+    assert bundle.project.root == MemoryBundle.for_cwd(
+        workspace,
+        global_root=root,
+    ).project.root
+
+
 def test_cli_legacy_resume_persists_first_explicit_workdir(
     tmp_path,
     monkeypatch,
@@ -144,6 +262,45 @@ def test_cli_legacy_resume_persists_first_explicit_workdir(
     assert bundle.project_worktree == workspace.resolve()
     assert meta is not None
     assert meta.workdir == str(workspace.resolve())
+
+
+def test_cli_resume_repairs_named_session_without_workdir(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "state"
+    sid = "partially-initialized-session"
+    state_dir = root / "projects" / sid
+    workspace = tmp_path / "workspace"
+    state_dir.mkdir(parents=True)
+    workspace.mkdir()
+    write_session_meta(
+        root,
+        SessionMeta(
+            id=sid,
+            display_name="GLM optimization",
+            created=10.0,
+            last_active=20.0,
+        ),
+    )
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(_core, "_resolve_global_root", lambda _args: root)
+    monkeypatch.setattr(
+        _core,
+        "_resolve_session_id",
+        lambda *_args, **_kwargs: (sid, False),
+    )
+
+    bundle = _core._resolve_project_bundle(_args())
+    meta = read_session_meta(root, sid)
+
+    assert bundle.project_worktree == workspace.resolve()
+    assert meta is not None
+    assert meta.workdir == str(workspace.resolve())
+    assert meta.cwd == str(workspace.resolve())
+    assert meta.display_name == "GLM optimization"
+    assert meta.created == 10.0
+    assert meta.last_active == 20.0
 
 
 def test_cli_legacy_resume_prefers_last_daemon_workdir_over_state_cwd(

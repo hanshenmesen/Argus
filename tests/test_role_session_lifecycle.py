@@ -121,6 +121,40 @@ def test_mission_policy_resumes_each_role_without_crossing_roles(tmp_path: Path)
     ]
 
 
+def test_fresh_policy_repeats_task_contract_on_continuation_round(
+    tmp_path: Path,
+) -> None:
+    context, checkpoint = _context(tmp_path)
+    backend = MemoryBackend()
+    backend.queue("engineer-r1", CannedResponse(message="one", thread_id="e1"))
+    backend.queue(
+        "reviewer", CannedResponse(message=_review("continue"), thread_id="v1")
+    )
+    backend.queue("engineer-r2", CannedResponse(message="two", thread_id="e2"))
+    backend.queue("reviewer", CannedResponse(message=_review("done"), thread_id="v2"))
+
+    outcome = _loop(
+        backend,
+        tmp_path,
+        context,
+        checkpoint,
+        policy="fresh",
+    ).run("implement the contract-preserving change", workdir=tmp_path)
+
+    assert outcome.successful
+    engineer_prompts = [
+        prompt
+        for label, prompt, _options in backend.history
+        if label.startswith("engineer-")
+    ]
+    assert len(engineer_prompts) == 2
+    assert all("## Effective task contract" in prompt for prompt in engineer_prompts)
+    assert all(
+        "implement the contract-preserving change" in prompt
+        for prompt in engineer_prompts
+    )
+
+
 def test_resumed_reviewer_reduces_prompt_bytes_without_changing_verdict(
     tmp_path: Path,
 ) -> None:
@@ -290,6 +324,11 @@ def test_planner_mission_session_survives_new_planner_instance(tmp_path: Path) -
         thread for label, thread in backend.resume_history if label.startswith("planner.")
     ] == [None, "p1"]
     assert json.loads(capsule_path.read_text(encoding="utf-8"))["role"] == "planner"
+    planner_prompts = [
+        prompt for label, prompt, _options in backend.history if label.startswith("planner.")
+    ]
+    assert "## Continued Planner cycle" in planner_prompts[1]
+    assert len(planner_prompts[1]) < len(planner_prompts[0])
 
 
 def test_explicit_reviewer_quality_signal_rotates_only_target_role(tmp_path: Path) -> None:

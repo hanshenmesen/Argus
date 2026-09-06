@@ -28,7 +28,7 @@ def _src(rel: str) -> str:
 def test_planner_role_gives_stage_authority_to_manager() -> None:
     text = load_builtin_skill_text("argus-planner-role.md")
     assert "Manager alone changes" in text
-    assert "research/PIPELINE_STATE.json" in text
+    assert ".argus/PIPELINE_STATE.json" in text
     assert "report an upstream stage defect" in text
     assert "does not by itself prove completion" in text
     # the old "the reviewer advances the stage" wording is gone
@@ -45,7 +45,7 @@ def test_reviewer_reports_upstream_defects_instead_of_rolling_back() -> None:
     assert "Manager owns rollback" in src
 
 
-def test_auto_research_skill_does_not_tell_engineer_to_advance_stage() -> None:
-    md = _src("builtin_skills/engineer/auto-research-pipeline.md")
+def test_experiment_playbook_does_not_tell_engineer_to_advance_stage() -> None:
+    md = _src("verticals/research/skills/research-experiment-playbook.md")
     assert "advance to the next stage and update" not in md
-    assert "Manager-owned" in md
+    assert "Manager alone advances" in md

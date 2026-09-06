@@ -15,12 +15,14 @@ from argus_skill.core.session import (
     SessionMeta,
     SessionResolutionError,
     list_sessions,
+    migrate_legacy_session_workdir,
     most_recent_session,
     new_session_id,
     read_session_meta,
     resolve_session,
     resolve_session_workdir,
     touch_session,
+    write_session_meta,
 )
 from argus_skill.life.memory import MemoryBundle
 
@@ -73,6 +75,48 @@ def test_resolve_session_workdir_rejects_missing_legacy_cwd(tmp_path):
             SessionMeta(id="legacy", cwd=str(tmp_path / "missing")),
             state_dir=tmp_path,
         )
+
+
+def test_resolve_session_workdir_rejects_incomplete_metadata(tmp_path):
+    with pytest.raises(FileNotFoundError, match="no trustworthy workdir"):
+        resolve_session_workdir(
+            SessionMeta(id="incomplete", display_name="Named too early"),
+            state_dir=tmp_path,
+        )
+
+
+def test_migrate_repairs_incomplete_metadata_without_losing_identity(tmp_path):
+    root = tmp_path / "state"
+    sid = "incomplete"
+    state_dir = root / "projects" / sid
+    workspace = tmp_path / "workspace"
+    state_dir.mkdir(parents=True)
+    workspace.mkdir()
+    write_session_meta(
+        root,
+        SessionMeta(
+            id=sid,
+            display_name="Existing name",
+            created=10.0,
+            last_active=20.0,
+        ),
+    )
+
+    resolved = migrate_legacy_session_workdir(
+        root,
+        sid,
+        state_dir=state_dir,
+        candidates=(state_dir, workspace),
+    )
+    meta = read_session_meta(root, sid)
+
+    assert resolved == workspace.resolve()
+    assert meta is not None
+    assert meta.cwd == str(workspace.resolve())
+    assert meta.workdir == str(workspace.resolve())
+    assert meta.display_name == "Existing name"
+    assert meta.created == 10.0
+    assert meta.last_active == 20.0
 
 
 def test_continue_returns_most_recent(tmp_path):
@@ -137,6 +181,24 @@ def test_legacy_last_active_ignores_web_projection_writes(tmp_path):
 
     meta = next(item for item in list_sessions(tmp_path) if item.id == "s-legacy")
     assert meta.last_active == 120
+
+
+def test_named_session_last_active_follows_durable_work(tmp_path):
+    import os
+
+    sid, _ = resolve_session(global_root=tmp_path, mode="new", cwd=tmp_path, now=100)
+    project = tmp_path / "projects" / sid
+    events = project / "events.jsonl"
+    events.write_text('{"type":"round.start"}\n')
+    os.utime(events, (500, 500))
+    projection = project / "mission-view.json"
+    projection.write_text("{}\n")
+    os.utime(projection, (700, 700))
+
+    meta = next(item for item in list_sessions(tmp_path) if item.id == sid)
+
+    assert meta.last_active == 500
+    assert read_session_meta(tmp_path, sid).last_active == 100
 
 
 def test_contentless_legacy_session_does_not_trust_directory_mtime(tmp_path):

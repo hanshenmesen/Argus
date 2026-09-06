@@ -33,8 +33,15 @@ class _Outcome:
     # token, missing API key, etc.). The supervisor uses this to stop
     # early instead of looping over failing missions.
     auth_failure: bool = False
+    delivery: dict[str, Any] | None = None
     # Set only when a final-submission mission receives Reviewer ``done``.
     final_submission_certified: bool = False
+    # The manuscript the final Reviewer actually read (path/sha256/recorded_at).
+    # ``rounds`` above is only a count, so the supervisor cannot recover this
+    # from the outcome otherwise; without it the journal records a certified
+    # final submission with no manuscript binding and the research completion
+    # check can never accept it.
+    manuscript_snapshot: dict | None = None
     completion_evidence: str = ""
     # The Manager's stage-transition verdict for this mission completion (the
     # Manager is the sole writer of current_stage). Shape:
@@ -46,6 +53,11 @@ class _Outcome:
     # True when a trusted review-only workflow deliberately bypassed the formal
     # stage writer. Persisted separately so recovery cannot replay the review.
     stage_transition_skipped: bool = False
+    # True when a Planner-authored intermediate node held the stage rather than
+    # closing it. The opposite of the flag above: the Reviewer verdict is real
+    # and campaign-level reconciliation is meant to replay it once the stage's
+    # planned work drains.
+    stage_transition_deferred: bool = False
     # The reviewer's named ``OPERATOR_QUESTION`` verdict field from the
     # FINAL round, when the mission stopped with ``status == "blocked"``. The
     # supervisor persists this onto the backlog item (``pending_question``)
@@ -58,11 +70,15 @@ class _Outcome:
     final_review_source: str = ""
     final_review_reason: str = ""
     final_review_next_action: str = ""
+    final_message: str = ""
     summary: str = ""
     # Full operator-facing Engineer handoff. ``summary`` stays compact for
     # status surfaces, while this field preserves long-form deliverables.
     final_output: str = ""
     research_result: dict | None = None
+    # Reviewer-confirmed artifact paths and evidence from the terminal round.
+    # Settlement turns these into a safe, operator-facing delivery receipt.
+    final_frontier_report: dict = field(default_factory=dict)
     final_planner_report: dict = field(default_factory=dict)
     plan_challenge: dict = field(default_factory=dict)
 
@@ -191,6 +207,12 @@ class _ScriptedPlannerBackend:
         if delay > 0:
             time.sleep(delay)
         return payload
+
+    def fork(self) -> "_ScriptedPlannerBackend":
+        backend = object.__new__(type(self))
+        backend._planner = self._planner
+        backend._critic = self._critic
+        return backend
 
     def run_exec(
         self,

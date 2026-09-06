@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -37,25 +39,52 @@ def manager_runner(monkeypatch):
     )
 
 
-def test_bounded_dispatch_persists_manager_handoff_and_root_id(memory, monkeypatch):
+def test_bounded_dispatch_persists_nested_workdir(
+    memory,
+    monkeypatch,
+):
+    from argus_skill.core.models import RunnerResult
+    from argus_skill.planner.bounded_dag import BoundedDagNode, plan_bounded_dag
+
     older = memory.backlog.add(
         BacklogItem.new(title="older", objective="older", priority=100)
     )
+    nested = memory.project_worktree / "nested" / "target"
+    nested.mkdir(parents=True)
+    decision = {
+        "role": "planner",
+        "payload": {
+            "reason": "one typed nested task",
+            "tasks": [{
+                "key": "execute",
+                "deps": [],
+                "title": "`managed task`",
+                "objective": "managed: operator request",
+                "execution_workdir": "nested/target",
+            }],
+        },
+    }
+
+    class Runner:
+        def run_exec(self, **_kwargs):
+            return RunnerResult(
+                exit_code=0,
+                agent_messages=[
+                    f"ARGUS_ROLE_DECISION={json.dumps(decision)}"
+                ],
+            )
+
+    plan = plan_bounded_dag(
+        Runner(),
+        "managed: operator request",
+        workdir=memory.project_worktree,
+    )
+    assert plan.error == ""
+    assert isinstance(plan.tasks[0], BoundedDagNode)
     monkeypatch.setattr(
         dispatch,
         "_plan_bounded_execution",
-        lambda *args, **kwargs: SimpleNamespace(
-            reason="one atomic task",
-            error="",
-            tasks=(
-                SimpleNamespace(
-                    key="execute",
-                    deps=(),
-                    title="`managed task`",
-                    objective="managed: operator request",
-                ),
-            ),
-        ),
+        lambda *args, **kwargs: plan,
     )
 
     item, alive, pid = dispatch.enqueue_mission(
@@ -68,8 +97,92 @@ def test_bounded_dispatch_persists_manager_handoff_and_root_id(memory, monkeypat
     assert item.id == "root-task-1"
     assert item.title == "managed task"
     assert item.objective == "managed: operator request"
+    assert item.execution_workdir == str(nested.resolve())
     assert item.priority < older.priority
     assert (alive, pid) == (False, None)
+
+
+def test_direct_workflow_persists_manager_package_without_planner(
+    memory,
+    monkeypatch,
+) -> None:
+    class Manager:
+        def decide_vertical(self, body, **kwargs):
+            return SimpleNamespace(
+                execution_task=f"managed: {body}",
+                vertical="software",
+                workflow_mode="direct",
+                require_independent_review=True,
+            )
+
+        def commit_vertical_decision(self, body, decision, **kwargs):
+            return decision
+
+    monkeypatch.setattr(
+        front_door,
+        "_ensure_manager_runner",
+        lambda *_args, **_kwargs: SimpleNamespace(manager=Manager()),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "_plan_bounded_execution",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("direct Manager package must not call Planner")
+        ),
+    )
+
+    item, alive, pid = dispatch.enqueue_mission(
+        memory,
+        "one coherent package",
+        {"backend": "codex"},
+        root_task_id="root-direct-1",
+        context_refs=[{
+            "kind": "attachment",
+            "ref": "brief.md",
+            "why": "operator input",
+        }],
+    )
+
+    assert item.id == "root-direct-1"
+    assert item.objective == "managed: one coherent package"
+    assert item.original_objective == item.objective
+    assert item.iterate is False
+    assert item.iteration_max_cycles == 1
+    assert item.deps == []
+    assert item.context_refs == [{
+        "kind": "attachment",
+        "ref": "brief.md",
+        "why": "operator input",
+    }]
+    assert "manager_direct" in item.tags
+    assert "planner" not in item.tags
+    assert "review:required" in item.tags
+    assert item.manager_decision == {
+        "vertical": "software",
+        "workflow_mode": "direct",
+        "require_independent_review": True,
+        "routed": True,
+        "route_source": "manager",
+    }
+    assert (alive, pid) == (False, None)
+
+    events = [
+        json.loads(line)
+        for line in (memory.project.root / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    queued = next(
+        event
+        for event in events
+        if event.get("type") == "life.planner.task_added"
+    )
+    assert queued["source"] == "manager_direct"
+    assert not any(
+        event.get("type") == "life.planner.verdict"
+        and event.get("status") == "planned"
+        for event in events
+    )
 
 
 def test_bounded_dispatch_fails_closed_without_planner_backend(memory) -> None:
@@ -110,6 +223,97 @@ def test_manager_workdir_prefers_persisted_session_metadata(tmp_path) -> None:
     assert dispatch._resolve_manager_workdir(mem) == expected_worktree.resolve()
 
 
+def test_bounded_dispatch_uses_nested_node_worktree_as_its_only_contract_root(
+    memory,
+    monkeypatch,
+):
+    from argus_skill.core.campaign_workdir import adopt_campaign_workdir
+    from argus_skill.core.pipeline_state import write_pipeline_state
+    from argus_skill.skills.vertical_select import persist_vertical
+    from argus_skill.verticals._data_domain import write_data_domain
+
+    base = memory.project_worktree
+    campaign = base / "campaign"
+    target = campaign / "target"
+    campaign.mkdir()
+    subprocess.run(["git", "init", "-q", str(campaign)], check=True)
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+
+    life_dir = front_door._life_dir_for(memory)
+    adopt_campaign_workdir(
+        state_root=life_dir,
+        base_root=base,
+        current_root=base,
+        requested="campaign",
+    )
+    persist_vertical(campaign, "research", workflow_mode="staged")
+    write_pipeline_state(
+        campaign,
+        {
+            "vertical": "research",
+            "workflow_mode": "staged",
+            "current_stage": "submission",
+        },
+    )
+    write_data_domain(
+        target,
+        "nested_replay",
+        stages=["target_scope", "target_delivery"],
+        status="formal",
+        purpose="target-only replay contract",
+    )
+    persist_vertical(target, "nested_replay", workflow_mode="staged")
+    parent_artifact = campaign / "research" / "TARGET.md"
+    parent_artifact.parent.mkdir(exist_ok=True)
+    parent_artifact.write_text("stale parent evidence", encoding="utf-8")
+    artifact = target / "research" / "TARGET.md"
+    artifact.write_text("target evidence", encoding="utf-8")
+
+    plan = SimpleNamespace(
+        reason="replay the nested target",
+        error="",
+        tasks=(
+            SimpleNamespace(
+                key="target-node",
+                deps=(),
+                title="Run target replay",
+                objective="Use only the nested target contract.",
+                vertical="nested_replay",
+                execution_workdir="target",
+                context_refs=({
+                    "kind": "artifact",
+                    "ref": "research/TARGET.md",
+                    "why": "target evidence",
+                },),
+            ),
+        ),
+    )
+    monkeypatch.setattr(dispatch, "_plan_bounded_execution", lambda *args, **kwargs: plan)
+
+    item, _, _ = dispatch.enqueue_mission(
+        memory,
+        "replay nested target",
+        {"backend": "codex"},
+    )
+
+    assert item is not None
+    assert item.execution_workdir == str(target.resolve())
+    assert item.manager_decision["vertical"] == "nested_replay"
+    assert "stage:target_scope" in item.tags
+    assert "stage:submission" not in item.tags
+    assert item.context_refs[0]["ref"] == "research/TARGET.md"
+    assert item.context_refs[0]["content_hash"] == (
+        "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    )
+    assert adopt_campaign_workdir(
+        state_root=life_dir,
+        base_root=base,
+        current_root=campaign,
+        requested=item.execution_workdir,
+    ) == target.resolve()
+
+
 def test_bounded_dispatch_persists_real_dependency_dag(memory, monkeypatch):
     result = memory.project_worktree / "research" / "chem_playground" / "x" / "RESULT.md"
     result.parent.mkdir(parents=True)
@@ -125,6 +329,10 @@ def test_bounded_dispatch_persists_real_dependency_dag(memory, monkeypatch):
                 deps=("a", "b"),
                 title="Integrate",
                 objective="read a.txt and b.txt; write result.txt; test -s result.txt",
+                hypothesis="The integrated route improves the measured outcome.",
+                goal_contribution="Turn measured feedback into the requested result.",
+                expected_regressions="One component may trade off against the other.",
+                decision_rule="Revise the route when measured feedback misses the target.",
                 acceptance_check="validator exits zero",
                 non_goals=("do not edit pipeline state",),
                 context_refs=({
@@ -159,7 +367,11 @@ def test_bounded_dispatch_persists_real_dependency_dag(memory, monkeypatch):
     assert {item.plan_id for item in items.values()} == {items["a"].plan_id}
     assert items["a"].plan_id.startswith("bounded-")
     assert all("bounded_dag_node" in item.tags for item in items.values())
-    assert all(item.iterate is False for item in items.values())
+    assert all("planner" in item.tags for item in items.values())
+    assert all(item.iterate for item in items.values())
+    assert all(item.iteration_max_cycles == 3 for item in items.values())
+    assert items["c"].plan_hypothesis.startswith("The integrated route")
+    assert items["c"].decision_rule.startswith("Revise the route")
     assert all(item.original_objective == "managed: operator request" for item in items.values())
     assert items["c"].acceptance_check == "validator exits zero"
     assert items["c"].non_goals == ["do not edit pipeline state"]
@@ -351,12 +563,16 @@ def test_continuous_dispatch_persists_operator_priority_item(memory):
     )
     assert item is not None
     assert memory.backlog.all() == [item]
+    assert item.title == "operator request"
     assert item.objective == "managed: operator request"
     assert item.original_objective == "managed: operator request"
     assert item.priority == -1
     assert "operator_priority" in item.tags
     assert "stage_transition:skip" in item.tags
-    assert item.manager_decision == {"routed": True}
+    assert item.manager_decision == {
+        "require_independent_review": True,
+        "routed": True,
+    }
     assert payload["enabled"] is True
     assert payload["objective"] == "managed: operator request"
     assert payload["open_ended"] is True
@@ -375,6 +591,68 @@ def test_continuous_dispatch_persists_operator_priority_item(memory):
     assert queued["item_id"] == item.id
     assert queued["source"] == "manager_operator"
     assert queued["operator_priority"] is True
+
+
+def test_contextual_continuous_title_uses_manager_execution_task_in_every_status(
+    memory,
+    monkeypatch,
+):
+    from argus_skill.webapi.manager_session_intent import contextualize_operator_turn
+    from argus_skill.webapi.project_state import compact_backlog_item
+
+    execution_task = "修复上下文化连续任务的标题，并保留目标、依赖与状态行为。"
+    routing_body = contextualize_operator_turn(
+        "那就继续修最后一个问题",
+        [
+            {"role": "operator", "text": "先处理标题泄露问题。"},
+            {"role": "argus", "text": "会保持普通研究任务行为不变。"},
+        ],
+        last_team_task="分阶段修复 Argus 用户体验问题。",
+    )
+
+    class ContextResolvingManager:
+        def decide_vertical(self, body, **kwargs):
+            assert body == routing_body
+            return SimpleNamespace(
+                execution_task=execution_task,
+                workflow_mode="staged",
+            )
+
+        def commit_vertical_decision(self, body, decision, **kwargs):
+            assert body == routing_body
+            return decision
+
+    monkeypatch.setattr(
+        front_door,
+        "_ensure_manager_runner",
+        lambda state, mem: SimpleNamespace(manager=ContextResolvingManager()),
+    )
+
+    item, _, _ = dispatch.enqueue_mission(
+        memory,
+        routing_body,
+        {"backend": "codex", "config": {"continuous": True}},
+    )
+
+    assert item is not None
+    assert item.objective == execution_task
+    assert item.original_objective == execution_task
+    assert item.deps == []
+    views = [compact_backlog_item(item)]
+    running = memory.backlog.mark_running(item.id)
+    assert running is not None
+    views.append(compact_backlog_item(running))
+    failed = memory.backlog.mark_failed(item.id, error="受控失败")
+    assert failed is not None
+    views.append(compact_backlog_item(failed))
+
+    assert [view["status"] for view in views] == ["pending", "running", "failed"]
+    assert {view["title"] for view in views} == {execution_task}
+    for view in views:
+        visible = json.dumps(view, ensure_ascii=False)
+        assert "[BOUNDED TASK CONTEXT" not in visible
+        assert "[CURRENT OPERATOR MESSAGE]" not in visible
+        assert "先处理标题泄露问题" not in visible
 
 
 def test_continuous_replacement_queues_operator_task_after_running_work(memory):
@@ -610,3 +888,105 @@ def test_failed_continuous_handoff_rolls_back_auto_promotion(memory, monkeypatch
 
     assert state["config"]["continuous"] is False
     assert state["continuous_objective"] == ""
+
+
+def test_the_operator_item_does_not_claim_planner_authorship(memory):
+    """``preplanned`` is computed as ``"planner" in item.tags``, and it skips
+    the advisory planning pass on the ground that a Planner already decomposed
+    the work. A raw operator message has not been decomposed by anyone, so the
+    tag sent it straight to a single Engineer — the opposite of the chain
+    ``_maybe_draft_plan`` documents for user-authored bounded work.
+    """
+    item, _, _ = dispatch.enqueue_mission(
+        memory,
+        "operator request",
+        {"backend": "codex", "config": {"continuous": True}},
+    )
+
+    assert item is not None
+    assert "planner" not in item.tags
+    # Still the operator's priority work, still bounded: only the authorship
+    # claim is dropped.
+    assert "operator_priority" in item.tags
+    assert "scope:bounded" in item.tags
+
+
+def test_the_operator_item_is_not_treated_as_preplanned(memory):
+    """Asserted through the reader rather than the tag, so this keeps holding
+    if the discriminator moves."""
+    item, _, _ = dispatch.enqueue_mission(
+        memory,
+        "operator request",
+        {"backend": "codex", "config": {"continuous": True}},
+    )
+
+    preplanned = any(
+        str(tag).strip().lower() == "planner" for tag in getattr(item, "tags", [])
+    )
+
+    assert preplanned is False
+
+
+def test_the_operator_item_satisfies_the_review_only_contract(memory):
+    """``_prepare_persist`` rejects a Planner node that skips the stage
+    transition without requiring independent review. The Manager's own operator
+    item set exactly that pair, exempting itself from the contract it enforces.
+    """
+    item, _, _ = dispatch.enqueue_mission(
+        memory,
+        "operator request",
+        {"backend": "codex", "config": {"continuous": True}},
+    )
+
+    assert item is not None
+    assert "stage_transition:skip" in item.tags
+    assert "review:required" in item.tags
+
+
+def test_the_operator_mission_gets_an_independent_reviewer(memory):
+    """Read through the same helper the mission runtime uses. Without the tag,
+    ``round_self_review`` settles the mission on the Engineer's own
+    MILESTONE_STATUS=DONE and no Reviewer ever runs.
+    """
+    from argus_skill.life.supervisor._planning_context import PlanningContextMixin
+
+    item, _, _ = dispatch.enqueue_mission(
+        memory,
+        "operator request",
+        {"backend": "codex", "config": {"continuous": True}},
+    )
+
+    assert PlanningContextMixin._item_requires_independent_review(item) is True
+    assert PlanningContextMixin._item_skips_stage_transition(item) is True
+
+
+def test_the_operator_item_keeps_stage_authority_with_the_manager(memory):
+    """The two tags together are what makes the skip real: the runtime honors
+    ``skip_stage_transition`` only alongside ``require_independent_review`` on a
+    bounded scope, and otherwise falls through to the self-review arm and moves
+    the stage anyway."""
+    from argus_skill.apps._runtime_helpers import _should_run_stage_transition
+
+    item, _, _ = dispatch.enqueue_mission(
+        memory,
+        "operator request",
+        {"backend": "codex", "config": {"continuous": True}},
+    )
+    assert item is not None
+
+    assert _should_run_stage_transition(
+        "done",
+        mission_scope="bounded",
+        skip_stage_transition=True,
+        require_independent_review=True,
+        review_source="reviewer",
+    ) is False
+    # What the untagged item actually did: the skip is not honored on its own,
+    # so the self-review arm moved the stage the tag exists to hold still.
+    assert _should_run_stage_transition(
+        "done",
+        mission_scope="bounded",
+        skip_stage_transition=True,
+        require_independent_review=False,
+        review_source="engineer_self_review",
+    ) is True

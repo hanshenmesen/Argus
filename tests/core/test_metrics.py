@@ -337,7 +337,7 @@ def test_metrics_rotation_is_read_through_and_prunes_old_archives(
 
 
 def test_multiprocess_metric_writes_remain_complete_json_lines(tmp_path: Path) -> None:
-    context = mp.get_context("fork")
+    context = mp.get_context("spawn")
     processes = [
         context.Process(target=_metric_writer, args=(str(tmp_path), worker, 25))
         for worker in range(4)

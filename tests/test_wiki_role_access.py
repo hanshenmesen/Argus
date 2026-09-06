@@ -26,7 +26,9 @@ def test_manager_engineer_and_planner_share_direct_wiki_contract(
         task="implement the next increment",
         skill_text="",
         next_action=None,
+        require_post_task_learning=True,
         project_root=tmp_path,
+        project_skill_dir=tmp_path / "skills" / "engineer",
     )
     planner = Planner._build_planner_prompt(
         continuous_objective="research the system",
@@ -43,11 +45,14 @@ def test_manager_engineer_and_planner_share_direct_wiki_contract(
         assert "sources/" not in prompt
         assert "query_pack.md" not in prompt
 
-    assert "consult primary sources first" in manager
-    assert "independently inspect papers, upstream source" in engineer
-    assert "related attempts repeatedly fail" in engineer
-    assert "primary papers, official implementations" in engineer
-    assert "Record durable findings in the Wiki" in engineer
+    assert "Check primary sources only when an external technical claim matters" in manager
+    assert "Use primary sources when external behavior matters" in engineer
+    assert "If repeated attempts fail" in engineer
+    assert "recheck the underlying assumption" in engineer
+    assert "When durable declarative knowledge changes" in engineer
+    assert "support/limitation matrices" in engineer
+    assert "Procedures and checklists belong in Skills" in engineer
+    assert "route durable project facts" in engineer
     assert "external algorithm" in planner
     assert "starting context, not a" in planner
     assert "fresh paper/source/issue/hardware investigation" in planner
@@ -98,4 +103,4 @@ def test_direct_workflow_planner_has_no_stage_gate(tmp_path: Path) -> None:
     assert "## Stage checklist" not in prompt
     assert "Downstream stages (LOCKED" not in prompt
     assert "## Current workflow stage" in prompt
-    assert "semantic context, not a hard gate" in prompt
+    assert "semantic context, not a hard boundary" in prompt

@@ -47,6 +47,17 @@ def merge_mission_view_snapshot(
     current_stage: str = "",
 ) -> dict[str, Any]:
     mission = view.setdefault("mission", {})
+    if continuous and continuous.get("enabled"):
+        routing = view.setdefault("routing", {})
+        if not routing.get("route"):
+            routing["route"] = "team"
+        routing["continuous"] = True
+        routing["open_ended"] = continuous.get("open_ended") is True
+        routing["lifetime"] = (
+            "standing"
+            if routing["open_ended"]
+            else str(routing.get("lifetime") or "bounded")
+        )
     active = next((item for item in backlog if str(item.get("status")) in {"running", "in_progress", "claimed"}), None)
     queued = next((item for item in backlog if str(item.get("status")) == "pending"), None)
     owner_id = str(mission.get("id") or "")
@@ -78,6 +89,20 @@ def merge_mission_view_snapshot(
         else:
             mission["title"] = mission.get("title") or objective.splitlines()[0][:240]
     if active:
+        if (
+            str(active.get("id") or "") != owner_id
+            or mission.get("completed_at") is not None
+            or (
+                active.get("started_ts") is not None
+                and active["started_ts"] != mission.get("started_at")
+            )
+        ):
+            mission.update({
+                "summary": "",
+                "final_output": "",
+                "started_at": active.get("started_ts"),
+                "completed_at": None,
+            })
         mission["id"] = str(active.get("id") or mission.get("id") or "")
         mission["status"] = "working"
         mission["started_at"] = mission.get("started_at") or active.get("started_ts")
@@ -191,6 +216,70 @@ def merge_mission_view_snapshot(
     return view
 
 
+def _apply_manuscript_review_freshness(
+    view: dict[str, Any],
+    session: Mapping[str, Any],
+) -> None:
+    """Ensure a persisted paper certificate is never rendered for newer bytes."""
+    workdir = str(
+        session.get("campaign_workdir")
+        or session.get("workdir")
+        or session.get("session_workdir")
+        or ""
+    ).strip()
+    review = view.get("review")
+    if (
+        isinstance(review, dict)
+        and isinstance(review.get("manuscript_snapshot"), dict)
+        and workdir
+    ):
+        try:
+            from ..manuscript_snapshot import manuscript_review_status
+
+            review_freshness = manuscript_review_status(review, workdir)
+        except Exception:  # noqa: BLE001 - UI review status fails closed
+            review_freshness = {"status": "unbound", "message": "unbound review"}
+        if review_freshness.get("status") != "current":
+            review["status"] = "stale"
+            review["reason"] = str(review_freshness.get("message") or "stale review")
+
+    outcome = view.get("outcome")
+    if not isinstance(outcome, dict) or outcome.get("final_submission_certified") is not True:
+        return
+    binding = outcome.get("manuscript_snapshot")
+    if not isinstance(binding, dict) or not workdir:
+        outcome["final_submission_certified"] = False
+        outcome["review_validity"] = "unbound"
+        outcome["review_status_message"] = (
+            "unbound (certification did not record the manuscript version)"
+        )
+        return
+    try:
+        from ..manuscript_snapshot import manuscript_review_status
+
+        freshness = manuscript_review_status(outcome, workdir)
+    except Exception:  # noqa: BLE001 - UI certification fails closed
+        freshness = {
+            "status": "unbound",
+            "message": "unbound (certified manuscript cannot be read)",
+        }
+    if freshness.get("status") == "current":
+        outcome["review_validity"] = "current"
+        return
+    message = str(freshness.get("message") or "stale manuscript certification")
+    outcome["final_submission_certified"] = False
+    outcome["review_validity"] = freshness.get("status")
+    outcome["review_status_message"] = message
+    review = view.setdefault("review", {})
+    review["status"] = "stale"
+    review["reason"] = message
+    delivery = view.get("delivery")
+    if isinstance(delivery, dict) and delivery.get("kind") == "submission_certified":
+        delivery["kind"] = "submission_stale"
+        delivery["review_status"] = "stale"
+        delivery["summary"] = message
+
+
 def _mission_for_timestamp(
     backlog: list[Mapping[str, Any]],
     timestamp: float,
@@ -291,10 +380,14 @@ def _enrich_skill_content(
         except OSError:
             continue
         truncated = len(data) > MISSION_SKILL_CONTENT_MAX_BYTES
-        skill["content"] = data[:MISSION_SKILL_CONTENT_MAX_BYTES].decode(
+        content = data[:MISSION_SKILL_CONTENT_MAX_BYTES].decode(
             "utf-8",
             errors="replace",
         )
+        # API snapshots are protocol data, not a byte-for-byte file download.
+        # Canonical LF keeps the response stable across Windows and POSIX and
+        # matches Python's normal text-file reading semantics.
+        skill["content"] = content.replace("\r\n", "\n").replace("\r", "\n")
         skill["content_truncated"] = truncated
 
 
@@ -316,6 +409,10 @@ def snapshot_mission_view(
         response = merge_mission_view_snapshot(
             json.loads(json.dumps(view)),
             **kwargs,
+        )
+        _apply_manuscript_review_freshness(
+            response,
+            kwargs.get("session") or {},
         )
         if enrich_skill_content:
             _enrich_skill_content(

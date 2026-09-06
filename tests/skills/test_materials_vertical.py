@@ -64,8 +64,6 @@ def test_materials_is_registered_and_loadable() -> None:
         "report",
     )
     assert vertical_checklist_stage_order(mod) == mod.STAGE_ORDER
-    assert tuple(mod.STAGE_CHECKS) == mod.STAGE_ORDER
-    assert tuple(mod.REVIEWER_CHECKLISTS) == mod.STAGE_ORDER
 
 
 def test_materials_uses_proportional_independently_reviewed_workflow() -> None:
@@ -81,7 +79,7 @@ def test_materials_persists_and_seeds_scope(tmp_path) -> None:
     persist_vertical(tmp_path, "materials")
 
     state = json.loads(
-        (tmp_path / "research" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
+        (tmp_path / ".argus" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
     )
     assert state["vertical"] == "materials"
     assert state["current_stage"] == "scope"
@@ -220,7 +218,7 @@ def test_materials_final_stage_cannot_complete_without_indexed_evidence(tmp_path
     from argus_skill.skills.stage_machine import StageCompletionError, complete_final_stage
 
     persist_vertical(tmp_path, "materials")
-    state_path = tmp_path / "research" / "PIPELINE_STATE.json"
+    state_path = tmp_path / ".argus" / "PIPELINE_STATE.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["current_stage"] = "report"
     state_path.write_text(json.dumps(state), encoding="utf-8")

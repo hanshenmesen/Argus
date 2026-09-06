@@ -9,7 +9,7 @@ import platform
 import subprocess
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .tool_registry import (
@@ -119,7 +119,7 @@ def _scope(project_root: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, json.JSONDecodeError, TypeError) as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"{path}: invalid chip scope: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"{path}: expected a JSON object")
@@ -130,7 +130,7 @@ def _selected_pdk(scope: dict[str, Any], project_root: Path) -> str:
     target_path = project_root / "design" / "TARGET.json"
     try:
         target = json.loads(target_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
+    except (OSError, json.JSONDecodeError):
         target = {}
     if not isinstance(target, dict):
         target = {}
@@ -257,6 +257,27 @@ def _project_signals(project_root: Path) -> dict[str, list[str]]:
     }
 
 
+def _safe_project_marker(value: object) -> str | None:
+    """Return a portable relative marker, never a host path.
+
+    ``Path('/pdks/...').is_absolute()`` is false for ``WindowsPath`` because it
+    has no drive, even though it is an absolute POSIX path and must not be
+    persisted in a shareable audit. Check both path grammars so collecting on
+    one OS cannot leak a path written for the other.
+    """
+    raw = str(value).strip()
+    if not raw:
+        return None
+    normalized = raw.replace("\\", "/")
+    posix = PurePosixPath(normalized)
+    windows = PureWindowsPath(raw)
+    if posix.is_absolute() or windows.is_absolute() or windows.root:
+        return None
+    if ".." in posix.parts or ".." in windows.parts:
+        return None
+    return raw
+
+
 def collect(
     project_root: Path,
     *,
@@ -312,9 +333,9 @@ def collect(
                 "commands": sorted((record.get("executables") or {}).keys()),
                 "environment_variables": sorted(record.get("env_vars") or []),
                 "project_markers": sorted(
-                    str(value)
+                    marker
                     for value in record.get("source_markers") or []
-                    if not Path(str(value)).is_absolute()
+                    if (marker := _safe_project_marker(value)) is not None
                 ),
             }
             for record in entries
@@ -366,7 +387,7 @@ def check(
     path = project_root / report
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError) as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         return False, [f"{path}: invalid or missing audit: {exc}"]
     if not isinstance(payload, dict):
         return False, [f"{path}: expected a JSON object"]

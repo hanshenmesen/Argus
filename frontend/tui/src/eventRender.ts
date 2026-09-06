@@ -6,6 +6,7 @@ import {
   mergeFragment,
   visibleAgentText,
 } from '../../core/src/events.js';
+import { formatMissionRouting } from '../../core/src/missionView.js';
 import { missionOutcomePresentation } from '../../core/src/missionOutcome.js';
 
 export { isReasoning, mergeFragment };
@@ -64,6 +65,23 @@ function trunc(s: string, n: number): string {
 }
 const S = (ev: EventMsg, k: string) => String((ev as Record<string, unknown>)[k] ?? '');
 
+function managerFailureText(ev: EventMsg): string {
+  const phase = S(ev, 'phase');
+  const cause = S(ev, 'cause') || S(ev, 'backend_error');
+  const raw = S(ev, 'error');
+  if (!phase || !cause) return `分流失败 ${trunc(raw, 160)}`;
+  const phaseLabel: Record<string, string> = {
+    backend: '后端',
+    parse: '解析',
+    contract: '契约：',
+    timeout: '超时',
+  };
+  const attempts = Number((ev as Record<string, unknown>).attempts || 0);
+  const attempt = attempts > 1 ? ` (第${attempts}次尝试)` : '';
+  const summary = `分流失败 · ${phaseLabel[phase] || phase} ${cause}${attempt}`;
+  return raw ? `${summary} · 原始错误: ${raw}` : summary;
+}
+
 /** Accept both lifecycle event schemas.  The supervised Engineer historically
  * emitted `round`, while other producers emitted `round_index`. */
 const roundNo = (ev: EventMsg): string | number => {
@@ -101,6 +119,28 @@ export function renderEvent(ev: EventMsg): Rendered | null {
         expand: true,
       } : null;
     }
+    if (kind === 'command_execution') {
+      const body = S(ev, 'text') || S(ev, 'command') || S(ev, 'action_summary');
+      return body ? {
+        role: layer,
+        label,
+        glyph: '▸ $',
+        text: body,
+        tone: S(ev, 'status') === 'failed' ? 'err' : 'dim',
+        expand: true,
+      } : null;
+    }
+    if (kind === 'tool_use' || kind === 'file_change') {
+      const body = S(ev, 'text') || S(ev, 'action_summary');
+      return body ? {
+        role: layer,
+        label,
+        glyph: kind === 'file_change' ? '✎' : '⚙',
+        text: body,
+        tone: S(ev, 'status') === 'failed' ? 'err' : 'dim',
+        expand: true,
+      } : null;
+    }
     return null;
   }
 
@@ -120,8 +160,18 @@ export function renderEvent(ev: EventMsg): Rendered | null {
   }
 
   if (t === 'life.manager.intent.started') return { role: 'manager', label: 'Manager', glyph: '🧭', text: '判断任务归属…', tone: 'info' };
-  if (t === 'life.manager.intent.completed') return { role: 'manager', label: 'Manager', glyph: '🧭', text: `→ ${S(ev, 'vertical') || S(ev, 'kind') || 'resolved'}`, tone: 'info' };
-  if (t === 'life.manager.intent.failed') return { role: 'manager', label: 'Manager', glyph: '⚠', text: `分流失败 ${trunc(S(ev, 'error'), 160)}`, tone: 'err' };
+  if (t === 'life.manager.intent.completed') {
+    const routing = formatMissionRouting({
+      route: S(ev, 'route') || 'team',
+      vertical: S(ev, 'vertical'),
+      workflow_mode: S(ev, 'workflow_mode'),
+      lifetime: S(ev, 'lifetime'),
+      continuous: (ev as Record<string, unknown>).continuous === true,
+      open_ended: (ev as Record<string, unknown>).open_ended === true,
+    });
+    return { role: 'manager', label: 'Manager', glyph: '🧭', text: `→ ${routing || S(ev, 'kind') || 'resolved'}`, tone: 'info' };
+  }
+  if (t === 'life.manager.intent.failed') return { role: 'manager', label: 'Manager', glyph: '⚠', text: managerFailureText(ev), tone: 'err', expand: true };
   if (t === 'life.manager.stage_decision') {
     const target = S(ev, 'target_stage') || S(ev, 'stage') || S(ev, 'current_stage');
     return { role: 'manager', label: 'Manager', glyph: '🧭', text: `${S(ev, 'action')}${target ? ` → ${target}` : ''} ${trunc(S(ev, 'reason'), 140)}`, tone: 'info' };

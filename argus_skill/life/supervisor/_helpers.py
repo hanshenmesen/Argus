@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ..memory import JournalEntry
 from ._constants import PLANNER_RECENT_FAILURE_STATUS
@@ -12,19 +12,19 @@ from ._constants import PLANNER_RECENT_FAILURE_STATUS
 def _resolve_task_dep_ids(
     deps: list[str],
     key_map: dict[str, str],
+    normalized_key_map: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Map a task's *local* dep keys to real backlog item ids.
+    """Map a task's dependency keys to real backlog item ids.
 
-    ``deps`` are the local ``key`` references the planner emitted on a task;
-    ``key_map`` maps each in-batch local key to the real ``BacklogItem.id``
-    chosen for the task that declared it. Returns ``(resolved_ids,
-    unresolved_keys)``:
+    ``key_map`` includes local keys from this batch plus persisted node keys
+    from earlier planning cycles. Returns ``(resolved_ids, unresolved_keys)``:
 
-    * a local key present in ``key_map`` becomes its real item id (de-duped,
+    * a known key becomes its real item id (de-duped,
       order-preserving — a dep can only be satisfied once);
-    * a local key NOT in ``key_map`` (typo, or a cross-cycle reference, which
-      is unsupported) is dropped and reported in ``unresolved_keys`` so the
-      caller can ``log.warning`` it.
+    * an exact key wins; otherwise a uniquely resolved normalized key alias is
+      accepted (case-insensitive, with dashes/underscores/spaces equivalent);
+    * an unknown or ambiguous key is dropped and reported in
+      ``unresolved_keys``.
 
     A task with no ``deps`` yields ``([], [])`` — i.e. a flat item, scheduled
     exactly as before the DAG existed.
@@ -34,6 +34,8 @@ def _resolve_task_dep_ids(
     seen: set[str] = set()
     for key in deps:
         item_id = key_map.get(key)
+        if item_id is None and normalized_key_map is not None:
+            item_id = normalized_key_map.get(_normalize_task_dep_key(key))
         if item_id is None:
             unresolved.append(key)
             continue
@@ -42,6 +44,27 @@ def _resolve_task_dep_ids(
         seen.add(item_id)
         resolved.append(item_id)
     return resolved, unresolved
+
+
+def _normalize_task_dep_key(value: object) -> str:
+    """Canonicalize a Planner-local dependency key for alias matching."""
+    return re.sub(r"[-_\s]+", "_", str(value or "").strip().casefold())
+
+
+def _unique_normalized_task_key_aliases(
+    entries: list[tuple[str, str]],
+) -> dict[str, str]:
+    """Return normalized aliases only where every spelling names one item."""
+    candidates: dict[str, set[str]] = {}
+    for key, item_id in entries:
+        alias = _normalize_task_dep_key(key)
+        if alias:
+            candidates.setdefault(alias, set()).add(item_id)
+    return {
+        alias: next(iter(item_ids))
+        for alias, item_ids in candidates.items()
+        if len(item_ids) == 1
+    }
 
 
 def _operator_only_blocker_paths_for_project(project_root: Path) -> list[Path]:
@@ -144,9 +167,10 @@ def _sanitize_planner_task_text(text: str) -> str:
         value,
     )
     for source in sorted(legacy_sources, key=len, reverse=True):
-        if Path(source).name not in {"Argus", "argus-skill"}:
+        source_path = PurePosixPath(source)
+        if source_path.name not in {"Argus", "argus-skill"}:
             continue
-        research_playbook = str(Path(source).parent / "research.md")
+        research_playbook = str(source_path.parent / "research.md")
         value = _replace_path_token(
             value,
             research_playbook,
@@ -245,4 +269,16 @@ def _is_recent_no_progress_failure(entry: JournalEntry) -> bool:
         or extra.get("failure_status")
         or ""
     ).strip().casefold()
-    return terminal_status == PLANNER_RECENT_FAILURE_STATUS
+    if terminal_status != PLANNER_RECENT_FAILURE_STATUS:
+        return False
+    # Quarantine is for a task signature that has proved unrecoverable. A
+    # mission recorded as resumable — a Reviewer answered the stall with
+    # ``continue``, or the stop kind was recoverable — has not: skipping it
+    # leaves the Planner with nothing to enqueue and the project idle against
+    # an unfinished goal. Both fields are read because the settlement event
+    # carries the flag at top level and inside the outcome dimensions.
+    outcome = extra.get("outcome")
+    outcome_resumable = (
+        outcome.get("resumable") if isinstance(outcome, dict) else False
+    )
+    return not bool(extra.get("resumable") or outcome_resumable)

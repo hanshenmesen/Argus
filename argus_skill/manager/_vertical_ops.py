@@ -11,15 +11,21 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
+from ..core.role_decision import latest_role_decision
 from ..skills import vertical_select
 from ..skills.vertical_select import (
     persist_vertical,
 )
 from ._helpers import (
+    _DEFAULT_FAST_ROUTE_MAX_PROMPT_CHARS,
+    _DEFAULT_FAST_ROUTE_MAX_TASK_CHARS,
     _DEFAULT_GROUNDED_ROUTE_MAX_PROMPT_CHARS,
     _manager_backend_failure,
+    _manager_fast_route_enabled,
+    _manager_fast_route_min_confidence,
     _manager_model,
     _manager_reasoning_effort,
     _manager_route_positive_int,
@@ -28,7 +34,11 @@ from ._helpers import (
     log,
 )
 from ._session_ops import _restore_files_on_error
-from .domain_author import VerticalDecision, VerticalDecisionError
+from .domain_author import (
+    ManagerClassificationContractError,
+    VerticalDecision,
+    VerticalDecisionError,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -47,10 +57,170 @@ def _software_grounding_required(workflow_mode: str) -> bool:
     raw = os.environ.get("ARGUS_SKILL_SOFTWARE_REQUIRE_GROUNDING", "").strip().lower()
     if raw:
         return raw in {"1", "true", "yes", "on"}
-    return workflow_mode != "direct"
+    # The grounded vertical decision already inspected the repository. Planner
+    # and Engineer own any further task-specific inspection, so a second fresh
+    # Manager inspection is opt-in rather than the staged-work default.
+    return False
 
 
 _CURRENT_OPERATOR_MARKER = "[CURRENT OPERATOR MESSAGE]"
+_ROUTING_RUNTIME_ENTRIES = frozenset({".argus", ".autors"})
+_ROUTING_PROJECT_MARKERS = frozenset({
+    ".git",
+    "AGENTS.md",
+    "Cargo.toml",
+    "CMakeLists.txt",
+    "go.mod",
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+})
+
+
+def _routing_workspace_snapshot(root: Path | str) -> dict[str, Any]:
+    """Return bounded deterministic routing evidence without model tool use."""
+    path = Path(root).expanduser().resolve()
+    try:
+        entries = sorted(
+            (
+                child.name + ("/" if child.is_dir() else "")
+                for child in path.iterdir()
+                if child.name not in _ROUTING_RUNTIME_ENTRIES
+            ),
+            key=str.casefold,
+        )[:40]
+    except OSError:
+        return {
+            "root": str(path),
+            "accessible": False,
+            "workspace_empty": False,
+            "entries": [],
+            "project_markers": [],
+        }
+    marker_names = {
+        entry.rstrip("/")
+        for entry in entries
+        if entry.rstrip("/") in _ROUTING_PROJECT_MARKERS
+    }
+    return {
+        "root": str(path),
+        "accessible": True,
+        "workspace_empty": not entries,
+        "entries": entries,
+        "project_markers": sorted(marker_names),
+    }
+
+
+def _render_routing_workspace_snapshot(snapshot: dict[str, Any]) -> str:
+    entries = list(snapshot.get("entries") or [])
+    markers = list(snapshot.get("project_markers") or [])
+    return (
+        "\n\n## Host workspace snapshot (authoritative bounded routing evidence)\n"
+        f"manager_tool_root={snapshot.get('root') or ''}\n"
+        "container_path_mapping=/app -> manager_tool_root (Manager tools must use "
+        "the Host path; preserve /app only inside commands handed to Engineer)\n"
+        f"accessible={str(bool(snapshot.get('accessible'))).lower()}\n"
+        f"workspace_empty={str(bool(snapshot.get('workspace_empty'))).lower()}\n"
+        f"project_markers={'; '.join(str(value) for value in markers) or 'none'}\n"
+        f"top_level_entries={'; '.join(str(value) for value in entries) or 'none'}\n"
+        "An empty snapshot is sufficient evidence that no repository-specific "
+        "capability can be reused. Do not call a tool merely to repeat it."
+    )
+
+
+def _render_active_route_contract(
+    *,
+    vertical: str,
+    workflow_mode: str,
+    domain: str,
+    research_target_level: str,
+    research_direction_mode: str,
+    allow_change: bool,
+) -> str:
+    """Tell the model about the state that the parser will reconcile against."""
+    if not vertical:
+        return ""
+    if allow_change:
+        policy = (
+            "This is a new operator handoff. You may revise these values only when "
+            "the current requested outcome requires it; otherwise omit them or "
+            "preserve them."
+        )
+    else:
+        policy = (
+            "This is supplemental work inside an active campaign. If you select "
+            "the same vertical, preserve these values exactly; omit unchanged "
+            "fields rather than guessing replacements."
+        )
+    return (
+        "\n\n## Active persisted route contract (authoritative)\n"
+        f"vertical={vertical}\n"
+        f"workflow_mode={workflow_mode or 'unset'}\n"
+        f"domain={domain or 'none'}\n"
+        f"research_target_level={research_target_level or 'none'}\n"
+        f"research_direction_mode={research_direction_mode or 'none'}\n"
+        f"policy={policy}\n"
+        "Legal workflow_mode values: direct, staged. Legal research target values: "
+        "exploratory, publishable, doctoral. Legal research_direction_mode values: "
+        "broad, locked. Do not use a target level as a direction mode."
+    )
+
+
+def _backend_decision_error(
+    cause: object,
+    *,
+    task: str,
+    attempts: int,
+) -> VerticalDecisionError:
+    text = str(cause or "Manager backend failed").strip()
+    lower = text.casefold()
+    phase = (
+        "timeout"
+        if isinstance(cause, TimeoutError)
+        or "timed out" in lower
+        or "timeout" in lower
+        else "backend"
+    )
+    return VerticalDecisionError(
+        text,
+        phase=phase,
+        attempts=attempts,
+        backend_error=text,
+        task=task,
+    )
+
+
+def _decision_requires_agent_grounding(
+    decision: VerticalDecision,
+    *,
+    snapshot: dict[str, Any],
+    builtin_verticals: set[str],
+    project_domains: set[str],
+) -> bool:
+    """Whether this decision needs evidence beyond the Host snapshot."""
+    if snapshot.get("accessible") is not True:
+        return True
+    entries = snapshot.get("entries")
+    markers = snapshot.get("project_markers")
+    workspace_empty = snapshot.get("workspace_empty")
+    exact_empty = (
+        workspace_empty is True
+        and entries == []
+        and markers == []
+    )
+    consistent_nonempty = (
+        workspace_empty is False
+        and isinstance(entries, list)
+        and bool(entries)
+        and isinstance(markers, list)
+    )
+    if not (exact_empty or consistent_nonempty):
+        return True
+    if decision.choice != "existing":
+        return not exact_empty
+    if decision.vertical in project_domains or decision.vertical not in builtin_verticals:
+        return True
+    return False
 
 
 class _VerticalDecisionMixin:
@@ -81,6 +251,9 @@ class _VerticalDecisionMixin:
             "relevant grounding Skill on demand if one exists. The tool working "
             "directory is already the repository root: use relative paths, never "
             "guess another checkout path, and never search the filesystem root. "
+            "Use at most three targeted tool operations. Keep each result under "
+            "80 lines and the combined returned evidence under 16,000 characters; "
+            "do not repeat a listing/search already present in the task. "
             "Return only a compact human-readable grounding brief with: "
             "architecture/call path, closest unchanged analogue, affected "
             "callers and compatibility surfaces, exact build/test commands, "
@@ -144,11 +317,20 @@ class _VerticalDecisionMixin:
         try:
             override = research_target_env_override()
         except ValueError as exc:
-            raise VerticalDecisionError(str(exc)) from exc
+            raise VerticalDecisionError(
+                str(exc),
+                phase="contract",
+                contract_field="ARGUS_SKILL_RESEARCH_TARGET_LEVEL",
+                task=task,
+            ) from exc
         if override is not None:
             if override not in supported_levels:
                 raise VerticalDecisionError(
-                    f"research target {override!r} is not supported by this vertical"
+                    f"research_target_level got {override!r}, expected "
+                    + "|".join(supported_levels),
+                    phase="contract",
+                    contract_field="research_target_level",
+                    task=task,
                 )
             return override
         backend = self._session or self.runner
@@ -166,35 +348,52 @@ class _VerticalDecisionMixin:
         from .domain_author import parse_research_target_level
         from .stage_decider import extract_answer
 
-        with self._task_usage_scope(root_task_id):
-            result = gateway_run_exec(
-                backend,
-                prompt=build_research_target_prompt(
-                    task,
-                    supported_levels=supported_levels,
-                ),
-                options=RunnerOptions(
-                    model=_manager_model(),
-                    reasoning_effort=_manager_reasoning_effort(),
-                    working_dir=str(self.execution_workdir),
-                    dangerous_yolo=True,
-                    skip_git_repo_check=True,
-                ),
-                run_label="manager-research-target",
-            )
+        try:
+            with self._task_usage_scope(root_task_id):
+                result = gateway_run_exec(
+                    backend,
+                    prompt=build_research_target_prompt(
+                        task,
+                        supported_levels=supported_levels,
+                    ),
+                    options=RunnerOptions(
+                        model=_manager_model(),
+                        reasoning_effort=_manager_reasoning_effort(),
+                        working_dir=str(self.execution_workdir),
+                        dangerous_yolo=True,
+                        skip_git_repo_check=True,
+                    ),
+                    run_label="manager-research-target",
+                )
+        except Exception as exc:  # noqa: BLE001 - preserve provider cause
+            raise _backend_decision_error(exc, task=task, attempts=1) from exc
         failed, detail = _manager_backend_failure(result)
         if failed:
-            raise VerticalDecisionError(
-                "Manager research-target backend failed"
-                + (f": {detail}" if detail else "")
-            )
+            cause = detail or "Manager research-target backend failed"
+            raise _backend_decision_error(cause, task=task, attempts=1)
+        process_decision = latest_role_decision(result, "manager")
+        raw_reply = (
+            process_decision
+            if process_decision is not None
+            else extract_answer(result)
+        )
         target_level = parse_research_target_level(
-            extract_answer(result),
+            raw_reply,
             supported_levels=supported_levels,
         )
         if target_level is None:
+            from .domain_author import research_target_contract_violation
+
+            violation = research_target_contract_violation(
+                raw_reply,
+                supported_levels=supported_levels,
+            )
             raise VerticalDecisionError(
-                "Manager did not produce a valid research_target_level"
+                violation.cause,
+                phase=violation.phase,
+                contract_field=violation.field,
+                model_reply_snippet=raw_reply,
+                task=task,
             )
         return target_level
 
@@ -203,17 +402,84 @@ class _VerticalDecisionMixin:
         task: str,
         *,
         root_task_id: str | None = None,
+        allow_route_contract_change: bool = False,
+    ) -> VerticalDecision:
+        """Classify one task and maintain the resolved model's durable streak.
+
+        Only the two typed capability-contract failures are recorded.  A full
+        successful classification clears this model's streak; provider and
+        other operational failures leave it unchanged and retain their
+        existing exception/message behavior.
+        """
+        from .classification_contract import (
+            record_contract_failure,
+            reset_contract_failures,
+        )
+
+        # Keep the diagnostic streak label separate from the runner option.
+        # For a custom Codex provider an empty model means "use that provider's
+        # configured default"; the human-readable placeholder must never be
+        # passed as a literal model id.
+        manager_model_id = _manager_model()
+        resolved_model_id = manager_model_id or "<backend default>"
+        try:
+            decision = self._decide_vertical_once(
+                task,
+                root_task_id=root_task_id,
+                allow_route_contract_change=allow_route_contract_change,
+                resolved_model_id=manager_model_id,
+            )
+        except ManagerClassificationContractError as exc:
+            try:
+                with self.pipeline_lock():
+                    count = record_contract_failure(
+                        self.project_root,
+                        model_id=resolved_model_id,
+                        clause=exc.clause,
+                    )
+            except Exception:  # noqa: BLE001 - diagnostics must not mask fail-closed routing
+                log.exception("could not persist Manager contract-failure streak")
+                count = 0
+            exc.attach_streak(
+                model_id=resolved_model_id,
+                consecutive_count=count,
+            )
+            raise
+        try:
+            with self.pipeline_lock():
+                reset_contract_failures(
+                    self.project_root,
+                    model_id=resolved_model_id,
+                )
+        except Exception:  # noqa: BLE001 - a diagnostic reset must not reject a valid route
+            log.exception("could not reset Manager contract-failure streak")
+        return decision
+
+    def _decide_vertical_once(
+        self,
+        task: str,
+        *,
+        root_task_id: str | None = None,
+        allow_route_contract_change: bool = False,
+        resolved_model_id: str | None = None,
     ) -> VerticalDecision:
         """Choose the vertical for ``task``.
 
-        Every formal task is classified by the Manager itself after mandatory,
-        bounded repository inspection. A vertical decision without observed tool
-        activity is rejected rather than persisted, even when the model claims a
-        confident existing-vertical match.
+        Every formal task is classified by the Manager. The Host supplies a
+        bounded deterministic workspace snapshot; empty/new workspaces and clear
+        built-in capabilities do not require ceremonial Agent tool use. Decisions
+        that depend on an existing repository, project domain, or new capability
+        require observed tool evidence and receive at most one automatic retry.
 
         FAIL-HARD when agent judgment is needed: no backend, or a model reply that
         is missing / not a valid choice, RAISES ``VerticalDecisionError``. There is
         NO keyword classifier and NO silent fallback to the research default.
+
+        Persisted route values are immutable by default for durable recovery and
+        supplemental work. The operator front door explicitly enables
+        ``allow_route_contract_change`` for a new handoff outside an active
+        campaign, where Manager is authorized to choose a different topology or
+        success bar for the new requested outcome.
         """
         # Routing is intentionally isolated from the persistent Manager chat
         # session. Reusing prior conversation would violate the fast pass's
@@ -221,16 +487,27 @@ class _VerticalDecisionMixin:
         backend = self.runner
         if backend is None:
             raise VerticalDecisionError(
-                "cannot decide the vertical: the Manager has no backend/runner"
+                "Manager has no backend/runner",
+                phase="backend",
+                backend_error="Manager has no backend/runner",
+                task=task,
             )
+        attempts_made = 0
+        manager_model = resolved_model_id or _manager_model()
         from ..core.models import RunnerOptions
         from ..domains import BUILTIN_DOMAINS, DOMAIN_PURPOSES
-        from ..roles.prompts.manager import build_vertical_decision_prompt
+        from ..roles.prompts.manager import (
+            build_fast_vertical_decision_prompt,
+            build_vertical_decision_prompt,
+        )
         from ..verticals._data_domain import (
             list_all_data_domain_names,
             list_selectable_data_domain_summaries,
         )
-        from .domain_author import parse_vertical_decision
+        from .domain_author import (
+            parse_fast_vertical_decision,
+            parse_vertical_decision,
+        )
         from .stage_decider import extract_answer
 
         existing_summaries = list_selectable_data_domain_summaries(
@@ -263,111 +540,408 @@ class _VerticalDecisionMixin:
         )
         backend_name = str(
             getattr(backend, "_backend_name", "")
-            or getattr(self.runner, "_backend_name", "")
             or ""
         ).strip().lower()
+        known_verticals = list(vertical_select.available_verticals())
+        persisted_vertical = (
+            vertical_select.resolve_vertical_if_decided(self.project_root) or ""
+        )
+        persisted_workflow_mode = (
+            vertical_select.resolve_workflow_mode(self.project_root)
+            if persisted_vertical
+            else ""
+        )
+        persisted_domain = (
+            vertical_select.resolve_domain_if_decided(self.project_root) or ""
+        )
+        from ..core.research_contract import (
+            resolve_research_direction_mode,
+            resolve_research_target_level,
+        )
 
-        with self._task_usage_scope(root_task_id):
-            prompt = build_vertical_decision_prompt(
+        persisted_research_target_level = (
+            resolve_research_target_level(self.project_root) or ""
+        )
+        persisted_research_direction_mode = (
+            resolve_research_direction_mode(self.project_root) or ""
+        )
+        active_route_contract = _render_active_route_contract(
+            vertical=persisted_vertical,
+            workflow_mode=persisted_workflow_mode,
+            domain=persisted_domain,
+            research_target_level=persisted_research_target_level,
+            research_direction_mode=persisted_research_direction_mode,
+            allow_change=allow_route_contract_change,
+        )
+
+        def finalize(decision: VerticalDecision) -> VerticalDecision:
+            if decision.choice == "existing":
+                from ..verticals._base import load_vertical_contract
+                from ..verticals._data_domain import materialize_learned_data_domain
+
+                materialize_learned_data_domain(
+                    self.learned_vertical_root,
+                    self.project_root,
+                    decision.vertical,
+                )
+                contract = load_vertical_contract(
+                    decision.vertical,
+                    project_root=self.project_root,
+                )
+                if contract.mission_kind == "software":
+                    decision.workflow_mode = _repository_workflow_mode(
+                        decision.workflow_mode
+                    )
+                    if decision.workflow_mode != "direct":
+                        decision.start_stage = ""
+                if (
+                    contract.ground_before_handoff
+                    and _software_grounding_required(decision.workflow_mode)
+                ):
+                    decision.execution_task = self._ground_execution_task(
+                        decision.execution_task,
+                        workflow_mode=decision.workflow_mode,
+                        root_task_id=root_task_id,
+                    )
+            if contextual_task and (
+                "[RECENT CONVERSATION CONTEXT" in decision.execution_task
+                or "[BOUNDED TASK CONTEXT" in decision.execution_task
+                or _CURRENT_OPERATOR_MARKER in decision.execution_task
+            ):
+                raise VerticalDecisionError(
+                    "Manager execution_task copied bounded conversation context "
+                    "instead of producing a standalone handoff",
+                    phase="contract",
+                    contract_field="execution_task",
+                    attempts=attempts_made,
+                    task=task,
+                )
+            return decision
+
+        workspace_snapshot = _routing_workspace_snapshot(self.execution_workdir)
+        if (
+            not contextual_task
+            and _manager_fast_route_enabled()
+            and bool(workspace_snapshot.get("workspace_empty"))
+            and not existing
+            and len(task.strip())
+            <= _manager_route_positive_int(
+                "ARGUS_SKILL_MANAGER_FAST_ROUTE_MAX_TASK_CHARS",
+                _DEFAULT_FAST_ROUTE_MAX_TASK_CHARS,
+            )
+        ):
+            fast_prompt = build_fast_vertical_decision_prompt(
                 task,
                 verticals_with_purpose=vertical_select.available_vertical_purposes(),
                 domains_with_purpose=DOMAIN_PURPOSES,
                 existing_data_domains=existing,
-                existing_data_domain_summaries=existing_summaries,
                 research_target_verticals=research_target_verticals,
-            )
-            grounded_prompt_limit = _manager_route_positive_int(
-                "ARGUS_SKILL_MANAGER_GROUNDED_ROUTE_MAX_PROMPT_CHARS",
-                _DEFAULT_GROUNDED_ROUTE_MAX_PROMPT_CHARS,
-            )
-            if len(prompt) > grounded_prompt_limit:
-                raise VerticalDecisionError(
-                    "Manager grounded-route prompt exceeds configured context cap "
-                    f"({len(prompt)} > {grounded_prompt_limit} characters)"
+            ) + active_route_contract
+            if len(fast_prompt) <= _manager_route_positive_int(
+                "ARGUS_SKILL_MANAGER_FAST_ROUTE_MAX_PROMPT_CHARS",
+                _DEFAULT_FAST_ROUTE_MAX_PROMPT_CHARS,
+            ):
+                attempts_made += 1
+                try:
+                    with self._task_usage_scope(root_task_id):
+                        fast_result = gateway_run_exec(
+                            backend,
+                            prompt=fast_prompt,
+                            options=RunnerOptions(
+                                model=manager_model,
+                                reasoning_effort=_manager_vertical_reasoning_effort(),
+                                working_dir=str(self.execution_workdir),
+                                sandbox_mode="read-only",
+                                force_safe_mode=True,
+                                skip_git_repo_check=True,
+                                disable_tools=True,
+                                extra_args=(
+                                    ["--ephemeral"]
+                                    if backend_name == "codex"
+                                    else None
+                                ),
+                            ),
+                            run_label="manager-classify-fast",
+                        )
+                except Exception as exc:  # noqa: BLE001 - preserve provider cause
+                    raise _backend_decision_error(
+                        exc,
+                        task=task,
+                        attempts=attempts_made,
+                    ) from exc
+                failed, detail = _manager_backend_failure(fast_result)
+                if failed:
+                    raise _backend_decision_error(
+                        detail or "Manager fast-route backend failed",
+                        task=task,
+                        attempts=attempts_made,
+                    )
+                fast_payload = latest_role_decision(fast_result, "manager")
+                fast_route = parse_fast_vertical_decision(
+                    fast_payload
+                    if fast_payload is not None
+                    else extract_answer(fast_result),
+                    known_verticals=known_verticals,
+                    known_domains=list(BUILTIN_DOMAINS),
+                    existing_data_domains=all_domain_names,
+                    research_target_verticals=research_target_verticals,
+                    persisted_vertical=persisted_vertical,
+                    persisted_workflow_mode=persisted_workflow_mode,
+                    persisted_domain=persisted_domain,
+                    persisted_research_target_level=(
+                        persisted_research_target_level
+                    ),
+                    persisted_research_direction_mode=(
+                        persisted_research_direction_mode
+                    ),
+                    allow_persisted_change=allow_route_contract_change,
+                    project_root=self.project_root,
                 )
-            grounded_extra_args = (
-                [
-                    "--no-custom-instructions",
-                    "--disable-builtin-mcps",
-                    "--context",
-                    "default",
-                ]
-                if backend_name == "copilot"
-                else None
-            )
-            result = gateway_run_exec(
-                backend,
-                prompt=prompt,
-                options=RunnerOptions(
-                    model=_manager_model(),
-                    reasoning_effort=_manager_vertical_reasoning_effort(),
-                    working_dir=str(self.execution_workdir),
-                    dangerous_yolo=True,
-                    skip_git_repo_check=True,
-                    extra_args=grounded_extra_args,
-                ),
-                run_label="manager-classify-grounded",
-            )
-        failed, detail = _manager_backend_failure(result)
-        if failed:
-            raise VerticalDecisionError(
-                "Manager grounded-route backend failed"
-                + (f": {detail}" if detail else "")
-            )
-        if not bool(getattr(result, "tool_activity_observed", False)):
-            raise VerticalDecisionError(
-                "Manager grounded vertical decision did not inspect repository tools"
-            )
-        answer = extract_answer(result)
-        decision = parse_vertical_decision(
-            answer,
-            known_verticals=list(vertical_select.available_verticals()),
-            known_domains=list(BUILTIN_DOMAINS),
-            existing_data_domains=all_domain_names,
-            research_target_verticals=research_target_verticals,
-            default_execution_task="" if contextual_task else task.strip(),
-        )
-        if decision is None:
-            raise VerticalDecisionError(
-                f"Manager could not decide a vertical for task {task!r}: the "
-                "model reply was missing or not a valid existing/new choice"
-            )
-        if decision.choice == "existing":
-            from ..verticals._base import load_vertical_contract
-            from ..verticals._data_domain import materialize_learned_data_domain
+                if (
+                    fast_route is not None
+                    and not fast_route.needs_grounding
+                    and fast_route.confidence >= _manager_fast_route_min_confidence()
+                ):
+                    return finalize(VerticalDecision(
+                        choice="existing",
+                        vertical=fast_route.vertical,
+                        domain=fast_route.domain,
+                        workflow_mode=fast_route.workflow_mode,
+                        start_stage=fast_route.start_stage,
+                        adaptation_reason=fast_route.rationale,
+                        execution_task=task.strip(),
+                        research_target_level=fast_route.research_target_level,
+                        research_direction_mode=(
+                            fast_route.research_direction_mode
+                        ),
+                        target_venue=fast_route.target_venue,
+                        require_independent_review=(
+                            fast_route.require_independent_review
+                        ),
+                        precise_constraints=fast_route.precise_constraints,
+                        exclusions=fast_route.exclusions,
+                        ambiguities=fast_route.ambiguities,
+                    ))
 
-            materialize_learned_data_domain(
-                self.learned_vertical_root,
-                self.project_root,
-                decision.vertical,
+        prompt = build_vertical_decision_prompt(
+            task,
+            verticals_with_purpose=vertical_select.available_vertical_purposes(),
+            domains_with_purpose=DOMAIN_PURPOSES,
+            existing_data_domains=existing,
+            existing_data_domain_summaries=existing_summaries,
+            research_target_verticals=research_target_verticals,
+        ) + active_route_contract + _render_routing_workspace_snapshot(
+            workspace_snapshot
+        )
+        grounded_prompt_limit = _manager_route_positive_int(
+            "ARGUS_SKILL_MANAGER_GROUNDED_ROUTE_MAX_PROMPT_CHARS",
+            _DEFAULT_GROUNDED_ROUTE_MAX_PROMPT_CHARS,
+        )
+        if len(prompt) > grounded_prompt_limit:
+            raise VerticalDecisionError(
+                "Manager grounded-route prompt exceeds configured context cap "
+                f"({len(prompt)} > {grounded_prompt_limit} characters)",
+                phase="contract",
+                contract_field="prompt_length",
+                attempts=attempts_made,
+                task=task,
             )
-            contract = load_vertical_contract(
-                decision.vertical,
+        grounded_extra_args = (
+            [
+                "--no-custom-instructions",
+                "--disable-builtin-mcps",
+                "--context",
+                "default",
+            ]
+            if backend_name == "copilot"
+            else (["--ephemeral"] if backend_name == "codex" else None)
+        )
+        options = RunnerOptions(
+            model=manager_model,
+            reasoning_effort=_manager_vertical_reasoning_effort(),
+            working_dir=str(self.execution_workdir),
+            sandbox_mode="read-only",
+            force_safe_mode=True,
+            skip_git_repo_check=True,
+            extra_args=grounded_extra_args,
+        )
+
+        def invoke_grounded_route(
+            route_prompt: str,
+            *,
+            run_label: str,
+        ) -> tuple[Any, VerticalDecision]:
+            nonlocal attempts_made
+            attempts_made += 1
+            try:
+                with self._task_usage_scope(root_task_id):
+                    route_result = gateway_run_exec(
+                        backend,
+                        prompt=route_prompt,
+                        options=options,
+                        run_label=run_label,
+                    )
+            except Exception as exc:  # noqa: BLE001 - preserve provider cause
+                raise _backend_decision_error(
+                    exc,
+                    task=task,
+                    attempts=attempts_made,
+                ) from exc
+            failed, detail = _manager_backend_failure(route_result)
+            if failed:
+                raise _backend_decision_error(
+                    detail or "Manager grounded-route backend failed",
+                    task=task,
+                    attempts=attempts_made,
+                )
+            route_payload = latest_role_decision(route_result, "manager")
+            raw_reply = (
+                route_payload
+                if route_payload is not None
+                else extract_answer(route_result)
+            )
+            route_decision = parse_vertical_decision(
+                raw_reply,
+                known_verticals=known_verticals,
+                known_domains=list(BUILTIN_DOMAINS),
+                existing_data_domains=all_domain_names,
+                research_target_verticals=research_target_verticals,
+                default_execution_task="" if contextual_task else task.strip(),
+                persisted_vertical=persisted_vertical,
+                persisted_workflow_mode=persisted_workflow_mode,
+                persisted_domain=persisted_domain,
+                persisted_research_target_level=(
+                    persisted_research_target_level
+                ),
+                persisted_research_direction_mode=(
+                    persisted_research_direction_mode
+                ),
+                allow_persisted_change=allow_route_contract_change,
                 project_root=self.project_root,
             )
-            if contract.mission_kind == "software":
-                decision.workflow_mode = _repository_workflow_mode(
-                    decision.workflow_mode
+            if route_decision is None:
+                from .classification_contract import STRUCTURED_DECISION_CLAUSE
+                from .domain_author import vertical_decision_contract_violation
+
+                violation = vertical_decision_contract_violation(
+                    raw_reply,
+                    known_verticals=known_verticals,
+                    known_domains=list(BUILTIN_DOMAINS),
+                    existing_data_domains=all_domain_names,
+                    research_target_verticals=research_target_verticals,
+                    default_execution_task="" if contextual_task else task.strip(),
+                    persisted_vertical=persisted_vertical,
+                    persisted_workflow_mode=persisted_workflow_mode,
+                    persisted_domain=persisted_domain,
+                    persisted_research_target_level=(
+                        persisted_research_target_level
+                    ),
+                    persisted_research_direction_mode=(
+                        persisted_research_direction_mode
+                    ),
+                    allow_persisted_change=allow_route_contract_change,
                 )
-            if (
-                contract.ground_before_handoff
-                and _software_grounding_required(decision.workflow_mode)
-            ):
-                decision.execution_task = self._ground_execution_task(
-                    decision.execution_task,
-                    workflow_mode=decision.workflow_mode,
-                    root_task_id=root_task_id,
+
+                raise ManagerClassificationContractError(
+                    violation.cause,
+                    clause=STRUCTURED_DECISION_CLAUSE,
+                    phase=violation.phase,
+                    contract_field=violation.field,
+                    attempts=attempts_made,
+                    model_reply_snippet=raw_reply,
+                    task=task,
                 )
-        if contextual_task and (
-            "[RECENT CONVERSATION CONTEXT" in decision.execution_task
-            or "[BOUNDED TASK CONTEXT" in decision.execution_task
-            or _CURRENT_OPERATOR_MARKER in decision.execution_task
-        ):
-            raise VerticalDecisionError(
-                "Manager execution_task copied bounded conversation context "
-                "instead of producing a standalone handoff"
+            return route_result, route_decision
+
+        try:
+            result, decision = invoke_grounded_route(
+                prompt,
+                run_label="manager-classify-grounded",
             )
-        return decision
+        except VerticalDecisionError as exc:
+            if contextual_task and isinstance(
+                exc, ManagerClassificationContractError
+            ):
+                result, decision = invoke_grounded_route(
+                    prompt
+                    + "\n\n## Context handoff correction\n"
+                    "The prior decision event was incomplete or invalid. Record one "
+                    "complete Manager decision event again. Because the Task contains bounded "
+                    "conversation context, EXECUTION_TASK is required: rewrite only "
+                    "the current intended work as a standalone handoff, preserving "
+                    "every explicit constraint and excluding the context markers. "
+                    "Use only direct/staged for workflow_mode, "
+                    "exploratory/publishable/doctoral for research_target_level, "
+                    "and broad/locked for research_direction_mode. Follow the Active "
+                    "persisted route contract policy above.",
+                    run_label="manager-classify-context-retry",
+                )
+            elif isinstance(exc, ManagerClassificationContractError):
+                result, decision = invoke_grounded_route(
+                    prompt
+                    + "\n\n## Decision-field correction\n"
+                    "The prior decision event violated this exact contract field: "
+                    f"{exc.contract_field or 'decision'} — {exc.cause}. "
+                    "Correct it and record one complete Manager decision event again. "
+                    "If choosing an "
+                    "existing project domain, put its exact slug in `vertical` and "
+                    "leave `domain` empty. `domain` may only name an optional research "
+                    "domain listed above.",
+                    run_label="manager-classify-field-retry",
+                )
+            elif "repeated tool call detected" not in str(exc):
+                raise
+            else:
+                result, decision = invoke_grounded_route(
+                    prompt
+                    + "\n\n## Tool-loop correction\n"
+                    "The prior turn repeated one failed tool call. Do not repeat it. "
+                    "Use manager_tool_root for any further repository inspection, or "
+                    "return the routing decision now if the Host snapshot and Task are "
+                    "already sufficient.",
+                    run_label="manager-classify-tool-loop-retry",
+                )
+        tool_activity = bool(getattr(result, "tool_activity_observed", False))
+        grounding_required = _decision_requires_agent_grounding(
+            decision,
+            snapshot=workspace_snapshot,
+            builtin_verticals=set(known_verticals),
+            project_domains=set(all_domain_names),
+        )
+        if grounding_required and not tool_activity:
+            correction = (
+                "\n\n## Required grounding retry\n"
+                "The prior structured decision selected a repository-sensitive "
+                "or project-local capability without Agent tool evidence. Use one "
+                "targeted read-only repository tool operation, then record the "
+                "complete Manager decision event. Do not broaden the search."
+            )
+            retry_prompt = prompt + correction
+            if len(retry_prompt) > grounded_prompt_limit:
+                raise VerticalDecisionError(
+                    "Manager grounded-route retry exceeds configured context cap",
+                    phase="contract",
+                    contract_field="prompt_length",
+                    attempts=attempts_made,
+                    task=task,
+                )
+            result, decision = invoke_grounded_route(
+                retry_prompt,
+                run_label="manager-classify-grounded-retry",
+            )
+            if not bool(getattr(result, "tool_activity_observed", False)):
+                from .classification_contract import REPOSITORY_TOOL_CLAUSE
+
+                raise ManagerClassificationContractError(
+                    "Manager grounded vertical decision did not inspect repository "
+                    "tools after one automatic retry",
+                    clause=REPOSITORY_TOOL_CLAUSE,
+                    phase="contract",
+                    contract_field="tool_activity_observed",
+                    attempts=attempts_made,
+                    task=task,
+                )
+        return finalize(decision)
 
     def _apply_vertical_decision_rendering(
         self,
@@ -398,7 +972,7 @@ class _VerticalDecisionMixin:
 
     # ---- split into the vertical's Stage template ----
     def plan_stages(self, vertical: str) -> list[str]:
-        """The vertical's Stage list (research → the 8-stage paper pipeline).
+        """Return the selected vertical's own ordered stages.
 
         Reads the validated vertical contract. Missing stages or a broken
         provider fail visibly; substituting another vertical would change the
@@ -496,7 +1070,9 @@ class _VerticalDecisionMixin:
                     stages=list(proposal.stages),
                     domain="",
                     workflow_mode=decision.workflow_mode,
+                    start_stage=decision.start_stage,
                     execution_task=decision.execution_task,
+                    require_independent_review=decision.require_independent_review,
                     proposed_domain=proposal, pending_confirmation=True,
                 )
                 self._apply_vertical_decision_rendering(decision)
@@ -507,6 +1083,10 @@ class _VerticalDecisionMixin:
                 _old_vertical=old_vertical,
                 execution_task=decision.execution_task,
                 workflow_mode=decision.workflow_mode,
+                start_stage=decision.start_stage,
+            )
+            division.require_independent_review = (
+                decision.require_independent_review
             )
             if force_stage_reset:
                 vertical_select.reset_stage_for_new_intent(
@@ -522,7 +1102,6 @@ class _VerticalDecisionMixin:
         from ..verticals._data_domain import (
             load_data_domain,
             materialize_learned_data_domain,
-            revise_data_domain_stages,
         )
 
         materialize_learned_data_domain(
@@ -530,42 +1109,36 @@ class _VerticalDecisionMixin:
             self.project_root,
             vertical,
         )
-        pipeline_state = self.project_root / "research" / "PIPELINE_STATE.json"
-        domain_path = (
-            self.project_root / "research" / "DOMAINS" / f"{vertical}.json"
+        from ..core.pipeline_state import (
+            legacy_pipeline_state_path,
+            primary_pipeline_state_path,
         )
-        index_path = self.project_root / "research" / "DOMAINS" / "INDEX.json"
-        adapted = bool(
-            decision.adapted_stages
-            and load_data_domain(vertical, self.project_root) is not None
-        )
-        restore_paths = [pipeline_state]
-        if adapted:
-            restore_paths.extend((domain_path, index_path))
-        with _restore_files_on_error(restore_paths):
-            if adapted:
-                revise_data_domain_stages(
-                    self.project_root,
-                    vertical,
-                    stages=decision.adapted_stages,
-                    reason=decision.adaptation_reason or task,
-                )
+
+        pipeline_states = [
+            primary_pipeline_state_path(self.project_root),
+            legacy_pipeline_state_path(self.project_root),
+        ]
+        with _restore_files_on_error(pipeline_states):
             stages = self.plan_stages(vertical)
             persist_vertical(
                 self.project_root,
                 vertical,
                 domain=decision.domain or None,
                 research_target_level=decision.research_target_level or None,
+                research_direction_mode=decision.research_direction_mode or None,
                 workflow_mode=decision.workflow_mode,
+                start_stage=decision.start_stage,
                 target_venue=decision.target_venue or None,
+                allow_research_direction_change=force_stage_reset,
             )
             vertical_select.reset_stage_for_new_intent(
                 self.project_root,
                 old_vertical=old_vertical,
                 new_vertical=vertical,
-                force_replacement=force_stage_reset or adapted,
+                force_replacement=force_stage_reset,
                 evidence_root=self.execution_workdir,
             )
+            self._adopt_operator_objective(vertical, decision, task)
         division = Division(
             task=task,
             vertical=vertical,
@@ -573,7 +1146,9 @@ class _VerticalDecisionMixin:
             kind=self._kind_for(vertical),
             stages=stages,
             workflow_mode=decision.workflow_mode,
+            start_stage=decision.start_stage,
             execution_task=decision.execution_task,
+            require_independent_review=decision.require_independent_review,
             learned_vertical_status=(
                 getattr(
                     load_data_domain(vertical, self.project_root),
@@ -587,6 +1162,66 @@ class _VerticalDecisionMixin:
         self._apply_vertical_decision_rendering(decision)
         return division
 
+    def _adopt_operator_objective(
+        self, vertical: str, decision: VerticalDecision, task: str
+    ) -> None:
+        """Hand the chosen vertical the operator's request, if it wants one.
+
+        A vertical whose completion rule depends on a choice core cannot make
+        (``math``: prove one named goal, or explore a direction?) gets exactly
+        one chance to record that choice from the operator's own words — here,
+        where the request text and the freshly persisted project state are both
+        in hand. Placed after ``reset_stage_for_new_intent`` so a rollback that
+        rewrites the pipeline state cannot erase what was just adopted.
+
+        ``execution_task`` before ``task``: it is the statement the pipeline
+        actually pursues, and a vertical that turns it into a completion target
+        must be measured against the same text the Planner and Engineer were
+        given. ``task`` is the fallback for the paths that never produced one.
+
+        Adopted into the execution workdir as well as the project root, when
+        those differ. Not belt-and-braces: ``_ensure_stage_completion`` invokes
+        the vertical validator with ``evidence_root or project_root``, so in the
+        split layout the daemon actually runs — pipeline state under
+        ``~/.argus-skill/projects/<sid>``, artifacts in the operator's repo —
+        the validator reads the *workdir* copy, and adopting only into the
+        project root would leave the gate exactly as unsatisfiable as before.
+        The two copies cannot drift: adoption never overwrites a resolved
+        objective, and both are written from this one request string.
+
+        Fail-open, like ``reset_stage_for_new_intent`` next to it. Raising here
+        would sink a correctly persisted vertical decision over an optional
+        convenience, and a learned data domain has no vertical module at all —
+        a lookup failure, not a defect. The cost of failing open is that the
+        vertical falls back to refusing completion with an explicit
+        unresolved-objective message, which is the state this hook exists to
+        improve on, not a silent wrong answer.
+        """
+        from ..verticals._base import (
+            load_vertical,
+            vertical_adopt_operator_objective,
+        )
+
+        request = decision.execution_task.strip() or task
+        roots = [self.project_root]
+        workdir = getattr(self, "execution_workdir", None)
+        if workdir is not None and Path(workdir) != Path(self.project_root):
+            roots.append(Path(workdir))
+        for root in roots:
+            try:
+                vertical_adopt_operator_objective(
+                    load_vertical(vertical, project_root=self.project_root),
+                    project_root=Path(root),
+                    request=request,
+                )
+            except Exception:  # noqa: BLE001 — never break division on a hook
+                _log.debug(
+                    "objective adoption skipped for %r at %s",
+                    vertical,
+                    root,
+                    exc_info=True,
+                )
+
     def commit_domain(
         self,
         task: str,
@@ -595,6 +1230,7 @@ class _VerticalDecisionMixin:
         _old_vertical: str | None = None,
         execution_task: str = "",
         workflow_mode: str = "staged",
+        start_stage: str = "",
         _lock_held: bool = False,
     ) -> Any:
         """Write the authored data domain to disk and persist it as the active
@@ -616,6 +1252,7 @@ class _VerticalDecisionMixin:
                 _old_vertical=_old_vertical,
                 execution_task=execution_task,
                 workflow_mode=workflow_mode,
+                start_stage=start_stage,
             )
 
     def _commit_domain_locked(
@@ -626,6 +1263,7 @@ class _VerticalDecisionMixin:
         _old_vertical: str | None,
         execution_task: str,
         workflow_mode: str,
+        start_stage: str,
     ) -> Any:
         from ..verticals._data_domain import write_data_domain
         from ._core import Division
@@ -633,14 +1271,22 @@ class _VerticalDecisionMixin:
         if _old_vertical is None:
             _old_vertical = vertical_select._persisted_vertical(self.project_root)
 
-        pipeline_state = self.project_root / "research" / "PIPELINE_STATE.json"
+        from ..core.pipeline_state import (
+            legacy_pipeline_state_path,
+            primary_pipeline_state_path,
+        )
+
+        pipeline_states = [
+            primary_pipeline_state_path(self.project_root),
+            legacy_pipeline_state_path(self.project_root),
+        ]
         domain_path = (
             self.project_root
             / "research"
             / "DOMAINS"
             / f"{proposal.name}.json"
         )
-        with _restore_files_on_error([pipeline_state, domain_path]):
+        with _restore_files_on_error([*pipeline_states, domain_path]):
             write_data_domain(
                 self.project_root,
                 proposal.name,
@@ -659,6 +1305,7 @@ class _VerticalDecisionMixin:
                 self.project_root,
                 proposal.name,
                 workflow_mode=workflow_mode,
+                start_stage=start_stage,
             )
             vertical_select.reset_stage_for_new_intent(
                 self.project_root,
@@ -674,6 +1321,7 @@ class _VerticalDecisionMixin:
                 or str(getattr(proposal, "execution_task", "") or "")
             ),
             workflow_mode=workflow_mode,
+            start_stage=start_stage,
             pending_confirmation=False,
             learned_vertical_status="candidate",
         )

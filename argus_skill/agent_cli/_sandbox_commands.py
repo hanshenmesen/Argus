@@ -18,9 +18,13 @@ from .runner_backend import (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_COPILOT,
+    BACKEND_CURSOR,
+    BACKEND_DSH,
     BACKEND_GROK,
     BACKEND_OPENCODE,
     BACKEND_PI,
+    BACKEND_QODER,
+    CLAUDE_FAMILY,
     RunnerBackend,
 )
 
@@ -31,6 +35,10 @@ log = logging.getLogger(__name__)
 # via ``--agent``).
 _OPENCODE_READ_ONLY_AGENT = "argus-read-only"
 _OPENCODE_FULL_ACCESS_AGENT = "argus-full-access"
+_OPENCODE_NO_TOOLS_AGENT = "argus-no-tools"
+_COPILOT_NO_TOOLS_SENTINEL = "__argus_no_tools__"
+_OPENCODE_OX_ALPHA_MODEL = "opencode/x-preview-f-free"
+_OPENCODE_OX_ALPHA_WARNED = False
 
 
 def _pi_session_dir() -> str:
@@ -96,6 +104,22 @@ def _opencode_model(model: str) -> str:
     return ""
 
 
+def _opencode_variant(model: str, reasoning_effort: str | None) -> str:
+    """Select a working OpenCode variant for the resolved model."""
+    if model != _OPENCODE_OX_ALPHA_MODEL:
+        return str(reasoning_effort or "").strip()
+    global _OPENCODE_OX_ALPHA_WARNED
+    requested = str(reasoning_effort or "").strip()
+    if requested not in {"", "low"} and not _OPENCODE_OX_ALPHA_WARNED:
+        _OPENCODE_OX_ALPHA_WARNED = True
+        log.warning(
+            "OpenCode Ox Alpha %r is unstable for tool turns; using variant "
+            "'low' instead",
+            requested,
+        )
+    return "low"
+
+
 def _configured_provider(knob: str) -> str:
     """Operator-configured provider prefix for a backend, or ``""`` if unset."""
     from ..core.knobs import resolve_knob
@@ -140,15 +164,25 @@ _READ_ONLY_FLAG_SWITCHES = frozenset({
     "--allow-tool",
     "--available-tools",
     "--autopilot",
+    "--auto-review",
     "--dangerously-bypass-approvals-and-sandbox",
     "--dangerously-bypass-hook-trust",
     "--dangerously-skip-permissions",
     "--auto",
     "--full-auto",
+    "--force",
+    "-f",
     "--permission-mode",
+    "--mode",
     "--sandbox",
     "--tools",
     "--yolo",
+    "--trust",
+    "--workspace",
+    "--worktree",
+    "--worktree-base",
+    "--skip-worktree-setup",
+    "--approve-mcps",
     "--agent",
     "--approve",
     "-a",
@@ -173,6 +207,10 @@ _READ_ONLY_VALUE_SWITCHES = frozenset({
     "--dir",
     "--permission-mode",
     "--sandbox",
+    "--mode",
+    "--workspace",
+    "--worktree",
+    "--worktree-base",
     "--tools",
     "-C",
     "-s",
@@ -234,10 +272,15 @@ class CommandBuilderMixin:
     def _build_command(
         self, *, resume_thread_id: str | None, options
     ) -> list[str]:
-        if self.backend == BACKEND_CLAUDE:
+        if self.backend in CLAUDE_FAMILY:
+            # qoder is a Claude Code fork; it takes the same headless argv.
             return self._build_claude_command(resume_thread_id=resume_thread_id, options=options)
         if self.backend == BACKEND_COPILOT:
             return self._build_copilot_command(
+                resume_thread_id=resume_thread_id, options=options
+            )
+        if self.backend == BACKEND_CURSOR:
+            return self._build_cursor_command(
                 resume_thread_id=resume_thread_id, options=options
             )
         if self.backend == BACKEND_OPENCODE:
@@ -252,13 +295,17 @@ class CommandBuilderMixin:
             return self._build_grok_command(
                 resume_thread_id=resume_thread_id, options=options
             )
+        if self.backend == BACKEND_DSH:
+            return self._build_dsh_command(
+                resume_thread_id=resume_thread_id, options=options
+            )
         return self._build_codex_command(resume_thread_id=resume_thread_id, options=options)
 
     def _apply_sandbox_policy(self, options):
         """Apply the operator's single global access policy."""
         import dataclasses
 
-        safe_mode = (
+        safe_mode = options.force_safe_mode or (
             os.environ.get("ARGUS_SKILL_SAFE_MODE", "0").strip().lower()
             in {"1", "true", "yes", "on"}
         )
@@ -273,9 +320,12 @@ class CommandBuilderMixin:
         if self.backend in (
             BACKEND_CLAUDE,
             BACKEND_COPILOT,
+            BACKEND_CURSOR,
             BACKEND_GROK,
             BACKEND_OPENCODE,
             BACKEND_PI,
+            BACKEND_QODER,
+            BACKEND_DSH,
         ):
             return options
         if options.sandbox_mode is not None:
@@ -310,6 +360,31 @@ class CommandBuilderMixin:
         if resume_thread_id:
             command.append("resume")
         command.append("--json")
+        # Argus owns desktop/background completion notifications. Inheriting a
+        # Codex Desktop ``notify`` hook makes every non-interactive turn wait for
+        # an unrelated GUI helper after the authoritative ``turn.completed``
+        # event (10.3–10.6 seconds per call in the packaged-host trace). Override
+        # it only for this child invocation; the operator's config.toml is never
+        # modified, and later explicit extra args may still opt back in.
+        command.extend(["-c", "notify=[]"])
+        if options.disable_tools:
+            # Stateless Manager/Planner control calls need the operator's model
+            # provider and auth, but not interactive plugins, MCP servers, JS
+            # REPL startup or project exec-policy rules. Keeping the base config
+            # while overriding only these tool surfaces preserves custom
+            # providers and cuts several seconds of Codex startup per control
+            # turn (measured doctor startup: ~12s -> ~2.5s on this host).
+            command.extend([
+                "--ignore-rules",
+                "-c",
+                "mcp_servers={}",
+                "-c",
+                "plugins={}",
+                "-c",
+                "features.js_repl=false",
+                "-c",
+                'web_search="disabled"',
+            ])
         if options.model:
             command.extend(["-m", options.model])
         if options.reasoning_effort:
@@ -379,28 +454,37 @@ class CommandBuilderMixin:
     def _build_claude_command(
         self, *, resume_thread_id: str | None, options
     ) -> list[str]:
-        command = [
-            self.agent_bin,
-            "-p",
-            "--verbose",
-            "--output-format",
-            "stream-json",
-        ]
+        command = [self.agent_bin, "-p"]
+        # qodercli is a Claude Code fork that shares claude's headless surface
+        # but differs on three flags: it REJECTS --verbose, spells reasoning
+        # effort as --reasoning-effort (claude uses --effort), and takes
+        # snake_case permission modes (bypass_permissions / accept_edits).
+        is_qoder = self.backend == BACKEND_QODER
+        if not is_qoder:
+            command.append("--verbose")
+        command.extend(["--output-format", "stream-json"])
         if options.model:
             command.extend(["--model", options.model])
         if options.reasoning_effort:
-            effort = (
-                "high"
-                if options.reasoning_effort == "xhigh"
-                else options.reasoning_effort
+            # Both Claude and Qoder accept the full configured effort range.
+            command.extend(
+                ["--reasoning-effort" if is_qoder else "--effort",
+                 options.reasoning_effort]
             )
-            command.extend(["--effort", effort])
-        if options.sandbox_mode == "read-only":
+        if options.disable_tools:
+            command.extend(["--tools", ""])
+        elif options.sandbox_mode == "read-only":
             command.extend(["--tools", "Read,Glob,Grep"])
         elif options.dangerous_yolo:
-            command.extend(["--permission-mode", "bypassPermissions"])
+            command.extend([
+                "--permission-mode",
+                "bypass_permissions" if is_qoder else "bypassPermissions",
+            ])
         elif options.full_auto:
-            command.extend(["--permission-mode", "acceptEdits"])
+            command.extend([
+                "--permission-mode",
+                "accept_edits" if is_qoder else "acceptEdits",
+            ])
         # --add-dir
         if options.add_dirs:
             for dir_path in options.add_dirs:
@@ -457,7 +541,9 @@ class CommandBuilderMixin:
                 "--no-custom-instructions",
                 "--disable-builtin-mcps",
             ])
-        if options.sandbox_mode == "read-only":
+        if options.disable_tools:
+            command.append(f"--available-tools={_COPILOT_NO_TOOLS_SENTINEL}")
+        elif options.sandbox_mode == "read-only":
             command.extend([
                 "--available-tools", "view,rg,glob",
                 "--allow-tool", "view,rg,glob",
@@ -500,6 +586,41 @@ class CommandBuilderMixin:
         # 拼进 stdin prompt。
         return command
 
+    def _build_cursor_command(
+        self, *, resume_thread_id: str | None, options
+    ) -> list[str]:
+        """Build Cursor CLI print-mode argv; the prompt is delivered on stdin."""
+        command = [self.agent_bin, "-p", "--output-format", "stream-json"]
+        model = str(options.model or "").strip()
+        effort = str(options.reasoning_effort or "").strip()
+        if model:
+            if effort and "[" not in model:
+                model = f"{model}[effort={effort}]"
+            command.extend(["--model", model])
+        if options.disable_tools or options.sandbox_mode == "read-only":
+            command.extend(["--mode", "ask"])
+        elif options.dangerous_yolo or options.full_auto:
+            command.append("--force")
+        if options.working_dir:
+            command.extend(["--workspace", options.working_dir])
+        if options.add_dirs:
+            for dir_path in options.add_dirs:
+                command.extend(["--add-dir", dir_path])
+        if options.plugin_dirs:
+            for dir_path in options.plugin_dirs:
+                command.extend(["--plugin-dir", dir_path])
+        merged_extra_args = [*self.default_extra_args]
+        if options.extra_args:
+            merged_extra_args.extend(options.extra_args)
+        if options.disable_tools or options.sandbox_mode == "read-only":
+            merged_extra_args = _read_only_extra_args(
+                merged_extra_args, backend=BACKEND_CURSOR,
+            )
+        command.extend(merged_extra_args)
+        if resume_thread_id:
+            command.extend(["--resume", resume_thread_id])
+        return command
+
     def _build_opencode_command(
         self,
         *,
@@ -510,11 +631,14 @@ class CommandBuilderMixin:
         model = _opencode_model(options.model)
         if model:
             command.extend(["--model", model])
-        if options.reasoning_effort:
-            command.extend(["--variant", options.reasoning_effort])
+        variant = _opencode_variant(model, options.reasoning_effort)
+        if variant:
+            command.extend(["--variant", variant])
         if options.working_dir:
             command.extend(["--dir", options.working_dir])
-        if options.sandbox_mode == "read-only":
+        if options.disable_tools:
+            command.extend(["--agent", _OPENCODE_NO_TOOLS_AGENT])
+        elif options.sandbox_mode == "read-only":
             command.extend(["--agent", _OPENCODE_READ_ONLY_AGENT])
         elif options.dangerous_yolo or options.full_auto:
             command.extend(["--agent", _OPENCODE_FULL_ACCESS_AGENT])
@@ -570,7 +694,9 @@ class CommandBuilderMixin:
             command.extend(["--model", _pi_model(options.model)])
         if options.reasoning_effort:
             command.extend(["--thinking", options.reasoning_effort])
-        if options.sandbox_mode == "read-only":
+        if options.disable_tools:
+            command.append("--no-tools")
+        elif options.sandbox_mode == "read-only":
             command.extend(["--tools", "read,grep,find,ls"])
         merged_extra_args = [*self.default_extra_args]
         if options.extra_args:
@@ -613,7 +739,9 @@ class CommandBuilderMixin:
             command.extend(["--model", options.model])
         if options.reasoning_effort:
             command.extend(["--reasoning-effort", options.reasoning_effort])
-        if options.sandbox_mode == "read-only":
+        if options.disable_tools:
+            command.extend(["--tools", ""])
+        elif options.sandbox_mode == "read-only":
             command.extend(["--tools", "read_file,grep,list_dir"])
         elif options.dangerous_yolo or options.full_auto:
             command.append("--yolo")
@@ -631,3 +759,52 @@ class CommandBuilderMixin:
             command.extend(["--resume", resume_thread_id])
         # PromptDeliveryMixin appends --prompt-file with a private temporary file.
         return command
+
+
+    def _build_dsh_command(
+        self,
+        *,
+        resume_thread_id: str | None,
+        options,
+    ) -> list[str]:
+        """Build a DeepSeek Harness one-shot turn.
+
+        dsh has no stream-json surface, no session resume, and no model flag:
+        its headless profile runs one full agent turn and prints only the
+        final assistant text (exit 0 on completion; see
+        ``_finalize_turn_result`` in ``_run_exec.py``). The per-role model
+        rides in through the env-driven overlay attached via ``--patch``
+        (``ARGUS_DSH_PROVIDER`` / ``ARGUS_DSH_MODEL``) and the role's access
+        policy through ``DSH_PERMISSION_MODE`` (see ``_apply_dsh_env`` in
+        ``_prompt_delivery.py``). ``resume_thread_id`` is intentionally
+        ignored: the headless runner creates a fresh session per boot, and
+        round context travels in the prompt instead. The task positional is
+        appended by ``_prepare_prompt_delivery``.
+        """
+        command = [
+            self.agent_bin,
+            "--profile",
+            "headless",
+            "--patch",
+            _dsh_overlay_patch_path(),
+        ]
+        merged_extra_args = [*self.default_extra_args]
+        if options.extra_args:
+            merged_extra_args.extend(options.extra_args)
+        if options.sandbox_mode == "read-only":
+            merged_extra_args = _read_only_extra_args(
+                merged_extra_args,
+                backend=BACKEND_DSH,
+            )
+        if merged_extra_args:
+            command.extend(merged_extra_args)
+        return command
+
+def _dsh_overlay_patch_path() -> str:
+    """Path of the env-driven overlay attached to every dsh headless boot.
+
+    The overlay re-targets the deployment default model from
+    ``ARGUS_DSH_PROVIDER`` / ``ARGUS_DSH_MODEL`` and pins the approval
+    policy; see the file itself for the evaluated rows.
+    """
+    return str(Path(__file__).parent / "_dsh_overlay.patch.yml")

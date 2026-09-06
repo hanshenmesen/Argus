@@ -7,11 +7,16 @@ things that must NOT move with it.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from argus_skill.core.pipeline_state import (
+    primary_pipeline_state_path,
+    read_pipeline_state,
+    write_pipeline_state,
+)
 from argus_skill.core.verification_policy import (
     DEFAULT_POSTURE,
     DEFAULT_PROFILE,
@@ -28,25 +33,62 @@ from argus_skill.core.verification_policy import (
     set_policy,
     stored_policy,
 )
+from argus_skill.roles.prompts.reviewer import render_reviewer_prompt
+from argus_skill.verticals._base import load_vertical_contract
 
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    (tmp_path / "research").mkdir()
     return tmp_path
 
 
 def write_state(root: Path, **fields) -> None:
-    path = root / "research" / "PIPELINE_STATE.json"
-    payload = json.loads(path.read_text()) if path.exists() else {}
+    payload = read_pipeline_state(root)
     payload.update(fields)
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    write_pipeline_state(root, payload)
+
+
+def _profiles(vertical: str) -> dict[str, str]:
+    return dict(load_vertical_contract(vertical).verification_stage_profiles or {})
+
+
+def test_vertical_profile_reaches_reviewer_without_research_target(
+    tmp_path: Path,
+) -> None:
+    """MetaHarness-like verticals must not need a research target merely to
+    defer final certification to their last stage.
+    """
+    write_state(
+        tmp_path,
+        vertical="kernel_engineering",
+        current_stage="optimize",
+    )
+    prompt, _ = render_reviewer_prompt(
+        SimpleNamespace(skill_store=None),
+        objective="improve the harness from feedback",
+        operator_messages=[],
+        planner_review_instruction="",
+        round_index=0,
+        session_id=None,
+        main_summary="proposal is ready for its first measured run",
+        main_error=None,
+        working_dir=tmp_path,
+        vertical_state_root=tmp_path,
+        vertical="kernel_engineering",
+    )
+
+    assert "active vertical owns when verification becomes final" in prompt
+    assert "`develop` —" in prompt
 
 
 # -- defaults ---------------------------------------------------------------
 
 def test_defaults_are_balanced_and_adaptive(project: Path) -> None:
-    policy = resolve_policy(project, stage="research")
+    policy = resolve_policy(
+        project,
+        stage="idea",
+        stage_profiles=_profiles("research"),
+    )
 
     assert policy.posture == DEFAULT_POSTURE == "balanced"
     assert policy.configured_profile == DEFAULT_PROFILE == "adaptive"
@@ -54,21 +96,42 @@ def test_defaults_are_balanced_and_adaptive(project: Path) -> None:
 
 def test_a_missing_state_file_is_not_an_error(tmp_path: Path) -> None:
     assert stored_policy(tmp_path) == {}
-    assert resolve_policy(tmp_path, stage="research").profile == "explore"
+    assert (
+        resolve_policy(
+            tmp_path,
+            stage="idea",
+            stage_profiles=_profiles("research"),
+        ).profile
+        == "explore"
+    )
 
 
 def test_a_corrupt_state_file_falls_back_to_defaults(project: Path) -> None:
-    (project / "research" / "PIPELINE_STATE.json").write_text("{not json", encoding="utf-8")
+    path = primary_pipeline_state_path(project)
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
 
-    assert resolve_policy(project, stage="research").posture == "balanced"
+    assert (
+        resolve_policy(
+            project,
+            stage="idea",
+            stage_profiles=_profiles("research"),
+        ).posture
+        == "balanced"
+    )
 
 
 # -- the fix: early stages stop being judged as submissions ----------------
 
-def test_a_publishable_project_explores_during_the_research_stage(project: Path) -> None:
+def test_a_publishable_project_explores_during_the_idea_stage(project: Path) -> None:
     write_state(project, research_target_level="publishable")
 
-    policy = resolve_policy(project, stage="research", target_level="publishable")
+    policy = resolve_policy(
+        project,
+        stage="idea",
+        target_level="publishable",
+        stage_profiles=_profiles("research"),
+    )
 
     # The whole point: the project still aims at publishable, but this round
     # is judged as exploration.
@@ -80,26 +143,21 @@ def test_a_publishable_project_explores_during_the_research_stage(project: Path)
 @pytest.mark.parametrize(
     "stage,expected",
     [
-        ("research", "explore"), ("plan", "explore"),
-        ("benchmark", "develop"), ("run", "develop"),
-        ("analysis", "develop"), ("draft", "develop"),
-        ("review", "certify"), ("submission", "certify"),
+        ("idea", "explore"),
+        ("experiment", "develop"),
+        ("paper", "develop"),
+        ("review", "certify"),
     ],
 )
 def test_research_stage_mapping(stage, expected) -> None:
-    assert profile_for_stage(stage, "research") == expected
+    assert profile_for_stage(stage, _profiles("research")) == expected
 
 
-@pytest.mark.parametrize(
-    "stage,expected",
-    [
-        ("scope", "explore"), ("discover", "explore"), ("environment", "explore"),
-        ("baseline", "develop"), ("optimize", "develop"),
-        ("validate", "certify"), ("report", "certify"), ("deliver", "certify"),
-    ],
-)
-def test_kernel_stage_mapping(stage, expected) -> None:
-    assert profile_for_stage(stage, "kernel_engineering") == expected
+def test_kernel_stage_mapping_is_vertical_owned() -> None:
+    assert profile_for_stage(
+        "optimize",
+        _profiles("kernel_engineering"),
+    ) == "develop"
 
 
 # -- what must not move -----------------------------------------------------
@@ -108,7 +166,7 @@ def test_a_final_submission_is_always_certified(project: Path) -> None:
     # Even with the loosest possible configuration.
     write_state(project, verification_profile="explore", exploration_posture="frontier")
 
-    policy = resolve_policy(project, scope="final_submission", stage="research")
+    policy = resolve_policy(project, scope="final_submission", stage="idea")
 
     assert policy.profile == "certify"
     assert policy.source == "final_scope"
@@ -125,7 +183,11 @@ def test_final_scope_outranks_an_operator_override(project: Path) -> None:
 def test_an_operator_profile_outranks_the_stage_default(project: Path) -> None:
     write_state(project, verification_profile="certify")
 
-    policy = resolve_policy(project, stage="research")
+    policy = resolve_policy(
+        project,
+        stage="research",
+        stage_profiles=_profiles("research"),
+    )
 
     assert policy.profile == "certify"
     assert policy.source == "operator"
@@ -134,7 +196,14 @@ def test_an_operator_profile_outranks_the_stage_default(project: Path) -> None:
 def test_adaptive_defers_to_the_stage(project: Path) -> None:
     write_state(project, verification_profile="adaptive")
 
-    assert resolve_policy(project, stage="review").source == "stage"
+    assert (
+        resolve_policy(
+            project,
+            stage="review",
+            stage_profiles=_profiles("research"),
+        ).source
+        == "stage"
+    )
 
 
 def test_an_unknown_stage_is_reported_not_guessed(project: Path) -> None:
@@ -193,7 +262,7 @@ def test_setting_policy_preserves_other_state_fields(project: Path) -> None:
     write_state(project, research_target_level="publishable", other="keep me")
 
     set_policy(project, posture="frontier", stage="research")
-    payload = json.loads((project / "research" / "PIPELINE_STATE.json").read_text())
+    payload = read_pipeline_state(project)
 
     assert payload["research_target_level"] == "publishable"
     assert payload["other"] == "keep me"
@@ -239,7 +308,13 @@ def test_garbage_normalizes_to_none() -> None:
 
 def test_policy_line_is_short_enough_for_a_budgeted_prompt(project: Path) -> None:
     for stage in ("research", "run", "review"):
-        line = policy_line(resolve_policy(project, stage=stage))
+        line = policy_line(
+            resolve_policy(
+                project,
+                stage=stage,
+                stage_profiles=_profiles("research"),
+            )
+        )
         assert len(line) < 90, line
 
 
@@ -258,11 +333,11 @@ def test_reviewer_injects_the_resolved_profile_not_just_the_target() -> None:
     from argus_skill.roles.prompts import reviewer as mod
 
     source = Path(mod.__file__).read_text(encoding="utf-8")
-    block = source[source.index("research_target_instruction = (") :][:900]
+    block = source[source.index("verification_instruction = (") :][:1200]
 
     # Both bars are named, and they are named as different things.
-    assert "defines project completion" in block
-    assert "not this round" in block
+    assert "defines project " in block
+    assert "completion, not this round" in block
     assert "policy_line(_policy)" in block
     # The old wording made the project bar the round bar.
     assert "For project-level" not in block
@@ -281,7 +356,11 @@ def test_planner_injects_the_resolved_profile_too() -> None:
 
 def test_the_injected_block_is_shorter_than_what_it_replaced() -> None:
     """The old block was 386 chars and carried less information."""
-    policy = resolve_policy(Path("/nonexistent"), stage="research")
+    policy = resolve_policy(
+        Path("/nonexistent"),
+        stage="research",
+        stage_profiles=_profiles("research"),
+    )
     block = (
         "Project target `publishable` defines project completion, not this "
         f"round's bar. This round: {policy_line(policy)}. The integrity floor is "
@@ -290,3 +369,51 @@ def test_the_injected_block_is_shorter_than_what_it_replaced() -> None:
     )
 
     assert len(block) < 386
+
+
+def test_math_stages_each_resolve_to_a_declared_profile(tmp_path) -> None:
+    """Math was absent from ``STAGE_PROFILES`` and fell to the unresolved
+    fallback: profile ``develop`` with ``resolved=False``. ``solve`` came out
+    right by accident; ``review`` was certifying under a develop-grade policy
+    while reporting it had no policy at all."""
+    from argus_skill.core.verification_policy import resolve_policy
+
+    expected = {"scope": "explore", "solve": "develop", "review": "certify"}
+    for stage, profile in expected.items():
+        policy = resolve_policy(
+            tmp_path,
+            stage=stage,
+            vertical="math",
+            stage_profiles=_profiles("math"),
+        )
+        assert policy.resolved, f"math/{stage} still unresolved"
+        assert policy.source == "stage"
+        assert policy.profile == profile
+
+
+def test_math_review_stage_requires_the_proof_graph() -> None:
+    """The consequence the mapping exists for: ``review`` is the delivery point,
+    so a targeted project must have the graph its claim is discharged through."""
+    from argus_skill.verticals.math.proof_graph import graph_required_for
+
+    assert graph_required_for("certify", "targeted")
+    assert graph_required_for("develop", "targeted")
+    assert not graph_required_for("explore", "targeted")
+    assert not graph_required_for("certify", "exploratory")
+
+
+def test_vertical_owned_profile_tables_cover_declared_stages() -> None:
+    from argus_skill.core.verification_policy import VERIFICATION_PROFILES
+
+    for vertical in ("research", "math", "kernel_engineering"):
+        contract = load_vertical_contract(vertical)
+        table = dict(contract.verification_stage_profiles or {})
+        assert table
+        assert set(table) <= set(contract.stage_order)
+        assert set(table.values()) <= set(VERIFICATION_PROFILES)
+
+
+def test_core_has_no_concrete_vertical_profile_registry() -> None:
+    import argus_skill.core.verification_policy as policy
+
+    assert not hasattr(policy, "STAGE_PROFILES")

@@ -18,12 +18,17 @@ def _human_reason(reason: str, *, language_hint: str) -> str:
 
 
 def normalize_agent_options(
-    options: Iterable[Mapping[str, Any]],
+    options: Iterable[Mapping[str, Any] | str],
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     used_ids: set[str] = set()
-    for index, row in enumerate(options):
-        if not isinstance(row, Mapping):
+    rows: Iterable[Mapping[str, Any] | str] = (
+        (options,) if isinstance(options, str) else options
+    )
+    for index, row in enumerate(rows):
+        if isinstance(row, str):
+            row = {"label": row}
+        elif not isinstance(row, Mapping):
             continue
         label = str(row.get("label") or "").strip()[:160]
         if not label:
@@ -31,6 +36,8 @@ def normalize_agent_options(
         raw_id = str(row.get("id") or "").strip().casefold()
         option_id = re.sub(r"[^a-z0-9_-]+", "-", raw_id).strip("-_")
         if not option_id:
+            option_id = f"option-{index + 1}"
+        elif option_id == "custom":
             option_id = f"option-{index + 1}"
         base_id = option_id
         suffix = 2
@@ -50,10 +57,20 @@ def normalize_agent_options(
 
 
 def parse_agent_operator_options(message: str) -> list[dict[str, Any]]:
-    match = re.search(r"(?im)^\s*OPERATOR_OPTIONS\s*=\s*", str(message or ""))
+    text = "\n".join(
+        (
+            stripped[1:-1].strip()
+            if len(stripped := line.strip()) >= 2
+            and stripped.startswith("`")
+            and stripped.endswith("`")
+            else line
+        )
+        for line in str(message or "").splitlines()
+    )
+    match = re.search(r"(?im)^\s*OPERATOR_OPTIONS\s*=\s*", text)
     if match is None:
         return []
-    raw = str(message or "")[match.end():]
+    raw = text[match.end():]
     next_field = re.search(r"(?m)^\s*[A-Z][A-Z0-9_]{2,}\s*=", raw)
     if next_field is not None:
         raw = raw[:next_field.start()]
@@ -67,22 +84,23 @@ def parse_agent_operator_options(message: str) -> list[dict[str, Any]]:
             return []
         if not isinstance(payload, list):
             return []
-        return normalize_agent_options(
-            row for row in payload if isinstance(row, Mapping)
-        )
+        return normalize_agent_options(payload)
     options: list[dict[str, Any]] = []
     for encoded in raw.split(";"):
-        parts = [part.strip() for part in encoded.split("::", 3)]
-        if len(parts) != 4:
-            continue
-        option_id, requires_note, label, description = parts
-        if requires_note.casefold() not in {"true", "false"}:
+        parts = [part.strip() for part in encoded.split("::")]
+        if len(parts) == 3:
+            option_id, label, description = parts
+            requires_note = False
+        elif len(parts) == 4:
+            option_id, raw_requires_note, label, description = parts
+            requires_note = raw_requires_note.casefold() == "true"
+        else:
             continue
         options.append({
             "id": option_id,
             "label": label,
             "description": description,
-            "requires_note": requires_note.casefold() == "true",
+            "requires_note": requires_note,
         })
     return normalize_agent_options(options)
 
@@ -93,7 +111,7 @@ def build_operator_decision(
     title: str,
     reason: str,
     question: str,
-    options: Iterable[Mapping[str, Any]] = (),
+    options: Iterable[Mapping[str, Any] | str] = (),
     evidence: Iterable[Mapping[str, Any]] = (),
     project_id: str = "",
 ) -> dict[str, Any]:
@@ -130,8 +148,7 @@ def build_operator_decision(
 
 def selected_decision_text(card: Mapping[str, Any], option_id: str, note: str) -> str:
     note = note.strip()
-    options = card.get("options", [])
-    if not options and option_id == "custom":
+    if option_id == "custom":
         if not note:
             raise ValueError("this decision requires an answer")
         return note
@@ -145,10 +162,11 @@ def selected_decision_text(card: Mapping[str, Any], option_id: str, note: str) -
     )
     if option is None:
         raise ValueError("unknown decision option")
-    if bool(option.get("requires_note")) and not note:
+    requires_note = bool(option.get("requires_note"))
+    if requires_note and not note:
         raise ValueError("this option requires guidance")
     description = str(option.get("description") or "").strip()
-    if bool(option.get("requires_note")) and not description:
+    if requires_note and not description:
         return note
     selected_text = description or str(option.get("label") or "").strip()
     return f"{selected_text}\n\nOperator note: {note}" if note else selected_text

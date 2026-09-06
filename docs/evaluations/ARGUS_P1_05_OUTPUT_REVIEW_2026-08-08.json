@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-08",
+  "rubric": [
+    "result or current state is visible first",
+    "reason is concrete and fact-preserving",
+    "next action and owner are explicit",
+    "no internal-role knowledge is required",
+    "uncertainty or changed judgment is stated plainly"
+  ],
+  "cases": [
+    {
+      "id": "cli-blocker",
+      "surface": "CLI review",
+      "before": "round 4: review ⛔ blocked",
+      "after": "Cannot continue yet: the H100 benchmark.\nReason: The assigned runner is unavailable.\nNext: Argus will retry the named runner; no user action is needed."
+    },
+    {
+      "id": "web-mission-failure",
+      "surface": "Web mission completion",
+      "before": "Team ended · Run the validator · blocked",
+      "after": "Cannot continue yet: Run the validator.\nReason: The required credentials are unavailable.\nYour decision: provide credentials or remove the external requirement."
+    },
+    {
+      "id": "decision-card",
+      "surface": "operator decision",
+      "before": "REJECTED",
+      "after": "Cannot publish this result yet.\nReason: the combined stack has only one timed run, below the required N>=10.\nNext: Argus will run nine more paired measurements; no user action is needed."
+    },
+    {
+      "id": "operator-question",
+      "surface": "pending question",
+      "before": "Reviewer returned BLOCKED with AUTHORITY_IMPACT=operator. Choose A or B.",
+      "after": "Your decision is needed before work can continue.\nReason: H100 access is unavailable.\nShould Argus wait for H100 access, or close this as an H200-only result? Waiting preserves the H100 claim; closing now narrows the claim to H200."
+    },
+    {
+      "id": "changed-judgment",
+      "surface": "mission update",
+      "before": "REVISE: prior plan invalid.",
+      "after": "The current route needs to change. D128 forward+backward was effectively unchanged, so the D64 fusion no longer justifies its maintenance cost. Next: keep the small correctness fix and retire the performance stack."
+    }
+  ],
+  "blind_review": {
+    "reviewers": [
+      {
+        "id": "blind-1",
+        "model": "gpt-5.6-sol",
+        "preferred_after": 5,
+        "cases": 5,
+        "duration_seconds": 11.26
+      },
+      {
+        "id": "blind-2",
+        "model": "gpt-5-mini",
+        "preferred_after": 5,
+        "cases": 5,
+        "duration_seconds": 8.46
+      }
+    ],
+    "preferred_after": 10,
+    "total_cases": 10,
+    "factual_regressions": 0,
+    "notes": "Pair order alternated and was reversed for the second reviewer. Both reviewers selected the revised message in all five cases under a clarity, next-action, and fact-preservation rubric. Raw provider/tool traces remain local; this file records the disclosure-safe aggregate."
+  }
+}

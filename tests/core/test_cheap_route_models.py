@@ -17,19 +17,161 @@ explicit knob always wins.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
-from argus_skill.core.knobs import resolve_cheap_route_model
+from argus_skill.core.knobs import resolve_cheap_route_model, resolve_role_model
 
 
 @pytest.fixture(autouse=True)
 def _no_persisted_knobs(monkeypatch, tmp_path) -> None:
-    """Keep the operator's real ``~/.argus-skill`` switches out of these."""
+    """Keep the operator's real runtime and Codex provider out of these."""
     monkeypatch.setenv("ARGUS_SKILL_HOME", str(tmp_path / "argus-home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.delenv("ARGUS_SKILL_CODEX_CONFIG", raising=False)
 
 
 def _env(backend: str, **extra: str) -> dict[str, str]:
-    return {"ARGUS_SKILL_LIFE_BACKEND": backend, **extra}
+    return {
+        "ARGUS_SKILL_LIFE_BACKEND": backend,
+        "CODEX_HOME": os.environ["CODEX_HOME"],
+        **extra,
+    }
+
+
+@pytest.mark.parametrize("backend", ["pi", "claude", "opencode", "grok"])
+def test_provider_backend_without_model_uses_its_native_default(backend: str) -> None:
+    assert (
+        resolve_role_model(
+            "manager",
+            role_env="ARGUS_SKILL_MANAGER_MODEL",
+            env=_env(backend),
+        )
+        == ""
+    )
+
+
+@pytest.mark.parametrize("backend", ["codex", "copilot"])
+def test_openai_backend_without_model_keeps_argus_default(backend: str) -> None:
+    assert (
+        resolve_role_model(
+            "manager",
+            role_env="ARGUS_SKILL_MANAGER_MODEL",
+            env=_env(backend),
+        )
+        == "gpt-5.5"
+    )
+
+
+def test_custom_codex_provider_uses_its_configured_default_model() -> None:
+    """A Codex CLI pointed at DeepSeek must not receive an OpenAI-only id."""
+    codex_home = Path(os.environ["CODEX_HOME"])
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        """
+model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.invalid/"
+wire_api = "responses"
+""".strip(),
+        encoding="utf-8",
+    )
+    env = _env("codex")
+
+    assert resolve_role_model(
+        "manager",
+        role_env="ARGUS_SKILL_MANAGER_MODEL",
+        env=env,
+    ) == ""
+    assert resolve_cheap_route_model(
+        knob="ARGUS_SKILL_FRONTDOOR_MODEL",
+        catalog_default="gpt-5.4-mini",
+        role="manager",
+        role_env="ARGUS_SKILL_MANAGER_MODEL",
+        env=env,
+    ) == ""
+
+
+def test_auto_model_override_uses_backend_default() -> None:
+    assert (
+        resolve_role_model(
+            "manager",
+            role_env="ARGUS_SKILL_MANAGER_MODEL",
+            env=_env("claude", ARGUS_SKILL_MANAGER_MODEL="auto"),
+        )
+        == ""
+    )
+
+
+def test_role_model_can_use_the_actual_fallback_backend() -> None:
+    assert (
+        resolve_role_model(
+            "manager",
+            role_env="ARGUS_SKILL_MANAGER_MODEL",
+            backend="claude",
+            env=_env("codex"),
+        )
+        == ""
+    )
+
+
+def test_manager_routes_use_the_actual_runtime_backend() -> None:
+    from argus_skill.core.knobs import (
+        resolve_manager_classify_model,
+        resolve_manager_reply_model,
+    )
+
+    env = _env("codex")
+    assert resolve_manager_classify_model(backend="claude", env=env) == ""
+    assert resolve_manager_reply_model(backend="claude", env=env) == ""
+
+
+def test_explicit_shared_model_beats_persisted_manager_route_models(
+    monkeypatch,
+) -> None:
+    from argus_skill.core import knob_store
+    from argus_skill.core.knobs import (
+        resolve_manager_classify_model,
+        resolve_manager_reply_model,
+    )
+
+    monkeypatch.setattr(
+        knob_store,
+        "read_persisted_knobs",
+        lambda: {
+            "ARGUS_SKILL_FRONTDOOR_MODEL": "deepseek-official/deepseek-v4-flash",
+            "ARGUS_SKILL_MANAGER_REPLY_MODEL": "deepseek-official/deepseek-v4-flash",
+        },
+    )
+    env = _env("copilot", ARGUS_SKILL_MODEL="gpt-5.6-sol")
+
+    assert resolve_manager_classify_model(backend="copilot", env=env) == "gpt-5.6-sol"
+    assert resolve_manager_reply_model(backend="copilot", env=env) == "gpt-5.6-sol"
+
+
+def test_claude_command_omits_openai_model_when_unconfigured() -> None:
+    from argus_skill.agent_cli.agent_cli_runner import AgentCliRunner, RunnerOptions
+    from argus_skill.agent_cli.runner_backend import BACKEND_CLAUDE
+
+    model = resolve_role_model(
+        "manager",
+        role_env="ARGUS_SKILL_MANAGER_MODEL",
+        env=_env("claude"),
+    )
+    command = AgentCliRunner(
+        "claude",
+        backend=BACKEND_CLAUDE,
+    )._build_command(
+        resume_thread_id=None,
+        options=RunnerOptions(model=model),
+    )
+
+    assert "--model" not in command
+    assert "gpt-5.5" not in command
 
 
 @pytest.mark.parametrize("backend", ["codex", "copilot"])

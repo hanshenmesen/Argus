@@ -33,11 +33,23 @@ class MissionExecutionMixin(
     MissionExecutionRuntimeMixin, MissionExecutionSettlementMixin,
 ):
     def _run_one(self, item: BacklogItem) -> dict[str, Any]:
-        prelude = self._build_mission_prelude(item)
         # Atomic claim: flip pending → running in one rewrite. If the
         # head moved between the budget peek and now (concurrent writer
         # or user `/rm`), bail; the next tick will re-evaluate.
-        claimed = self.memory.backlog.claim_next()
+        parallel_worker = getattr(self.config, "parallel_worker", False)
+        coordinate_claims = getattr(
+            self.config,
+            "coordinate_parallel_claims",
+            False,
+        )
+        claimed = self.memory.backlog.claim_next(
+            parallel_only=parallel_worker,
+            respect_running=coordinate_claims,
+            expected_id=item.id,
+            owner=str(
+                getattr(self.config, "worker_id", "primary") or "primary"
+            ),
+        )
         if claimed is None or claimed.id != item.id:
             if claimed is not None:
                 # Roll back so the next tick sees it again. running →
@@ -49,6 +61,14 @@ class MissionExecutionMixin(
                     log.exception("life supervisor: claim rollback failed")
             return {"status": "claim_lost", "item_id": item.id}
         item = claimed
+        # Resolve the claimed node before consulting any repository-facing
+        # policy.  Adoption updates the active campaign workdir, so the bound
+        # Manager and every later mission phase see the same canonical tree.
+        resolved_mission_workdir = self._resolve_mission_workdir(item)
+        vertical_root = self._mission_vertical_root(
+            item,
+            resolved_mission_workdir,
+        )
 
         # An item written straight into backlog.jsonl never passed through the
         # Manager, so no vertical, stage, or target level was chosen and the run
@@ -65,9 +85,16 @@ class MissionExecutionMixin(
             item,
             getattr(self, "chat_state", None),
             manager=manager,
+            vertical_root=vertical_root,
         )
 
-        state = self._prepare_mission_context(item, prelude)
+        prelude = self._build_mission_prelude(item)
+        state = self._prepare_mission_context(
+            item,
+            prelude,
+            resolved_mission_workdir,
+            vertical_root,
+        )
         self._invoke_mission_runner(state)
         self._derive_basic_outcome_fields(state)
 
@@ -78,7 +105,20 @@ class MissionExecutionMixin(
         self._settle_repair_capability(state)
         self._apply_dynamic_plan_stage_guard(state)
 
-        transition_result = self._maybe_short_circuit_for_stage_transition(state)
+        # A final-result miss normally makes the Manager HOLD the terminal
+        # stage. Let the active vertical classify that miss before the generic
+        # stage-hold branch terminalizes the item; otherwise the iteration
+        # contract is unreachable on exactly the live fell-short path.
+        state.iteration = self._maybe_requeue_chartered_shortfall(state)
+        state.iteration_requeued = bool(
+            state.iteration and state.iteration.get("requeued")
+        )
+
+        transition_result = (
+            None
+            if state.iteration is not None
+            else self._maybe_short_circuit_for_stage_transition(state)
+        )
         if transition_result is not None:
             return transition_result
 

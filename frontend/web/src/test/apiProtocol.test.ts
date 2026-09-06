@@ -28,6 +28,27 @@ const currentMeta = {
   },
 };
 
+const currentSnapshot = {
+  schema_version: SNAPSHOT_SCHEMA_VERSION,
+  daemon: {
+    global_daily_cap_usd: 0,
+    read_status: 'ok',
+    read_error: '',
+    protocol_compatible: true,
+    protocol_error: '',
+  },
+  spend_usd: 0,
+  spend_status: 'ok',
+  usage_summary: {},
+  request_usage: {},
+  cost_control: {},
+  daemon_commands: {},
+  observability: {},
+  mission_view: {},
+  partial: false,
+  diagnostics: [],
+};
+
 describe('web API protocol handshake', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -138,6 +159,189 @@ describe('web API protocol handshake', () => {
     ]);
   });
 
+  it('stops before protected reads when this browser is not paired', async () => {
+    const fetchMock = vi.fn(async (_path: string) => Response.json({
+      ...currentMeta,
+      authentication: { required: true, authenticated: false },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { api, PairingRequiredError } = await import('../api');
+
+    await expect(api.projectCosts()).rejects.toBeInstanceOf(PairingRequiredError);
+    await expect(api.projectCosts()).rejects.toBeInstanceOf(PairingRequiredError);
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual(['/api/meta']);
+  });
+
+  it('sends the persisted pairing token with the cost request', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => 'fresh-desktop-token' });
+    const fetchMock = vi.fn(async (path: string) => Response.json(
+      path === '/api/meta'
+        ? { ...currentMeta, authentication: { required: true, authenticated: true } }
+        : { projects: [], generated_at: 0 },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const { api } = await import('../api');
+
+    await expect(api.projectCosts()).resolves.toMatchObject({ projects: [] });
+    expect(fetchMock.mock.calls[1]).toEqual([
+      '/api/projects/costs',
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer fresh-desktop-token' }),
+      }),
+    ]);
+  });
+
+  it('turns native Failed to fetch into a local-service diagnosis', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    }));
+    const { api, LocalArgusUnavailableError } = await import('../api');
+
+    await expect(api.projectIndex()).rejects.toMatchObject({
+      name: LocalArgusUnavailableError.name,
+      message: expect.stringMatching(/local Argus service.*Argus Desktop is running/i),
+    });
+  });
+
+  it('does not retry or poll after an authentication rejection', async () => {
+    const { ApiError } = await import('../../../core/src/http');
+    const { projectCostPollInterval, queryRetryPolicy } = await import('../hooks');
+    const error = new ApiError('unauthorized', 401, 'GET', '/api/projects/costs');
+
+    expect(queryRetryPolicy(0, error)).toBe(false);
+    expect(projectCostPollInterval(error)).toBe(false);
+    expect(queryRetryPolicy(0, new Error('transient'))).toBe(true);
+  });
+
+  it('times out a stalled handshake and allows a clean retry', async () => {
+    vi.useFakeTimers();
+    let metaAttempts = 0;
+    const fetchMock = vi.fn((path: string, init?: RequestInit): Promise<Response> => {
+      if (path === '/api/meta') {
+        metaAttempts += 1;
+        if (metaAttempts === 1) {
+          return new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(new Error('aborted')),
+              { once: true },
+            );
+          });
+        }
+        return Promise.resolve(Response.json(currentMeta));
+      }
+      return Promise.resolve(Response.json({ projects: [] }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { api } = await import('../api');
+
+    const stalled = expect(api.projectIndex()).rejects.toThrow(
+      /GET \/api\/meta timed out after 8s/,
+    );
+    await vi.advanceTimersByTimeAsync(8_001);
+    await stalled;
+
+    await expect(api.projectIndex()).resolves.toEqual({ projects: [] });
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      '/api/meta',
+      '/api/meta',
+      '/api/projects',
+    ]);
+  });
+
+  it('times out a stalled compact snapshot and succeeds on retry', async () => {
+    vi.useFakeTimers();
+    let snapshotAttempts = 0;
+    const snapshotPath =
+      '/api/projects/s-stalled/snapshot?compact=true&events_limit=1';
+    const fetchMock = vi.fn((path: string, init?: RequestInit): Promise<Response> => {
+      if (path === '/api/meta') return Promise.resolve(Response.json(currentMeta));
+      if (path === snapshotPath) {
+        snapshotAttempts += 1;
+        if (snapshotAttempts === 1) {
+          return new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(new Error('aborted')),
+              { once: true },
+            );
+          });
+        }
+        return Promise.resolve(Response.json(currentSnapshot));
+      }
+      return Promise.reject(new Error(`unexpected request: ${path}`));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { api } = await import('../api');
+
+    const stalled = expect(api.snapshot('s-stalled')).rejects.toThrow(
+      /compact=true.*timed out after 12s/,
+    );
+    await vi.advanceTimersByTimeAsync(12_001);
+    await stalled;
+
+    await expect(api.snapshot('s-stalled')).resolves.toMatchObject({
+      schema_version: SNAPSHOT_SCHEMA_VERSION,
+      partial: false,
+    });
+    expect(snapshotAttempts).toBe(2);
+  });
+
+  it('prewarms an active project once instead of on every snapshot poll', async () => {
+    const paths: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((path: string): Promise<Response> => {
+      paths.push(path);
+      if (path === '/api/meta') return Promise.resolve(Response.json(currentMeta));
+      return Promise.resolve(Response.json(currentSnapshot));
+    }));
+    const { api } = await import('../api');
+
+    await api.activeSnapshot('s-active');
+    await api.activeSnapshot('s-active');
+
+    expect(paths).toEqual([
+      '/api/meta',
+      '/api/projects/s-active/snapshot?compact=true&events_limit=1&prewarm=true',
+      '/api/projects/s-active/snapshot?compact=true&events_limit=1',
+    ]);
+  });
+
+  it('times out when response headers arrive but the JSON body stalls', async () => {
+    vi.useFakeTimers();
+    let projectAttempts = 0;
+    const fetchMock = vi.fn((path: string, init?: RequestInit): Promise<Response> => {
+      if (path === '/api/meta') return Promise.resolve(Response.json(currentMeta));
+      projectAttempts += 1;
+      if (projectAttempts === 1) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener(
+              'abort',
+              () => controller.error(new DOMException('aborted', 'AbortError')),
+              { once: true },
+            );
+          },
+        });
+        return Promise.resolve(new Response(body, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }));
+      }
+      return Promise.resolve(Response.json({ projects: [], local_cwd: '' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { api } = await import('../api');
+
+    const stalled = expect(api.projectIndex()).rejects.toThrow(
+      /GET \/api\/projects timed out after 12s/,
+    );
+    await vi.advanceTimersByTimeAsync(12_001);
+    await stalled;
+
+    await expect(api.projectIndex()).resolves.toEqual({ projects: [], local_cwd: '' });
+    expect(projectAttempts).toBe(2);
+  });
+
   it('allows source drift, warns, and still requests projects', async () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const driftedMeta = {
@@ -156,9 +360,9 @@ describe('web API protocol handshake', () => {
     const { api } = await import('../api');
 
     await expect(api.listProjects()).resolves.toEqual([]);
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(
-      /source differs from its prebuilt release artifacts/,
-    ));
+    expect(warning).toHaveBeenCalledWith(
+      'Argus API compatibility warning: python -m argus_skill.release_tools.build_release',
+    );
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
       '/api/meta',
       '/api/projects',
@@ -166,19 +370,26 @@ describe('web API protocol handshake', () => {
   });
 
   it('passes cancellation signals to project reads', async () => {
-    const fetchMock = vi.fn(async () => new Response(
-      JSON.stringify({ events: [] }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ));
+    let receivedSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((_path: string, init?: RequestInit): Promise<Response> => {
+      receivedSignal = init?.signal ?? undefined;
+      return new Promise((_resolve, reject) => {
+        receivedSignal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+      });
+    });
     vi.stubGlobal('fetch', fetchMock);
     const { api } = await import('../api');
     const controller = new AbortController();
 
-    await expect(api.events('s-test', 120, controller.signal)).resolves.toEqual([]);
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/projects/s-test/events?limit=120&view=ui',
-      expect.objectContaining({ signal: controller.signal }),
-    );
+    const pending = api.events('s-test', 120, controller.signal);
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(receivedSignal?.aborted).toBe(true);
   });
 
   it('posts mission aborts to the mission abort endpoint with the reason body', async () => {
@@ -239,6 +450,22 @@ describe('web API protocol handshake', () => {
     const { api } = await import('../api');
 
     await expect(api.createDaemon('', 'Broken', '/missing')).rejects.toThrow(
+      'workdir is unavailable',
+    );
+  });
+
+  it('rejects an HTTP-successful continuous resume failure', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      ok: true,
+      daemon: {
+        rc: 3,
+        command_status: 'failed',
+        error: 'workdir is unavailable',
+      },
+    })));
+    const { api } = await import('../api');
+
+    await expect(api.setContinuous('s-test', true, 'Resume work')).rejects.toThrow(
       'workdir is unavailable',
     );
   });
@@ -313,6 +540,20 @@ describe('web API protocol handshake', () => {
     );
   });
 
+  it('sends an explicit force flag for immediate manual daemon stop', async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) => Response.json({
+      rc: 0,
+      command_status: 'applied',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { api } = await import('../api');
+
+    await api.stopDaemon('s-test', false, 7, true);
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body).toMatchObject({ drain: false, force: true, expected_revision: 7 });
+  });
+
   it('message endpoint returns dispatch ack reply for task results', async () => {
     const taskResult = {
       kind: 'task',
@@ -331,6 +572,22 @@ describe('web API protocol handshake', () => {
     const result = await api.message('s-test', 'do something');
     expect(result.reply).toBe('executor started');
     expect(result.kind).toBe('task');
+  });
+
+  it('forwards operator Task mode without running category auto-detection', async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) => new Response(
+      'data: {"type":"done","result":{"kind":"task"}}\n\n',
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const { api } = await import('../api');
+
+    await api.messageStream('s-test', 'do something', {}, { routeOverride: 'task' });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      text: 'do something',
+      route_override: 'task',
+    });
   });
 
   it('rejects a stream that closes after a delta without a terminal event', async () => {

@@ -19,6 +19,7 @@ from typing import Any
 
 from ..core import paths as core_paths
 from . import project_state
+from ._server_module import server_module as _srv
 
 log = logging.getLogger(__name__)
 
@@ -29,23 +30,11 @@ _SCHEDULED_DAEMON_UPGRADES: set[str] = set()
 _SCHEDULED_DAEMON_UPGRADES_LOCK = threading.Lock()
 
 
-def _srv():
-    """Lazily resolve the ``server`` module so tests that monkeypatch
-    ``server.<dep>`` (e.g. ``read_daemon_status``, ``stop_daemon``,
-    ``runtime_identity``, ``daemon_command_execution_lock``) still take
-    effect for this module's internal calls, matching pre-split monkeypatch
-    semantics.
-    """
-    from . import server
-
-    return server
-
-
 def upgrade_project_daemon(
     sid: str,
     *,
     global_root: Path | str | None = None,
-    drain_timeout: float = 1800.0,
+    drain_timeout: float | None = None,
 ) -> dict[str, Any] | None:
     """Restart one executor without blocking on a long active mission."""
     life_dir = project_life_dir(sid, global_root=global_root)
@@ -80,7 +69,7 @@ def upgrade_project_daemon(
                 "objective": str(continuous.objective or ""),
                 "reason": "operator requested current-release restart",
                 "requested_at": time.time(),
-                "legacy_drain_timeout": float(drain_timeout),
+                "legacy_drain_timeout": drain_timeout,
             },
         )
         scheduled = _srv().schedule_project_daemon_upgrade(
@@ -117,7 +106,7 @@ def _daemon_upgrade_request_path(life_dir: Path) -> Path:
 def _read_daemon_upgrade_request(life_dir: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(_daemon_upgrade_request_path(life_dir).read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) and payload.get("schema_version") == 1 else None
 

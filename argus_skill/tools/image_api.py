@@ -33,13 +33,16 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
+from ..core.file_digest import sha256_file as _sha256_file
 from .capability_vault import ModelApiGrant, ModelApiRoute, load_model_api_route
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
-_DEFAULT_TIMEOUT_SECONDS = 500.0
-_DEFAULT_MAX_RETRIES = 4
+_DEFAULT_TIMEOUT_SECONDS: float | None = None
+# POST model calls get at most one replay; more can duplicate non-idempotent work.
+_DEFAULT_MAX_RETRIES = 2
 _DEFAULT_IMAGE_DAILY_CALL_CAP = 200
+# Retry-After sleeps are bounded so one API throttle cannot occupy a caller forever.
 _MAX_RETRY_DELAY_SECONDS = 45.0
 _TRANSIENT_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 _AUTO_SIZE_VALUES = {"", "auto", "adaptive"}
@@ -58,7 +61,7 @@ class ApiError(ImageToolError):
         super().__init__(f"API request failed ({status}) at {endpoint}: {body[:500]}")
 
 
-def _urlopen(req: urllib.request.Request | str, timeout: float):  # noqa: ANN001
+def _urlopen(req: urllib.request.Request | str, timeout: float | None):  # noqa: ANN001
     return urllib.request.urlopen(req, timeout=timeout)  # noqa: S310 - configured operator endpoint
 
 
@@ -108,7 +111,7 @@ def _json_request(
     endpoint: str,
     payload: dict[str, Any],
     *,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout: float | None = _DEFAULT_TIMEOUT_SECONDS,
     max_retries: int = _DEFAULT_MAX_RETRIES,
 ) -> dict[str, Any]:
     url = _endpoint_url(grant.base_url, endpoint)
@@ -250,14 +253,6 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _sha256_prompt_file(path: Path) -> str:
     """Canonical prompt hash: always hash the raw file bytes on disk.
 
@@ -331,7 +326,7 @@ def inspect_image(image: Path) -> dict[str, Any]:
 def _extract_image_bytes(
     data: dict[str, Any],
     *,
-    timeout: float,
+    timeout: float | None,
 ) -> bytes:
     rows = data.get("data")
     if not isinstance(rows, list) or not rows:
@@ -441,7 +436,7 @@ def generate_image(
     size: str = "auto",
     force: bool = False,
     env: Mapping[str, str] | None = None,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout: float | None = _DEFAULT_TIMEOUT_SECONDS,
     max_retries: int = _DEFAULT_MAX_RETRIES,
 ) -> dict[str, Any]:
     grant = _require_route("image", env)
@@ -577,7 +572,7 @@ def review_image(
     out: Path | None = None,
     prompt: str = "",
     env: Mapping[str, str] | None = None,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout: float | None = _DEFAULT_TIMEOUT_SECONDS,
     max_retries: int = _DEFAULT_MAX_RETRIES,
 ) -> dict[str, Any]:
     """Generic low-level vision review call against the ``image_review`` route.
@@ -751,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
                 prompt_file=args.prompt_file,
                 size=args.size,
                 force=bool(args.force),
-                timeout=float(args.timeout),
+                timeout=args.timeout,
                 max_retries=int(args.max_retries),
             ))
             return 0
@@ -766,7 +761,7 @@ def main(argv: list[str] | None = None) -> int:
                 review_instruction=instruction,
                 out=args.out,
                 prompt=prompt,
-                timeout=float(args.timeout),
+                timeout=args.timeout,
                 max_retries=int(args.max_retries),
             ))
             return 0

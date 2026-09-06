@@ -21,12 +21,11 @@ DEFAULT_TOKEN_HARD = 15_000_000
 
 #: Large artifacts that must be referenced by pointer + digest, never inlined wholesale.
 _POINTER_ONLY = (
-    "events.jsonl", "usage.jsonl", "NUMERICAL_STUDY_PLAN.csv",
-    "PRIOR_WORK_MATRIX.csv", "THEORY_OPPORTUNITY_AUDIT.csv",
+    "events.jsonl", "usage.jsonl",
 )
 #: Small, decision-bearing artifacts worth a short inline summary.
 _SUMMARY_FILES = (
-    "ROUTE_CLOSURE_STATUS.json", "PAPER_TYPE_CLASSIFIER.json", "research/TIER_STATE.json",
+    "ROUTE_CLOSURE_STATUS.json", "research/TIER_STATE.json",
     "research/DOWNGRADE_DECISION.json", "research/NEXT_ROLE_DIRECTIVE.json",
 )
 
@@ -80,10 +79,12 @@ def _summarize_json(root: Path, rel: str, keys: tuple[str, ...]) -> str:
 
 def build_context_digest(project_root: object) -> str:
     """A compact digest: current stage/tier, closure summary, and artifact POINTERS."""
+    from ...core.pipeline_state import read_pipeline_state
+
     root = Path(str(project_root or "."))
     state = {}
     try:
-        state = json.loads((root / "research" / "PIPELINE_STATE.json").read_text(encoding="utf-8"))
+        state = read_pipeline_state(root)
     except (OSError, ValueError):
         state = {}
     lines = [

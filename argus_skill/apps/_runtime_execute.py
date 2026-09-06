@@ -37,25 +37,28 @@ log = logging.getLogger(__name__)
 def _engineer_guidance(
     state_root: Path | None,
     workdir: Path,
+    manager: object | None = None,
 ) -> list[str]:
-    """Combine persistent Manager policy with one-shot live inbox messages."""
+    """Project the typed operator context after persisting fresh inbox input."""
     if state_root is None:
         return []
-    from ..manager.directive import active_manager_directive_message
+    from ..core.operator_context import build_operator_context_block
     from ..skills.stage_machine import current_stage
     from ._inbox import drain_inbox_messages
 
-    messages: list[str] = []
-    active_directive = active_manager_directive_message(state_root)
-    if active_directive:
-        messages.append(active_directive)
-    messages.extend(
-        drain_inbox_messages(
-            state_root,
-            current_stage=current_stage(workdir),
-        )
+    transient = drain_inbox_messages(
+        state_root,
+        current_stage=current_stage(workdir),
     )
-    return list(dict.fromkeys(messages))
+    from ..manager.directive import record_operator_messages
+
+    record_operator_messages(state_root, transient, manager=manager)
+    block, _revision = build_operator_context_block(
+        "engineer",
+        state_root,
+        live_turn="\n".join(transient),
+    )
+    return [block] if block else []
 
 
 class SkillLoopExecuteMixin:
@@ -123,7 +126,9 @@ class SkillLoopExecuteMixin:
         cls,
         workdir: Path,
     ) -> tuple[Path, bool, bytes | None, str]:
-        path = workdir.expanduser().resolve(strict=False) / "research" / "PIPELINE_STATE.json"
+        from ..core.pipeline_state import pipeline_state_path
+
+        path = pipeline_state_path(workdir.expanduser().resolve(strict=False))
         try:
             if os.path.lexists(path.parent) and (
                 cls._is_link_or_reparse_point(path.parent)
@@ -363,9 +368,10 @@ class SkillLoopExecuteMixin:
         context_packet_path: str = "",
         max_rounds_override: int | None = None,
         workflow_mode_override: str = "",
-        require_independent_review: bool = False,
+        require_independent_review: bool = True,
         skip_stage_transition: bool = False,
         stage_closing: bool = False,
+        holds_stage_authority: bool = True,
         working_dir_override: str = "",
         maintenance_mission: bool = False,
         allow_skill_changes: bool = False,
@@ -426,6 +432,7 @@ class SkillLoopExecuteMixin:
             skip_stage_transition=skip_stage_transition,
             preplanned=preplanned,
             stage_closing=stage_closing,
+            holds_stage_authority=holds_stage_authority,
         )
         return self._build_execute_outcome(ex_state)
 
@@ -514,12 +521,35 @@ class SkillLoopExecuteMixin:
             )
         effective_require_independent_review = bool(
             require_independent_review
+            or _env_flag("ARGUS_SKILL_REQUIRE_INDEPENDENT_REVIEW", False)
             or (
                 active_contract.requires_independent_review
                 if active_contract is not None
                 else _independent_review_required_for_project_root(_proot)
             )
         )
+        if not effective_require_independent_review:
+            # Bug #42: 14 consecutive missions closed on the Engineer's own
+            # say-so and the only trace of it was a reason string inside each
+            # review record. Dropping the Reviewer is a policy decision; say so
+            # once, out loud, with the inputs that produced it. The framework
+            # path is the one that mattered — the daemon had rolled back to a
+            # source root whose math vertical predated the review requirement.
+            from ..skills.stage_machine import framework_source_root
+
+            waiver_reason = (
+                "framework maintenance mission"
+                if maintenance_mission
+                else "explicit mission configuration with no stricter vertical policy"
+            )
+            log.warning(
+                "independent review waived: %s; "
+                "project_root=%s vertical=%s framework=%s",
+                waiver_reason,
+                _proot,
+                active_vertical or "<persisted>",
+                framework_source_root(),
+            )
         # 7×24 product: default to dangerous_yolo (no bwrap sandbox).
         # The operator runs the daemon on their own box and explicitly
         # consents to autonomous execution; the sandbox only fights us
@@ -547,10 +577,10 @@ class SkillLoopExecuteMixin:
             "require_post_task_learning": bool(
                 getattr(self, "_role_memory_maintenance_enabled", True)
             ),
-            "wiki_enabled": _env_flag("ARGUS_SKILL_WIKI", default=False),
+            "wiki_enabled": _env_flag("ARGUS_SKILL_WIKI", default=True),
             "auto_init_wiki": _env_flag(
                 "ARGUS_SKILL_AUTO_INIT_WIKI",
-                default=False,
+                default=True,
             ),
             "dangerous_yolo": not safe_mode,
             "full_auto": safe_mode,
@@ -594,32 +624,48 @@ class SkillLoopExecuteMixin:
         config_kwargs["engineer_log_path"] = (
             str(_project_state_dir / "events.jsonl") if _project_state_dir is not None else ""
         )
+        from ..manager.directive import active_operator_question_policy
+
+        config_kwargs["operator_questions_allowed"] = (
+            active_operator_question_policy(_project_state_dir) != "forbid"
+        )
+        config_kwargs["operator_question_policy_root"] = _project_state_dir
         # Campaign lifetime metadata forwarded from the daemon namespace so the
         # Manager stage hook receives open_ended=True for daemon-created open-ended
         # campaigns, preventing final_stage_completion_decision from overwriting a
         # structured Manager rollback verdict with a bounded completion.
         config_kwargs["open_ended"] = bool(getattr(args, "open_ended", False))
         config_kwargs["continuous_objective"] = str(getattr(args, "continuous_objective", "") or "")
-        # A paper contract is enabled only by a positively resolved
-        # ``certified`` vertical.  An explicit False from a specialized caller
-        # may still opt out; True cannot turn a non-paper vertical into a paper.
+        resolved_workflow_mode = (
+            workflow_mode_override.strip().lower()
+            or _workflow_mode_for_project_root(_proot)
+            or (active_contract.workflow_mode if active_contract is not None else "")
+        )
+        config_kwargs["workflow_mode"] = resolved_workflow_mode
+        if resolved_workflow_mode == "direct":
+            from ..core.knobs import resolve_role_reasoning_effort
+
+            config_kwargs["reviewer_reasoning_effort"] = (
+                resolve_role_reasoning_effort(
+                    "ARGUS_SKILL_REVIEWER_REASONING_EFFORT",
+                    default="high",
+                )
+            )
+        # A paper contract is enabled only by a non-direct vertical that explicitly
+        # declares PAPER_MISSION. Certification strength is a separate contract.
+        # An explicit False may opt out; True cannot turn a non-paper vertical
+        # into a paper.
         _paper_override = getattr(args, "paper_mission", None)
         _paper_allowed = True if _paper_override is None else bool(_paper_override)
         config_kwargs["paper_mission"] = bool(
             not maintenance_mission
+            and resolved_workflow_mode != "direct"
             and _paper_allowed
             and (
-                active_contract.completion_gate == "certified"
+                active_contract.paper_mission
                 if active_contract is not None
                 else _paper_mission_for_project_root(_proot)
             )
-        )
-        config_kwargs["workflow_mode"] = (
-            "direct"
-            if maintenance_mission
-            else workflow_mode_override.strip().lower()
-            or _workflow_mode_for_project_root(_proot)
-            or (active_contract.workflow_mode if active_contract is not None else "")
         )
         try:
             from inspect import signature
@@ -648,7 +694,7 @@ class SkillLoopExecuteMixin:
         args = self._args
         workdir = ex_state.workdir
         config = ex_state.config
-        self._refresh_manager_skill_store(args)
+        self._refresh_manager_skill_store(args, workdir=workdir)
         # The per-project runtime state dir holds inbox.jsonl + events.jsonl.
         operator_state_dir = _project_state_dir_for(args, workdir)
         # REAL operator inbox (Change A): drain queued ``--notify`` / ``/nudge``
@@ -662,7 +708,7 @@ class SkillLoopExecuteMixin:
 
         def _inbox_guidance_provider() -> list[str]:
             try:
-                return _engineer_guidance(inbox_life_dir, workdir)
+                return _engineer_guidance(inbox_life_dir, workdir, self.manager)
             except Exception:  # noqa: BLE001 — never break a mission
                 return []
 
@@ -704,6 +750,8 @@ class SkillLoopExecuteMixin:
                 project_dir=project_skills_dir,
                 global_dir=global_skills_dir,
                 vertical_dir=vertical_dir,
+                native_project_dir=workdir / ".agents" / "skills",
+                execution_project_root=workdir,
             )
         ex_state.loop = self._SkillLoop(
             skills_dir=global_skills_dir,
@@ -1070,12 +1118,41 @@ class SkillLoopExecuteMixin:
         final_review_status = ""
         final_review_next_action = ""
         review_source = ""
+        final_frontier_report: dict = {}
         final_planner_report: dict = {}
         plan_challenge: dict = {}
         rounds_list = getattr(outcome, "rounds", None) or []
         if rounds_list:
             _final_review = getattr(rounds_list[-1], "review", None)
             if _final_review is not None:
+                binding = getattr(_final_review, "manuscript_snapshot", None)
+                if isinstance(binding, dict):
+                    try:
+                        from ..core.manuscript_snapshot import (
+                            manuscript_review_status,
+                        )
+
+                        # The Reviewer bound the manuscript it read in the
+                        # execution workdir; compare against that same tree.
+                        # ``_artifact_root`` is the session state root, which
+                        # holds no manuscript and would grade every current
+                        # review as stale.
+                        review_freshness = manuscript_review_status(
+                            {"manuscript_snapshot": binding},
+                            Path(ex_state.workdir),
+                        )
+                    except Exception:  # noqa: BLE001 - certification fails closed
+                        review_freshness = {
+                            "status": "unbound",
+                            "message": "unbound (reviewed manuscript cannot be read)",
+                        }
+                    if review_freshness.get("status") != "current":
+                        setattr(_final_review, "status", "stale")
+                        setattr(
+                            _final_review,
+                            "reason",
+                            str(review_freshness.get("message") or "stale review"),
+                        )
                 final_review_status = (
                     str(getattr(_final_review, "status", "") or "").strip().lower()
                 )
@@ -1093,6 +1170,9 @@ class SkillLoopExecuteMixin:
                 final_review_next_action = str(
                     getattr(_final_review, "next_action", "") or ""
                 ).strip()
+                raw_frontier = getattr(_final_review, "frontier_report", {}) or {}
+                if isinstance(raw_frontier, dict):
+                    final_frontier_report = dict(raw_frontier)
                 raw_report = getattr(_final_review, "planner_report", {}) or {}
                 if isinstance(raw_report, dict):
                     final_planner_report = dict(raw_report)
@@ -1146,6 +1226,7 @@ class SkillLoopExecuteMixin:
         ex_state.final_review_status = final_review_status
         ex_state.final_review_next_action = final_review_next_action
         ex_state.review_source = review_source
+        ex_state.final_frontier_report = final_frontier_report
         ex_state.final_planner_report = final_planner_report
         ex_state.plan_challenge = plan_challenge
         ex_state.final_submission_certified = final_submission_certified
@@ -1162,6 +1243,7 @@ class SkillLoopExecuteMixin:
         skip_stage_transition: bool,
         preplanned: bool,
         stage_closing: bool,
+        holds_stage_authority: bool = True,
     ) -> None:
         """Hand this round's structured completion verdict to the Manager's
         stage authority when this round is eligible to move the pipeline stage.
@@ -1209,6 +1291,7 @@ class SkillLoopExecuteMixin:
                 skip_stage_transition=effective_skip_stage_transition,
                 preplanned=preplanned,
                 stage_closing=stage_closing,
+                holds_stage_authority=holds_stage_authority,
             )
         ):
             self._current_sink = sink
@@ -1224,6 +1307,7 @@ class SkillLoopExecuteMixin:
                     continuous_objective=str(
                         getattr(ex_state.config, "continuous_objective", "") or ""
                     ),
+                    stage_closing=stage_closing,
                 )
             finally:
                 self._current_sink = None
@@ -1235,13 +1319,24 @@ class SkillLoopExecuteMixin:
         ex_state.stage_transition = stage_transition
         ex_state.stage_transition_skipped = bool(
             workflow_skips_stage_transition
-            or planned_node_holds_stage
+            or not holds_stage_authority
             or (
                 effective_skip_stage_transition
                 and ex_state.effective_require_independent_review
                 and ex_state.mission_scope.strip().lower().replace("-", "_")
                 == "bounded"
             )
+        )
+        # Deliberately NOT folded into ``stage_transition_skipped`` above. A
+        # planned node holding the stage is a deferral, not a suppression: its
+        # Reviewer verdict is genuine evidence that the campaign-level stage
+        # reconciliation is entitled to replay later. Collapsing the two made
+        # every Planner node look review-suppressed, which left no vertical
+        # whose completion gate is not ``certified`` any way to close a stage.
+        ex_state.stage_transition_deferred = bool(
+            planned_node_holds_stage
+            and not ex_state.stage_transition_skipped
+            and not stage_transition
         )
 
     def _build_execute_outcome(self, ex_state: "_ExecuteState") -> _Outcome:
@@ -1254,7 +1349,18 @@ class SkillLoopExecuteMixin:
         summary_lines = []
         visible_engineer_message = strip_named_lines(
             engineer_message,
-            ("MILESTONE_STATUS", "OPERATOR_QUESTION", "OPERATOR_OPTIONS"),
+            (
+                "MILESTONE_STATUS",
+                "NEXT_OWNER",
+                "OPERATOR_QUESTION",
+                "OPERATOR_OPTIONS",
+                "ROLE_DECISION",
+            ),
+        )
+        from ..engineer.external_work import strip_external_wait_footer
+
+        visible_engineer_message = strip_external_wait_footer(
+            visible_engineer_message
         )
         for line in visible_engineer_message.splitlines():
             cleaned = line.strip()
@@ -1273,9 +1379,18 @@ class SkillLoopExecuteMixin:
             last_thread_id=ex_state.new_tid,
             auth_failure=ex_state.auth_fail,
             final_submission_certified=ex_state.final_submission_certified,
+            manuscript_snapshot=(
+                dict(getattr(rounds[-1].review, "manuscript_snapshot", None))
+                if rounds
+                and isinstance(
+                    getattr(rounds[-1].review, "manuscript_snapshot", None), dict
+                )
+                else None
+            ),
             completion_evidence=ex_state.completion_evidence,
             stage_transition=ex_state.stage_transition,
             stage_transition_skipped=ex_state.stage_transition_skipped,
+            stage_transition_deferred=ex_state.stage_transition_deferred,
             operator_question=ex_state.operator_question,
             operator_options=ex_state.operator_options,
             final_review_status=ex_state.final_review_status,
@@ -1284,6 +1399,7 @@ class SkillLoopExecuteMixin:
                 getattr(outcome, "final_review_reason", "") or ""
             ),
             final_review_next_action=ex_state.final_review_next_action,
+            final_message=engineer_message,
             summary=summary,
             final_output=final_output,
             research_result=(
@@ -1295,6 +1411,7 @@ class SkillLoopExecuteMixin:
                 if rounds
                 else None
             ),
+            final_frontier_report=ex_state.final_frontier_report,
             final_planner_report=ex_state.final_planner_report,
             plan_challenge=ex_state.plan_challenge,
         )

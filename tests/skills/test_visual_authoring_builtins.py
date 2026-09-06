@@ -5,6 +5,13 @@ import yaml
 from argus_skill.skills.builtins import seed_builtin_skills
 
 ROOT = Path(__file__).resolve().parents[2] / "argus_skill" / "builtin_skills"
+RESEARCH_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / "argus_skill"
+    / "verticals"
+    / "research"
+    / "skills"
+)
 VISUAL_SKILLS = {
     "engineer/presentation-master.md": ("ppt-master", "SKILL.md", "PPT_MASTER_ROOT"),
     "engineer/mermaid-graphviz-diagrams.md": ("Mermaid", "Graphviz", "FigureSpec"),
@@ -47,9 +54,13 @@ def test_presentation_and_figure_descriptions_preserve_routing_guidance() -> Non
     presentation, presentation_body = _front_body(
         ROOT / "engineer" / "presentation-master.md"
     )
-    figure, _figure_body = _front_body(ROOT / "engineer" / "figure-spec.md")
+    figure, _figure_body = _front_body(
+        RESEARCH_ROOT / "engineer" / "figure-spec.md"
+    )
     assert "research-paper conceptual" in presentation["description"]
     assert "image-2 is unavailable" in presentation["description"]
     assert "Research Visualization Router" in figure["description"]
     assert "PPT Master" in figure["description"]
     assert "update_repo.py" in presentation_body
+    assert '"${ARGUS_SKILL_PYTHON:-python3}"' in presentation_body
+    assert "Do not call bare `python` or `python3`" in presentation_body

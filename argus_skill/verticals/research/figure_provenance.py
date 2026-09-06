@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import uuid
@@ -14,6 +13,8 @@ from pathlib import Path
 from typing import Iterable
 
 import portalocker
+
+from ...core.file_digest import sha256_file as _sha256
 
 FIGURE_PROVENANCE_PATH = Path("paper/figures/FIGURE_PROVENANCE.json")
 FIGURE_PROVENANCE_SCHEMA_VERSION = 1
@@ -38,18 +39,33 @@ class FigureProvenanceReport:
         return not self.issues
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _normalized_resolved_path(path: Path) -> Path:
+    r"""Resolve a path while normalizing Windows' optional extended prefix.
+
+    ``Path.resolve()`` can intermittently return ``\\?\C:\...`` while another
+    thread is creating a parent directory, even when the same path normally
+    resolves to ``C:\...``.  Those spellings identify the same object but
+    ``Path.relative_to`` treats them as different anchors and falsely reports a
+    project escape.  Normalize only the Win32 namespace spelling; containment
+    is still checked against fully resolved paths.
+    """
+    resolved = path.resolve()
+    if os.name != "nt":
+        return resolved
+    raw = str(resolved)
+    if raw.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + raw[8:])
+    if raw.startswith("\\\\?\\"):
+        return Path(raw[4:])
+    return resolved
 
 
 def _project_path(project_root: Path, raw: Path | str) -> Path:
-    root = project_root.resolve()
+    root = _normalized_resolved_path(project_root)
     candidate = Path(raw).expanduser()
-    resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    resolved = _normalized_resolved_path(
+        candidate if candidate.is_absolute() else root / candidate
+    )
     try:
         resolved.relative_to(root)
     except ValueError as exc:
@@ -58,7 +74,9 @@ def _project_path(project_root: Path, raw: Path | str) -> Path:
 
 
 def _relative(project_root: Path, path: Path) -> str:
-    return path.resolve().relative_to(project_root.resolve()).as_posix()
+    return _normalized_resolved_path(path).relative_to(
+        _normalized_resolved_path(project_root)
+    ).as_posix()
 
 
 def _load_manifest(path: Path) -> dict[str, object]:
@@ -98,14 +116,19 @@ def _file_record(project_root: Path, raw: Path | str) -> dict[str, str]:
 
 
 def _transaction_lock_path(project_root: Path) -> Path:
-    return project_root.resolve() / "paper" / "figures" / ".figure-manifests.lock"
+    return (
+        _normalized_resolved_path(project_root)
+        / "paper"
+        / "figures"
+        / ".figure-manifests.lock"
+    )
 
 
 @contextmanager
 def figure_manifest_transaction(project_root: Path):
     lock = _transaction_lock_path(project_root)
     lock.parent.mkdir(parents=True, exist_ok=True)
-    with portalocker.Lock(lock, mode="a+", timeout=30):
+    with portalocker.Lock(lock, mode="a+"):
         yield
 
 
@@ -277,7 +300,7 @@ def validate_figure_provenance(
         return report
     try:
         payload = _load_manifest(manifest)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         report.issues.append(
             FigureProvenanceIssue("invalid_manifest", "", str(exc))
         )

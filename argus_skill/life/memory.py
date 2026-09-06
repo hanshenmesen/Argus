@@ -4,7 +4,8 @@ Current storage shapes:
 
 - ``events.jsonl``: the canonical append-only mission/runtime timeline.
   ``EventJournal`` projects selected event types into compact history entries.
-- ``Backlog``: ordered ``backlog.jsonl`` of pending mission objectives.
+- ``Backlog``: ordered ``backlog.jsonl`` of live mission objectives plus an
+  append-only ``backlog.archive.jsonl`` of terminal rows.
   Status field on each row toggles ``pending`` → ``running`` → ``done``
   / ``failed`` / ``skipped`` / ``superseded``. We rewrite the whole file on status
   changes; the file is small (tens-to-hundreds of items).
@@ -30,21 +31,25 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
+import weakref
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
-from ..core.event_catalog import EventType, canonical_event_type
+import portalocker
 
-fcntl: Any
-try:  # pragma: no cover - platform-specific import
-    import fcntl
-except ImportError:  # pragma: no cover - Windows fallback
-    fcntl = None
+from ..core.event_catalog import EventType, canonical_event_type
+from ..core.prompt_example_tasks import is_prompt_example_task
+
+_BACKLOG_THREAD_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = (
+    weakref.WeakValueDictionary()
+)
+_BACKLOG_THREAD_LOCKS_GUARD = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -308,7 +313,7 @@ def _read_jsonl_tail_rg(
     for raw in result.stdout.splitlines():
         try:
             row = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:
             continue
         if predicate is None or predicate(row):
             rows.append(row)
@@ -321,9 +326,7 @@ def _path_signature(path: Path) -> tuple[int, int, int, int] | None:
         stat = path.stat()
     except OSError:
         return None
-    ino = int(getattr(stat, "st_ino", 0) or 0)
-    dev = int(getattr(stat, "st_dev", 0) or 0)
-    return (int(stat.st_mtime_ns), int(stat.st_size), dev, ino)
+    return (int(stat.st_mtime_ns), int(stat.st_size), int(stat.st_dev), int(stat.st_ino))
 
 
 def _atomic_rewrite_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
@@ -354,6 +357,22 @@ def _atomic_rewrite_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                 tmp_path.unlink()
             except OSError:
                 pass
+
+
+def _append_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    """Append complete JSON rows while the caller holds the backlog lock."""
+    materialized = list(rows)
+    if not materialized:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for row in materialized:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -410,14 +429,14 @@ class JournalEntry:
     @classmethod
     def from_jsonable(cls, row: dict[str, Any]) -> "JournalEntry":
         return cls(
-            id=str(row.get("id", uuid.uuid4().hex[:12])),
-            ts=float(row.get("ts", time.time())),
-            kind=str(row.get("kind", "unknown")),
-            title=str(row.get("title", "")),
-            summary=str(row.get("summary", "")),
-            tags=list(row.get("tags", [])),
-            cost_usd=float(row.get("cost_usd", 0.0) or 0.0),
-            extra=dict(row.get("extra", {})),
+            id=str(row["id"]),
+            ts=float(row["ts"]),
+            kind=str(row["kind"]),
+            title=str(row["title"]),
+            summary=str(row["summary"]),
+            tags=list(row["tags"]),
+            cost_usd=float(row["cost_usd"] or 0.0),
+            extra=dict(row["extra"]),
         )
 
 
@@ -446,6 +465,14 @@ class EventJournal:
         r'"(?:type|canonical_type)"\s*:\s*"(?:user\.note|'
         r'mission\.(?:started|completed)|life\.(?:mission|planner|budget|lifecycle)\.[^"]+)"'
     )
+    # Mission settlements only. Retained histories carry both the canonical
+    # ``life.mission.completed`` spelling and the legacy ``mission.completed``
+    # alias, so the sparse fast paths must match either.
+    _SETTLEMENT_RAW_MARKERS = (b"mission.completed",)
+    _SETTLEMENT_RG_PATTERN = (
+        r'"(?:type|canonical_type)"\s*:\s*"(?:life\.)?mission\.completed"'
+    )
+    _TOTAL_COST_CACHE_MAX_ENTRIES = 32
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -482,6 +509,12 @@ class EventJournal:
             and str(row.get("status") or "") in {"budget_pause", "paused_budget"}
         ):
             kind: str | None = "budget_pause"
+        elif (
+            etype == EventType.LIFE_MISSION_COMPLETED
+            and isinstance(row.get("iteration"), dict)
+            and row["iteration"].get("requeued") is True
+        ):
+            kind = "mission_iterated"
         elif (
             etype == EventType.LIFE_MISSION_COMPLETED
             and str(row.get("status") or "") == "replan_requested"
@@ -563,7 +596,7 @@ class EventJournal:
     def all(self) -> list[JournalEntry]:
         return [JournalEntry.from_jsonable(r) for r in self._rows()]
 
-    def tail(self, n: int = 20) -> list[JournalEntry]:
+    def tail(self, n: int) -> list[JournalEntry]:
         if n <= 0:
             return []
         events = _read_jsonl_tail_history(
@@ -573,6 +606,143 @@ class EventJournal:
             raw_predicate=self._might_be_journal_event,
             raw_markers=self._RAW_EVENT_MARKERS,
             rg_pattern=self._RG_PATTERN,
+        )
+        return [
+            entry for row in events
+            if (entry := self._entry_from_event(row)) is not None
+        ]
+
+    def tail_kinds(self, n: int, *, kinds: Iterable[str]) -> list[JournalEntry]:
+        """Last ``n`` journal entries whose projected ``kind`` is in ``kinds``.
+
+        Only matching entries occupy window slots, so journal-level chatter
+        (planner cycles, waiting heartbeats) landing in between cannot shrink
+        the window — a plain ``tail(n)`` + post-filter systematically loses
+        older matches to that noise. Unlike :meth:`tail_settlements`, this
+        spans the full journal projection, so kinds with non-settlement event
+        sources (e.g. ``budget_pause`` from ``life.budget.pause``) still
+        qualify. Spans every retained rollover generation.
+        """
+        if n <= 0:
+            return []
+        wanted = frozenset(kinds)
+
+        def _is_wanted_kind(row: dict[str, Any]) -> bool:
+            # Derive the same kind projection the returned entries carry, so
+            # the filter and the caller reason about identical labels.
+            entry = self._entry_from_event(row)
+            return entry is not None and entry.kind in wanted
+
+        events = _read_jsonl_tail_history(
+            self.path,
+            n,
+            predicate=_is_wanted_kind,
+            raw_predicate=self._might_be_journal_event,
+            raw_markers=self._RAW_EVENT_MARKERS,
+            rg_pattern=self._RG_PATTERN,
+        )
+        return [
+            entry for row in events
+            if (entry := self._entry_from_event(row)) is not None
+        ]
+
+    def tail_settlements(
+        self,
+        n: int,
+        *,
+        kinds: Iterable[str] | None = None,
+    ) -> list[JournalEntry]:
+        """Last ``n`` mission-settlement entries across the whole journal.
+
+        Only ``life.mission.completed`` events occupy window slots: the
+        planner failure quarantine reasons over mission settlements, and its
+        lookback must not shrink because journal-level chatter (planner
+        cycles, waiting heartbeats) landed in between. When ``kinds`` is
+        given, only settlements whose projected :class:`JournalEntry` ``kind``
+        is in it occupy window slots — the failure quarantine passes exactly
+        its quarantine-or-release kinds so neutral settlements (budget or
+        provider pauses, iteration requeues) cannot evict an older failure
+        out of a threshold-sized window. Spans every retained rollover
+        generation and covers both the canonical spelling and the legacy
+        ``mission.completed`` alias.
+        """
+        if n <= 0:
+            return []
+        wanted = None if kinds is None else frozenset(kinds)
+
+        def _is_settlement(row: dict[str, Any]) -> bool:
+            etype = canonical_event_type(
+                row.get("canonical_type") or row.get("type")
+            )
+            if etype != EventType.LIFE_MISSION_COMPLETED:
+                return False
+            if wanted is None:
+                return True
+            # Derive the same kind projection the returned entries carry, so
+            # the filter and the caller reason about identical labels.
+            entry = self._entry_from_event(row)
+            return entry is not None and entry.kind in wanted
+
+        events = _read_jsonl_tail_history(
+            self.path,
+            n,
+            predicate=_is_settlement,
+            raw_markers=self._SETTLEMENT_RAW_MARKERS,
+            rg_pattern=self._SETTLEMENT_RG_PATTERN,
+        )
+        return [
+            entry for row in events
+            if (entry := self._entry_from_event(row)) is not None
+        ]
+
+    def tail_for_item(
+        self,
+        item_id: str,
+        n: int,
+        *,
+        kinds: Iterable[str] | None = None,
+    ) -> list[JournalEntry]:
+        """Last ``n`` mission-settlement entries journaled for one backlog item.
+
+        Only ``life.mission.completed`` events count: those are the entries the
+        replan-streak guard reasons about, and a per-item tail must not shrink
+        just because unrelated journal-level traffic (planner cycles, parallel
+        missions) landed in between. When ``kinds`` is given, only settlements
+        whose projected :class:`JournalEntry` ``kind`` is in it occupy window
+        slots — the replan-streak guard passes exactly its count-or-break kinds
+        so neutral settlements (budget/provider/research pauses) cannot evict
+        an older replan out of a threshold-sized window. Spans every retained
+        rollover generation.
+        """
+        item_id = str(item_id or "")
+        if n <= 0 or not item_id:
+            return []
+        raw_marker = item_id.encode("utf-8")
+        wanted = None if kinds is None else frozenset(kinds)
+
+        def _is_item_settlement(row: dict[str, Any]) -> bool:
+            etype = canonical_event_type(
+                row.get("canonical_type") or row.get("type")
+            )
+            if etype != EventType.LIFE_MISSION_COMPLETED:
+                return False
+            if str(row.get("item_id") or row.get("id") or "") != item_id:
+                return False
+            if wanted is None:
+                return True
+            # Derive the same kind projection the returned entries carry, so
+            # the filter and the caller reason about identical labels.
+            entry = self._entry_from_event(row)
+            return entry is not None and entry.kind in wanted
+
+        events = _read_jsonl_tail_history(
+            self.path,
+            n,
+            predicate=_is_item_settlement,
+            raw_predicate=lambda raw: raw_marker in raw,
+            # Item ids are plain uuid hex (``BacklogItem.new_id``), so the id
+            # itself is a regex-safe ripgrep pattern for sparse per-item rows.
+            rg_pattern=item_id,
         )
         return [
             entry for row in events
@@ -600,7 +770,7 @@ class EventJournal:
                     for raw in fh:
                         try:
                             row = json.loads(raw)
-                        except (json.JSONDecodeError, ValueError):
+                        except ValueError:
                             continue
                         if not isinstance(row, dict) or not self._is_journal_event(row):
                             continue
@@ -613,7 +783,10 @@ class EventJournal:
                             total += cost
             except OSError:
                 continue
+        self._total_cost_cache.pop(ts, None)
         self._total_cost_cache[ts] = (signature, total)
+        while len(self._total_cost_cache) > self._TOTAL_COST_CACHE_MAX_ENTRIES:
+            del self._total_cost_cache[next(iter(self._total_cost_cache))]
         return total
 
 
@@ -629,6 +802,7 @@ _BACKLOG_STATUSES = {
     "paused_provider_cooldown",
     "paused_provider_fence",
     "paused_daemon_shutdown",
+    "paused_external_work",
     "paused_operator",
     "research_incomplete",
     "paused_no_breakthrough",
@@ -647,12 +821,34 @@ _RECOVERABLE_PAUSE_STATUSES = {
     "paused_provider_cooldown",
     "paused_provider_fence",
     "paused_daemon_shutdown",
+    "paused_external_work",
     "paused_operator",
     "research_incomplete",
     "paused_no_breakthrough",
     "exhausted_current_methods",
     "infra_blocked",
 }
+
+
+def _expire_unanswered_operator_question(item: BacklogItem) -> None:
+    """A question dies with the mission that asked it.
+
+    Both resolvers require a non-empty ``pending_question``, so a card left
+    ``pending`` on an item that has already ended can never be answered — it is
+    simply offered forever. One sat that way on a failed mission for a day.
+    """
+    card = item.operator_decision
+    still_pending = str(card.get("status") or "") == "pending"
+    if not (still_pending or item.pending_question):
+        return
+    item.pending_question = ""
+    if still_pending:
+        revision = int(card.get("revision", 1) or 1)
+        card.update({
+            "status": "expired",
+            "resolved_from_revision": revision,
+            "revision": revision + 1,
+        })
 
 
 class IllegalStateTransition(RuntimeError):
@@ -683,6 +879,7 @@ class BacklogItem:
     tags: list[str] = field(default_factory=list)
     notes: str = ""
     started_ts: float | None = None
+    running_owner: str = ""
     finished_ts: float | None = None
     last_error: str = ""
     # Set when this item's reviewer verdict was "blocked" with a
@@ -704,15 +901,15 @@ class BacklogItem:
     # than run the item blind under the default workflow.
     manager_decision: dict[str, Any] = field(default_factory=dict)
     # --- iteration loop fields (Phase-7) -------------------------------
-    # When ``iterate`` is True the supervisor, after a successful
-    # ``done`` verdict, hands the produced artefacts to a L2 reviewer agent. The reviewer is the only verdict authority;
-    # there is no separate critic polish layer any more.
-    # for another mission cycle until the cycle ceiling is hit.
+    # When ``iterate`` is True, a successful mission whose vertical reports a
+    # trusted charter shortfall can be re-armed for another mission cycle. The
+    # L2 Reviewer remains the verdict authority; there is no separate critic.
+    # A positive persisted value stops iteration; zero is unlimited.
     # ``original_objective`` preserves the
     # operator's first-cycle instruction so subsequent cycles can be
     # framed as "polish what you already built".
     iterate: bool = True
-    iteration_max_cycles: int = 6
+    iteration_max_cycles: int = 0
     iteration_cycles_done: int = 0
     iteration_cost_usd: float = 0.0
     original_objective: str = ""
@@ -764,6 +961,10 @@ class BacklogItem:
     # absolute worktree; ordinary Planner tasks use a project-relative nested
     # Git root, which becomes the campaign root after host validation.
     execution_workdir: str = ""
+    # Only explicitly disjoint Planner tasks may be claimed by auxiliary mission
+    # workers. The primary worker remains able to execute every backlog item.
+    parallel_safe: bool = False
+    owns_paths: list[str] = field(default_factory=list)
     outcome: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -781,7 +982,7 @@ class BacklogItem:
         tags: list[str] | None = None,
         notes: str = "",
         iterate: bool = True,
-        iteration_max_cycles: int = 6,
+        iteration_max_cycles: int = 0,
         deps: list[str] | None = None,
         plan_id: str = "",
         plan_version: int = 0,
@@ -791,6 +992,8 @@ class BacklogItem:
         authorization_id: str = "",
         authorization_action: str = "",
         execution_workdir: str = "",
+        parallel_safe: bool = False,
+        owns_paths: list[str] | None = None,
         acceptance_check: str = "",
         plan_hypothesis: str = "",
         goal_contribution: str = "",
@@ -827,6 +1030,12 @@ class BacklogItem:
             authorization_id=str(authorization_id),
             authorization_action=str(authorization_action),
             execution_workdir=str(execution_workdir),
+            parallel_safe=bool(parallel_safe),
+            owns_paths=[
+                str(path).strip()
+                for path in (owns_paths or [])
+                if str(path).strip()
+            ],
             acceptance_check=str(acceptance_check or "").strip(),
             plan_hypothesis=str(plan_hypothesis or "").strip(),
             goal_contribution=str(goal_contribution or "").strip(),
@@ -849,7 +1058,7 @@ class BacklogItem:
             status = "pending"
         objective = str(row.get("objective", ""))
         return cls(
-            id=str(row.get("id", uuid.uuid4().hex[:12])),
+            id=str(row["id"] if "id" in row else cls.new_id()),
             ts=float(row.get("ts", time.time())),
             title=str(row.get("title", "")),
             objective=objective,
@@ -858,6 +1067,7 @@ class BacklogItem:
             tags=list(row.get("tags", [])),
             notes=str(row.get("notes", "")),
             started_ts=row.get("started_ts"),
+            running_owner=str(row.get("running_owner", "")),
             finished_ts=row.get("finished_ts"),
             last_error=str(row.get("last_error", "")),
             pending_question=str(row.get("pending_question", "")),
@@ -872,7 +1082,7 @@ class BacklogItem:
                 else {}
             ),
             iterate=bool(row.get("iterate", False)),
-            iteration_max_cycles=int(row.get("iteration_max_cycles", 6)),
+            iteration_max_cycles=int(row.get("iteration_max_cycles", 0)),
             iteration_cycles_done=int(row.get("iteration_cycles_done", 0)),
             iteration_cost_usd=float(row.get("iteration_cost_usd", 0.0)),
             original_objective=str(row.get("original_objective", objective)),
@@ -912,6 +1122,12 @@ class BacklogItem:
             authorization_id=str(row.get("authorization_id", "")),
             authorization_action=str(row.get("authorization_action", "")),
             execution_workdir=str(row.get("execution_workdir", "")),
+            parallel_safe=bool(row.get("parallel_safe", False)),
+            owns_paths=[
+                str(path).strip()
+                for path in (row.get("owns_paths", []) or [])
+                if str(path).strip()
+            ],
             outcome=(
                 {str(key): value for key, value in row.get("outcome", {}).items()}
                 if isinstance(row.get("outcome"), dict)
@@ -936,14 +1152,36 @@ class Backlog:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
+        self.archive_path = self.path.with_name(f"{self.path.stem}.archive.jsonl")
         self._lock_path = self.path.parent / f"{self.path.name}.lock"
 
     # --- io ---
     def _load(self) -> list[BacklogItem]:
         return [BacklogItem.from_jsonable(r) for r in _read_jsonl(self.path)]
 
+    def _load_archive(self) -> list[BacklogItem]:
+        return [
+            BacklogItem.from_jsonable(r)
+            for r in _read_jsonl(self.archive_path)
+        ]
+
     def _save(self, items: Iterable[BacklogItem]) -> None:
-        _atomic_rewrite_jsonl(self.path, (it.to_jsonable() for it in items))
+        # This partition is also the lazy migration: the first mutation of a
+        # legacy mixed backlog appends its terminal rows to the archive and
+        # rewrites only live rows to backlog.jsonl.
+        live: list[BacklogItem] = []
+        terminal: list[BacklogItem] = []
+        for item in items:
+            (terminal if item.status in _TERMINAL_STATUSES else live).append(item)
+        _append_jsonl(
+            self.archive_path,
+            (item.to_jsonable() for item in terminal),
+        )
+        _atomic_rewrite_jsonl(self.path, (item.to_jsonable() for item in live))
+
+    def _dependency_history(self, items: Iterable[BacklogItem]) -> list[BacklogItem]:
+        live = list(items)
+        return self._load_archive() if any(item.deps for item in live) else []
 
     @staticmethod
     def _done_ids(items: Iterable[BacklogItem]) -> set[str]:
@@ -968,6 +1206,61 @@ class Backlog:
             item.status == "pending"
             and not str(item.pending_question or "").strip()
             and all(d in done for d in item.deps)
+        )
+
+    @staticmethod
+    def _paths_overlap(left: str, right: str) -> bool:
+        left_parts = tuple(
+            part.casefold()
+            for part in left.replace("\\", "/").strip("/").split("/")
+            if part and part != "."
+        )
+        right_parts = tuple(
+            part.casefold()
+            for part in right.replace("\\", "/").strip("/").split("/")
+            if part and part != "."
+        )
+        if not left_parts or not right_parts:
+            return True
+        common = min(len(left_parts), len(right_parts))
+        return left_parts[:common] == right_parts[:common]
+
+    @classmethod
+    def _parallel_worker_can_claim(
+        cls,
+        candidate: BacklogItem,
+        items: Iterable[BacklogItem],
+    ) -> bool:
+        if not candidate.parallel_safe or not candidate.owns_paths:
+            return False
+        if any(
+            Path(path).is_absolute()
+            or not Path(path).parts
+            or ".." in Path(path).parts
+            or any(char in path for char in "*?[]{}!")
+            for path in candidate.owns_paths
+        ):
+            return False
+        forbidden = {"stage_closing", "framework_maintenance"}
+        tags = {
+            str(tag).strip().lower().replace("-", "_")
+            for tag in candidate.tags
+        }
+        if tags & forbidden:
+            return False
+        running = [item for item in items if item.status == "running"]
+        paused_external = [
+            item for item in items if item.status == "paused_external_work"
+        ]
+        if any(not item.parallel_safe or not item.owns_paths for item in running):
+            return False
+        if any(not item.owns_paths for item in paused_external):
+            return False
+        return not any(
+            cls._paths_overlap(candidate_path, active_path)
+            for item in (*running, *paused_external)
+            for candidate_path in candidate.owns_paths
+            for active_path in item.owns_paths
         )
 
     @staticmethod
@@ -998,7 +1291,7 @@ class Backlog:
             index += 1
             stack.append(node)
             on_stack.add(node)
-            for dep in graph.get(node, ()):
+            for dep in graph[node]:
                 if dep not in indices:
                     strongconnect(dep)
                     lowlinks[node] = min(lowlinks[node], lowlinks[dep])
@@ -1014,7 +1307,7 @@ class Backlog:
                 if member == node:
                     break
             if len(component) > 1 or (
-                len(component) == 1 and component[0] in graph.get(component[0], ())
+                len(component) == 1 and component[0] in graph[component[0]]
             ):
                 cycles.append(tuple(sorted(component)))
 
@@ -1033,7 +1326,12 @@ class Backlog:
             rendered = "; ".join(" ↔ ".join(component) for component in cycles)
             raise ValueError(f"backlog dependency cycle: {rendered}")
 
-    def _cascade_blocked(self, items: list[BacklogItem]) -> bool:
+    def _cascade_blocked(
+        self,
+        items: list[BacklogItem],
+        *,
+        history: Iterable[BacklogItem] = (),
+    ) -> bool:
         """Skip pending items whose deps can never all become ``done``.
 
         A pending item that lists a dep already in a terminal-but-not-done
@@ -1066,7 +1364,8 @@ class Backlog:
         # Resolve to a fixed point: skipping a cycle or dead dependency may
         # make additional downstream rows permanently unreachable.
         while True:
-            by_id = {it.id: it for it in items}
+            by_id = {it.id: it for it in history}
+            by_id.update({it.id: it for it in items})
             pass_changed = False
             for it in items:
                 if it.status != "pending":
@@ -1098,32 +1397,26 @@ class Backlog:
     @contextmanager
     def _locked(self) -> Iterator[None]:
         """Serialize backlog read-modify-write operations across processes."""
+        key = os.path.normcase(str(self._lock_path.resolve()))
+        with _BACKLOG_THREAD_LOCKS_GUARD:
+            thread_lock = _BACKLOG_THREAD_LOCKS.setdefault(key, threading.Lock())
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock_path.open("a+b") as fh:
-            if fcntl is not None:  # POSIX
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        with thread_lock:
+            with self._lock_path.open("a+b") as fh:
+                portalocker.lock(fh, portalocker.LOCK_EX)
                 try:
                     yield
                 finally:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            else:  # pragma: no cover - Windows fallback
-                import msvcrt
-
-                lock = getattr(msvcrt, "locking")
-                lk_lock = getattr(msvcrt, "LK_LOCK")
-                lk_unlock = getattr(msvcrt, "LK_UNLCK")
-                fh.seek(0)
-                lock(fh.fileno(), lk_lock, 1)
-                try:
-                    yield
-                finally:
-                    fh.seek(0)
-                    lock(fh.fileno(), lk_unlock, 1)
+                    portalocker.unlock(fh)
 
     # --- write ---
     def add(self, item: BacklogItem) -> BacklogItem:
         with self._locked():
             items = self._load()
+            # A freshly enqueued item has no journal history to migrate, so
+            # its zero streak is authoritative from the start. The dataclass
+            # default stays False: it marks pre-upgrade rows loaded from disk.
+            item.replan_streak_tracked = True
             items.append(item)
             self._validate_no_dependency_cycles(items)
             self._save(items)
@@ -1139,10 +1432,14 @@ class Backlog:
             raise ValueError("backlog batch contains duplicate item ids")
         with self._locked():
             items = self._load()
-            existing = {item.id for item in items}
+            existing = {item.id for item in self._load_archive()}
+            existing.update(item.id for item in items)
             duplicate = next((item_id for item_id in ids if item_id in existing), None)
             if duplicate is not None:
                 raise ValueError(f"backlog item already exists: {duplicate}")
+            for item in batch:
+                # Same as add(): new rows never need journal migration.
+                item.replan_streak_tracked = True
             items.extend(batch)
             self._validate_no_dependency_cycles(items)
             self._save(items)
@@ -1179,6 +1476,31 @@ class Backlog:
                 self._save(items)
         return tuple(superseded)
 
+    def supersede_items(
+        self,
+        *,
+        item_ids: Iterable[str],
+        reason: str,
+        superseded_by_plan_id: str,
+    ) -> tuple[str, ...]:
+        """Retire named pending items, preserving paused and running work."""
+        selected = set(item_ids)
+        superseded: list[str] = []
+        with self._locked():
+            items = self._load()
+            now = time.time()
+            for item in items:
+                if item.id not in selected or item.status != "pending":
+                    continue
+                item.status = "superseded"
+                item.finished_ts = now
+                item.superseded_by_plan_id = superseded_by_plan_id
+                item.superseded_reason = reason
+                superseded.append(item.id)
+            if superseded:
+                self._save(items)
+        return tuple(superseded)
+
     def apply_plan_revision(
         self,
         *,
@@ -1189,6 +1511,8 @@ class Backlog:
         supersede_item_ids: Iterable[str],
         new_items: Iterable[BacklogItem],
         reason: str,
+        expected_active_item_ids: Iterable[str] | None = None,
+        terminalized_source_item_id: str = "",
     ) -> PlanRevisionResult:
         """Atomically replace every active item in one plan revision."""
         expected_version = int(expected_version)
@@ -1196,7 +1520,14 @@ class Backlog:
         reason = str(reason).strip()
         if not str(expected_plan_id).strip():
             raise ValueError("expected plan id must not be empty")
-        supersede_ids = tuple(dict.fromkeys(str(item_id) for item_id in supersede_item_ids))
+        supersede_ids = tuple(
+            dict.fromkeys(str(item_id) for item_id in supersede_item_ids)
+        )
+        expected_active_ids = (
+            tuple(dict.fromkeys(str(item_id) for item_id in expected_active_item_ids))
+            if expected_active_item_ids is not None
+            else ()
+        )
         replacements = list(new_items)
         if not reason:
             raise ValueError("plan revision reason must not be empty")
@@ -1220,6 +1551,7 @@ class Backlog:
 
         with self._locked():
             items = self._load()
+            archived_by_id = {item.id: item for item in self._load_archive()}
             active_ids = {
                 item.id
                 for item in items
@@ -1227,11 +1559,57 @@ class Backlog:
                 and item.plan_version == expected_version
                 and item.status not in _TERMINAL_STATUSES
             }
-            if not active_ids:
+            if not active_ids and not expected_active_ids:
                 raise RuntimeError(
                     "plan revision conflict: expected active plan revision not found"
                 )
-            existing_ids = {item.id for item in items}
+            if expected_active_ids:
+                expected_set = set(expected_active_ids)
+                terminalized_source_item_id = str(terminalized_source_item_id).strip()
+                if terminalized_source_item_id not in expected_set:
+                    raise ValueError(
+                        "plan revision witness must include the source item"
+                    )
+                if set(supersede_ids) != expected_set:
+                    raise ValueError(
+                        "plan revision witness must match superseded item ids"
+                    )
+                if not active_ids.issubset(expected_set):
+                    raise RuntimeError(
+                        "plan revision conflict: active plan grew after witness capture"
+                    )
+                by_id = dict(archived_by_id)
+                by_id.update({item.id: item for item in items})
+                missing_ids = [
+                    item_id for item_id in expected_active_ids if item_id not in by_id
+                ]
+                if missing_ids:
+                    raise RuntimeError(
+                        "plan revision conflict: witnessed item missing from backlog"
+                    )
+                for item_id in expected_active_ids:
+                    item = by_id[item_id]
+                    if (
+                        item.plan_id != expected_plan_id
+                        or item.plan_version != expected_version
+                    ):
+                        raise RuntimeError(
+                            "plan revision conflict: witnessed item changed plan identity"
+                        )
+                    if item.status in {"done", "aborted", "skipped", "superseded"}:
+                        raise RuntimeError(
+                            "plan revision conflict: witnessed item already terminalized"
+                        )
+                    if (
+                        item.status == "failed"
+                        and item.id != terminalized_source_item_id
+                    ):
+                        raise RuntimeError(
+                            "plan revision conflict: non-source item terminalized"
+                        )
+                active_ids = expected_set
+            existing_ids = set(archived_by_id)
+            existing_ids.update(item.id for item in items)
             if replacement_id_set & existing_ids:
                 raise ValueError("replacement plan reuses an existing backlog item id")
             for item in replacements:
@@ -1252,6 +1630,7 @@ class Backlog:
                 )
 
             now = time.time()
+            terminal_updates: list[BacklogItem] = []
             for item in items:
                 if item.id not in active_ids:
                     continue
@@ -1259,6 +1638,23 @@ class Backlog:
                 item.finished_ts = now
                 item.superseded_by_plan_id = new_plan_id
                 item.superseded_reason = reason
+            for item_id in active_ids:
+                if any(item.id == item_id for item in items):
+                    continue
+                archived = archived_by_id.get(item_id)
+                if archived is None:
+                    continue
+                archived.status = "superseded"
+                archived.finished_ts = now
+                archived.superseded_by_plan_id = new_plan_id
+                archived.superseded_reason = reason
+                terminal_updates.append(archived)
+            items.extend(terminal_updates)
+            for item in replacements:
+                # Same as Backlog.add(): a freshly inserted replacement row has
+                # no journal history to migrate, so its zero replan streak is
+                # authoritative and the first settlement skips the journal scan.
+                item.replan_streak_tracked = True
             items.extend(replacements)
             self._save(items)
 
@@ -1353,12 +1749,38 @@ class Backlog:
                     for k, v in fields.items():
                         if hasattr(it, k):
                             setattr(it, k, v)
+                    if it.status in _TERMINAL_STATUSES:
+                        _expire_unanswered_operator_question(it)
                     self._validate_no_dependency_cycles(items)
                     out = it
                     break
             if out is not None:
                 self._save(items)
-            return out
+                return out
+            archived = next(
+                (
+                    item
+                    for item in reversed(self._load_archive())
+                    if item.id == item_id
+                ),
+                None,
+            )
+            if archived is not None:
+                if "status" in fields:
+                    new_status = str(fields.get("status") or "pending")
+                    if new_status not in _TERMINAL_STATUSES:
+                        raise IllegalStateTransition(
+                            f"backlog item {item_id} is in terminal state "
+                            f"{archived.status!r}; refusing transition to "
+                            f"{new_status!r}. Enqueue a new item instead."
+                        )
+                for key, value in fields.items():
+                    if hasattr(archived, key):
+                        setattr(archived, key, value)
+                if archived.status in _TERMINAL_STATUSES:
+                    _expire_unanswered_operator_question(archived)
+                _append_jsonl(self.archive_path, [archived.to_jsonable()])
+            return archived
 
     def continue_with_operator_reply(
         self,
@@ -1370,6 +1792,7 @@ class Backlog:
         decision_id: str = "",
         decision_note: str = "",
         manager_reply: str = "",
+        operator_context_persisted: bool = False,
     ) -> tuple[BacklogItem | None, BacklogItem | None]:
         """Atomically consume one pending question and enqueue its continuation.
 
@@ -1377,9 +1800,40 @@ class Backlog:
         lock and resolved card provide idempotency without a separate revision
         or campaign-generation gate.
         """
+        from ..core.operator_context import import_deterministic_credential
+
+        answer, _credential = import_deterministic_credential(
+            self.path.parent,
+            answer,
+            global_root=(
+                self.path.parent.parent.parent
+                if self.path.parent.parent.name == "projects"
+                else None
+            ),
+        )
+        if not operator_context_persisted:
+            from ..core.operator_context import persist_once_answer
+
+            persist_once_answer(
+                self.path.parent,
+                answer,
+                source="operator.continuation_answer",
+                mission_id=item_id,
+            )
         with self._locked():
             items = self._load()
             blocked = next((item for item in items if item.id == item_id), None)
+            blocked_was_archived = False
+            if blocked is None:
+                blocked = next(
+                    (
+                        item
+                        for item in reversed(self._load_archive())
+                        if item.id == item_id
+                    ),
+                    None,
+                )
+                blocked_was_archived = blocked is not None
             if blocked is None:
                 return None, None
             card = blocked.operator_decision
@@ -1426,11 +1880,19 @@ class Backlog:
                     )
                     for goal in non_goals
                 ]
+            inherited_manager_decision = dict(blocked.manager_decision)
+            if decision:
+                inherited_manager_decision["routed"] = True
             continuation = BacklogItem.new(
                 title=blocked.title,
                 objective=objective,
                 priority=blocked.priority,
-                tags=[*blocked.tags, "operator-reply", "manager-approved"],
+                tags=list(dict.fromkeys([
+                    *blocked.tags,
+                    "operator-reply",
+                    "manager-approved",
+                    "review:required",
+                ])),
                 notes=f"Continues blocked item {blocked.id}.",
                 iterate=blocked.iterate,
                 iteration_max_cycles=blocked.iteration_max_cycles,
@@ -1454,7 +1916,7 @@ class Backlog:
                 expected_regressions=blocked.expected_regressions,
                 decision_rule=blocked.decision_rule,
                 non_goals=non_goals,
-                manager_decision=dict(blocked.manager_decision),
+                manager_decision=inherited_manager_decision,
             )
             blocked.status = "failed"
             blocked.finished_ts = time.time()
@@ -1493,6 +1955,14 @@ class Backlog:
                     continuation.id if dep == blocked.id else dep
                     for dep in item.deps
                 ))
+            if blocked_was_archived:
+                # Append the resolved terminal revision; history() selects the
+                # latest row for this stable id.
+                items.append(blocked)
+            # Same as Backlog.add(): the continuation is a brand-new row with
+            # no journal history, so its zero replan streak is authoritative
+            # and the first settlement skips the journal migration scan.
+            continuation.replan_streak_tracked = True
             items.append(continuation)
             self._validate_no_dependency_cycles(items)
             self._save(items)
@@ -1544,7 +2014,14 @@ class Backlog:
             self._save(items)
             return item
 
-    def claim_next(self) -> BacklogItem | None:
+    def claim_next(
+        self,
+        *,
+        parallel_only: bool = False,
+        respect_running: bool = False,
+        expected_id: str = "",
+        owner: str = "",
+    ) -> BacklogItem | None:
         """Atomically pick the head *ready* pending item and flip it to ``running``.
 
         Replaces the ``next_pending()`` + ``mark_running()`` pair so the
@@ -1567,17 +2044,46 @@ class Backlog:
             # Clear dead dependencies first (failed/skipped/missing dep →
             # the dependent can never run). Persist the skip so the
             # supervisor doesn't keep re-seeing a permanently-blocked item.
-            cascaded = self._cascade_blocked(items)
-            done = self._done_ids(items)
+            history = self._dependency_history(items)
+            cascaded = self._cascade_blocked(items, history=history)
+            done = self._done_ids([*history, *items])
             ready = [it for it in items if self._is_ready(it, done)]
+            # An example that reached the backlog before the planner learned to
+            # reject it is still sitting there, and a stored item is claimed
+            # without being planned again.
+            examples = [
+                it for it in ready if is_prompt_example_task(it.title, it.objective)
+            ]
+            for item in examples:
+                item.status = "skipped"
+                item.finished_ts = time.time()
+                item.last_error = "the planner prompt's example task, not a plan"
+            if examples:
+                ready = [it for it in ready if it not in examples]
+                cascaded = True
+            if parallel_only or (
+                respect_running
+                and any(
+                    item.status in {"running", "paused_external_work"}
+                    for item in items
+                )
+            ):
+                ready = [
+                    item
+                    for item in ready
+                    if self._parallel_worker_can_claim(item, items)
+                ]
             if not ready:
                 if cascaded:
                     self._save(items)
                 return None
             ready.sort(key=lambda it: (it.priority, it.ts))
             head = ready[0]
+            if expected_id and head.id != expected_id:
+                return None
             head.status = "running"
             head.started_ts = time.time()
+            head.running_owner = str(owner)
             self._save(items)
             return head
 
@@ -1589,6 +2095,7 @@ class Backlog:
     ) -> list[BacklogItem]:
         """Recover items left ``running`` by a crashed process.
 
+        This count bounds repeated confirmed process deaths, not live work.
         Items with fewer than *max_retries* orphan recoveries are reset
         to ``pending`` so the next supervisor pass retries them. Items
         that have already been orphaned *max_retries* times are marked
@@ -1664,6 +2171,11 @@ class Backlog:
                     it.started_ts = None
                     it.finished_ts = None
                     it.last_error = ""
+                    # An accepted cycle re-armed the item, which the settlement
+                    # journals as mission_iterated — forward progress, so the
+                    # replan streak restarts from an authoritative zero.
+                    it.consecutive_replans = 0
+                    it.replan_streak_tracked = True
                     out = it
                     break
             if out is not None:
@@ -1781,7 +2293,10 @@ class Backlog:
                 item.last_error = ""
                 resumed.append(item)
             if resumed:
-                self._cascade_blocked(items)
+                self._cascade_blocked(
+                    items,
+                    history=self._dependency_history(items),
+                )
                 self._save(items)
             return resumed
 
@@ -1796,7 +2311,21 @@ class Backlog:
 
     # --- read ---
     def all(self) -> list[BacklogItem]:
+        """Compatibility history view; runtime readers should choose explicitly."""
+        return self.history()
+
+    def active(self) -> list[BacklogItem]:
+        """Read only the compact live backlog."""
         return self._load()
+
+    def history(self) -> list[BacklogItem]:
+        """Read terminal archive plus current live rows, oldest group first."""
+        rows = [*self._load_archive(), *self._load()]
+        # Terminal corrections are appended, never rewritten. Present the
+        # latest state for each stable item id while retaining first-seen order.
+        latest = {item.id: item for item in rows}
+        order = dict.fromkeys(item.id for item in rows)
+        return [latest[item_id] for item_id in order]
 
     def pending(self) -> list[BacklogItem]:
         items = [it for it in self._load() if it.status == "pending"]
@@ -1813,12 +2342,18 @@ class Backlog:
         ``ready()`` and ``pending()`` return the same list.
         """
         items = self._load()
-        done = self._done_ids(items)
+        history = self._dependency_history(items)
+        done = self._done_ids([*history, *items])
         out = [it for it in items if self._is_ready(it, done)]
         out.sort(key=lambda it: (it.priority, it.ts))
         return out
 
-    def next_pending(self) -> BacklogItem | None:
+    def next_pending(
+        self,
+        *,
+        parallel_only: bool = False,
+        respect_running: bool = False,
+    ) -> BacklogItem | None:
         """Head of the *ready* queue (deps all ``done``), or ``None``.
 
         Kept named ``next_pending`` for the existing supervisor call
@@ -1832,9 +2367,22 @@ class Backlog:
         """
         with self._locked():
             items = self._load()
-            changed = self._cascade_blocked(items)
-            done = self._done_ids(items)
+            history = self._dependency_history(items)
+            changed = self._cascade_blocked(items, history=history)
+            done = self._done_ids([*history, *items])
             ready = [item for item in items if self._is_ready(item, done)]
+            if parallel_only or (
+                respect_running
+                and any(
+                    item.status in {"running", "paused_external_work"}
+                    for item in items
+                )
+            ):
+                ready = [
+                    item
+                    for item in ready
+                    if self._parallel_worker_can_claim(item, items)
+                ]
             if changed:
                 self._save(items)
             ready.sort(key=lambda item: (item.priority, item.ts))
@@ -1994,14 +2542,9 @@ class LifeMemory:
         self,
         *,
         max_entries: int = 3,
-        recency_n: int = 30,
     ) -> list[JournalEntry]:
         """Return the newest journal entries as non-authoritative context."""
-        return _recent_journal(
-            self.journal,
-            max_entries=max_entries,
-            recency_n=recency_n,
-        )
+        return _recent_journal(self.journal, max_entries=max_entries)
 
     @property
     def failure_experiences(self):
@@ -2147,7 +2690,7 @@ def request_running_item_abort(
     """Persist an abort request for the backlog item running right now."""
     root = Path(life_dir)
     running = [
-        item for item in LifeMemory.open(root).backlog.all()
+        item for item in LifeMemory.open(root).backlog.active()
         if item.status == "running"
     ]
     if not running:
@@ -2165,7 +2708,11 @@ def request_running_item_abort(
     )
 
 
-def consume_running_item_abort(life_dir: Path | str | None) -> str | None:
+def consume_running_item_abort(
+    life_dir: Path | str | None,
+    *,
+    target_item_id: str = "",
+) -> str | None:
     """Consume a valid abort request while its exact target remains running."""
     if not life_dir:
         return None
@@ -2177,6 +2724,17 @@ def consume_running_item_abort(life_dir: Path | str | None) -> str | None:
     raw = ""
     consumed_path: Path | None = None
     for path in paths:
+        if target_item_id:
+            try:
+                preview = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (
+                not isinstance(preview, dict)
+                or str(preview.get("target_item_id") or "").strip()
+                != target_item_id
+            ):
+                continue
         claimed = path.with_name(
             f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.claimed"
         )
@@ -2213,10 +2771,12 @@ def consume_running_item_abort(life_dir: Path | str | None) -> str | None:
     item_id = str(payload.get("target_item_id") or "").strip()
     if not item_id:
         return None
+    if target_item_id and item_id != target_item_id:
+        return None
     try:
         target = next(
             (
-                item for item in LifeMemory.open(Path(life_dir)).backlog.all()
+                item for item in LifeMemory.open(Path(life_dir)).backlog.active()
                 if item.id == item_id
             ),
             None,
@@ -2363,13 +2923,8 @@ class ProjectMemory:
         self,
         *,
         max_entries: int = 3,
-        recency_n: int = 30,
     ) -> list[JournalEntry]:
-        return _recent_journal(
-            self.memory,
-            max_entries=max_entries,
-            recency_n=recency_n,
-        )
+        return _recent_journal(self.memory, max_entries=max_entries)
 
     @property
     def failure_experiences(self):
@@ -2546,13 +3101,10 @@ def _recent_journal(
     journal: EventJournal,
     *,
     max_entries: int,
-    recency_n: int,
 ) -> list[JournalEntry]:
-    # Return the most recent entries (newest first), bounded by both
-    # ``recency_n`` (how far back to look) and ``max_entries`` (how many to
-    # surface).
-    recent = journal.tail(recency_n)
+    # Return the most recent ``max_entries`` entries, newest first.
+    recent = journal.tail(max_entries)
     if not recent:
         return []
     # tail() yields oldest→newest; surface newest first.
-    return list(reversed(recent))[:max_entries]
+    return list(reversed(recent))

@@ -39,12 +39,13 @@ def _paper_mission_for_project_root(project_root: Path | str) -> bool:
     Missing/corrupt state is deliberately non-paper.  ``resolve_vertical`` has
     a compatibility fallback to ``research`` for undecided projects; using that
     fallback as a mission-type signal caused ordinary bounded tasks to pay for
-    paper idea search and inherit EMNLP guidance. A persisted Manager decision
+    paper idea search and inherit publication-campaign guidance. A persisted
+    Manager decision
     is required here.
     """
     try:
         from ..skills.vertical_select import _persisted_vertical, resolve_workflow_mode
-        from ..verticals._base import load_vertical, vertical_completion_gate
+        from ..verticals._base import load_vertical, vertical_is_paper_mission
 
         root = Path(project_root).expanduser()
         persisted = _persisted_vertical(root)
@@ -57,7 +58,29 @@ def _paper_mission_for_project_root(project_root: Path | str) -> bool:
         if resolve_workflow_mode(root) == "direct":
             return False
         vertical = persisted
-        return vertical_completion_gate(load_vertical(vertical, project_root=root)) == "certified"
+        return vertical_is_paper_mission(
+            load_vertical(vertical, project_root=root)
+        )
+    except Exception:  # noqa: BLE001 — mission typing must fail safe
+        return False
+
+
+def _final_certification_for_project_root(project_root: Path | str) -> bool:
+    """Return whether the persisted non-direct vertical has a certified gate."""
+    try:
+        from ..skills.vertical_select import _persisted_vertical, resolve_workflow_mode
+        from ..verticals._base import load_vertical, vertical_completion_gate
+
+        root = Path(project_root).expanduser()
+        persisted = _persisted_vertical(root)
+        if persisted is None or resolve_workflow_mode(root) == "direct":
+            return False
+        return (
+            vertical_completion_gate(
+                load_vertical(persisted, project_root=root)
+            )
+            == "certified"
+        )
     except Exception:  # noqa: BLE001 — mission typing must fail safe
         return False
 
@@ -65,21 +88,40 @@ def _paper_mission_for_project_root(project_root: Path | str) -> bool:
 def _independent_review_required_for_project_root(
     project_root: Path | str,
 ) -> bool:
-    """Return the persisted vertical's mandatory independent-review policy."""
+    """Return the persisted vertical's mandatory independent-review policy.
+
+    Fails CLOSED once a vertical is resolved. An unresolved project keeps the
+    legacy False — there is no policy to honour yet — but a project that *has*
+    chosen a vertical and then cannot have that vertical's policy read is a
+    broken install, not an opt-out, and the safe reading of "I cannot tell
+    whether review is mandatory" is that it is.
+
+    Bug #42: the old blanket ``return False`` made a vertical whose module
+    lacked ``REQUIRE_INDEPENDENT_REVIEW`` indistinguishable from one that
+    declined review. A daemon that had rolled back to an older framework copy
+    resolved 'math' correctly, found no attribute, and dropped the Reviewer for
+    14 consecutive missions with no event and no log line.
+    """
+    root = Path(project_root).expanduser()
     try:
         from ..skills.vertical_select import _persisted_vertical
+
+        persisted = _persisted_vertical(root)
+    except Exception:  # noqa: BLE001 — unresolved projects keep legacy behavior
+        return False
+    if persisted is None:
+        return False
+    try:
         from ..verticals._base import (
             load_vertical,
             vertical_requires_independent_review,
         )
 
-        root = Path(project_root).expanduser()
-        persisted = _persisted_vertical(root)
-        if persisted is None:
-            return False
-        return vertical_requires_independent_review(load_vertical(persisted, project_root=root))
-    except Exception:  # noqa: BLE001 — unresolved projects keep legacy behavior
-        return False
+        return vertical_requires_independent_review(
+            load_vertical(persisted, project_root=root)
+        )
+    except Exception:  # noqa: BLE001 — a resolved vertical fails closed
+        return True
 
 
 def _workflow_mode_for_project_root(project_root: Path | str) -> str:
@@ -107,9 +149,11 @@ def _build_supervisor_config(
     open_ended: bool,
 ) -> LifeSupervisorConfig:
     # Mission type follows a positive Manager-authored vertical decision.  An
-    # undecided or malformed project is bounded/non-paper, never implicitly an
-    # EMNLP campaign.
-    paper_mission = _paper_mission_for_project_root(artifact_root or project_root)
+    # undecided or malformed project is bounded/non-paper, never implicitly a
+    # publication campaign.
+    runtime_root = artifact_root or project_root
+    paper_mission = _paper_mission_for_project_root(runtime_root)
+    final_certification = _final_certification_for_project_root(runtime_root)
     from ..skills.role_memory import role_skill_maintenance_enabled
 
     return LifeSupervisorConfig(
@@ -132,7 +176,7 @@ def _build_supervisor_config(
         continuous=continuous,
         continuous_objective=continuous_objective,
         open_ended=open_ended,
-        final_certification_gate=paper_mission and open_ended,
+        final_certification_gate=final_certification and open_ended,
         paper_mission=paper_mission,
         project_state_dir=project_root,
         artifact_root=artifact_root or project_root,
@@ -212,6 +256,7 @@ def run_life_supervisor(
                         division.proposed_domain,
                         execution_task=division.execution_task,
                         workflow_mode=division.workflow_mode,
+                        start_stage=division.start_stage,
                     )
                 from ..manager.front_door import require_manager_execution_task
 
@@ -227,7 +272,7 @@ def run_life_supervisor(
                 continuous_objective = ""
         refresh_skill_store = getattr(runner, "_refresh_manager_skill_store", None)
         if callable(refresh_skill_store):
-            refresh_skill_store(runner._args)
+            refresh_skill_store(runner._args, workdir=project_worktree)
         cfg = _build_supervisor_config(
             global_daily_cap_usd=global_daily_cap_usd,
             once=once,
@@ -272,15 +317,21 @@ def _invoke_supervisor(
     open_ended: bool = True,
     allow_chat_fast_path: bool = False,
 ) -> tuple[dict[str, Any], str | None]:
+    from ._runtime_construction import _resolve_role_runner_backend_name
+
     ns = argparse.Namespace()
     ns.backend = backend
+    engineer_backend = _resolve_role_runner_backend_name("engineer", backend)
+    reviewer_backend = _resolve_role_runner_backend_name("reviewer", backend)
     ns.engineer_model = resolve_role_model(
         "engineer",
         role_env="ARGUS_SKILL_ENGINEER_MODEL",
+        backend=engineer_backend,
     )
     ns.reviewer_model = resolve_role_model(
         "reviewer",
         role_env="ARGUS_SKILL_REVIEWER_MODEL",
+        backend=reviewer_backend,
     )
     ns.engineer_reasoning_effort = resolve_role_reasoning_effort(
         "ARGUS_SKILL_ENGINEER_REASONING_EFFORT",
@@ -303,8 +354,8 @@ def _invoke_supervisor(
         ns.project_state_dir = None
     # Keep enough room for multi-round implementation and review without
     # allowing one mission to consume an effectively unbounded campaign.
-    # Override via ARGUS_SKILL_MAX_ROUNDS for exceptional long-horizon work.
-    ns.max_rounds = int(os.environ.get("ARGUS_SKILL_MAX_ROUNDS", "32"))
+    # A positive override remains available for explicitly bounded work.
+    ns.max_rounds = int(os.environ.get("ARGUS_SKILL_MAX_ROUNDS", "0"))
 
     # Runtime context injected into every mission prelude so the agent
     # knows its own backend, models, and budget constraints at runtime.

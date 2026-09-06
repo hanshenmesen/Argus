@@ -90,9 +90,95 @@ test('achievement requires an explicit reviewer certification event', () => {
     evidence: ['result.json'],
     reviewer_certified: true,
   });
+
   assert.equal(certified.achievement?.reviewer_certified, true);
   assert.equal(certified.achievement?.title, 'Kernel speedup certified');
   assert.deepEqual(certified.achievement?.evidence, ['result.json']);
+});
+
+
+test('manager routing persists all execution axes', () => {
+  const view = reduceMissionViewEvent(emptyMissionView(), {
+    type: 'life.manager.intent.completed',
+    ts: 1,
+    item_id: 'task-routing',
+    objective: 'Complete a finite staged delivery',
+    route: 'team',
+    vertical: 'software',
+    workflow_mode: 'staged',
+    lifetime: 'bounded',
+    continuous: true,
+    open_ended: false,
+  });
+
+  assert.deepEqual(view.routing, {
+    route: 'team',
+    vertical: 'software',
+    workflow_mode: 'staged',
+    lifetime: 'bounded',
+    continuous: true,
+    open_ended: false,
+  });
+});
+
+
+test('planner task labels are research-specific only for research routes', () => {
+  let software = reduceMissionViewEvent(emptyMissionView(), {
+    type: 'life.manager.intent.completed',
+    ts: 1,
+    item_id: 'software-task',
+    vertical: 'software',
+  });
+  software = reduceMissionViewEvent(software, {
+    type: 'life.planner.task_added',
+    ts: 2,
+    item_id: 'software-task',
+    title: 'Fix the CLI',
+  });
+
+  let research = reduceMissionViewEvent(emptyMissionView(), {
+    type: 'life.manager.intent.completed',
+    ts: 1,
+    item_id: 'research-task',
+    vertical: 'research',
+  });
+  research = reduceMissionViewEvent(research, {
+    type: 'life.planner.task_added',
+    ts: 2,
+    item_id: 'research-task',
+    title: 'Test a hypothesis',
+  });
+
+  assert.equal(
+    software.roles.find((role) => role.role === 'planner')?.label,
+    'Task added',
+  );
+  assert.equal(
+    research.roles.find((role) => role.role === 'planner')?.label,
+    'Research branch added',
+  );
+});
+
+
+test('partial Manager intent events preserve existing routing axes', () => {
+  const current = emptyMissionView();
+  current.routing = {
+    route: 'team',
+    vertical: 'software',
+    workflow_mode: 'staged',
+    lifetime: 'standing',
+    continuous: true,
+    open_ended: true,
+  };
+  const next = reduceMissionViewEvent(current, {
+    type: 'life.manager.intent.completed',
+    ts: 2,
+    item_id: 'daemon-boot',
+    objective: 'Resume campaign',
+    vertical: 'software',
+  });
+
+  assert.deepEqual(next.routing, current.routing);
 });
 
 

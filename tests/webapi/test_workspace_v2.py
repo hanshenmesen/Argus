@@ -5,6 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from argus_skill.webapi import server
@@ -207,3 +209,23 @@ def test_final_review_uses_existing_request_id_without_content_hashes(
     assert status.status_code == 200
     assert status.json()["status"] == "completed"
     assert "report_sha256" not in status.json()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction security test")
+def test_workspace_v2_rejects_junction_traversal(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret", encoding="utf-8")
+    junction = workspace / "linked"
+    subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        with pytest.raises(HTTPException, match="workspace directory unavailable"):
+            _open_confined_file(workspace, "linked/secret.md")
+    finally:
+        junction.rmdir()

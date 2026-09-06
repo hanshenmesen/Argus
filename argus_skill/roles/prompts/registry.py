@@ -63,7 +63,9 @@ class RolePromptCatalog:
                 stage_checklist="",
                 stage_order=(),
                 completion_gate="none",
+                paper_mission=False,
                 workflow_mode="staged",
+                verification_stage_profiles={},
                 requires_independent_review=False,
                 search_altitude="",
                 fragment_ids=(),
@@ -72,20 +74,54 @@ class RolePromptCatalog:
         from ...verticals._base import load_vertical_contract
 
         contract = load_vertical_contract(vertical, project_root=root)
-        vertical_banner = contract.banner(banner_role)
-        # A controller-owned external gate is a stronger objective contract than
-        # a generic vertical's optimization style. Keep the stage/checklist state,
-        # but suppress a vertical banner that can otherwise redefine the task
-        # (for example speedrun's kernel-invention mandate on an accuracy contest).
-        if os.environ.get("ARGUS_SKILL_EXTERNAL_COMPLETION_GATE", "").strip():
-            vertical_banner = ""
-        role_banner = vertical_banner
+        # Specialist assessments do not own the integrated Reviewer's writeback.
+        vertical_banner = (
+            ""
+            if request.role is RoleName.REVIEWER
+            and request.operation in {reviewer.COLD_READ, reviewer.SCIENCE_LOSS_CHECK}
+            else contract.banner(banner_role)
+        )
         domain = ""
         domain_banner = ""
         if root is not None and not str(request.vertical or "").strip():
             from ...skills.vertical_select import resolve_domain_if_decided
 
             domain = resolve_domain_if_decided(root) or ""
+        stage_order = contract.stage_order
+        stage = str(request.stage or "").strip()
+        if not stage and request.checklist_mode is not ChecklistMode.NONE:
+            from ...skills.stage_machine import current_stage
+
+            stage = current_stage(root or ".")
+        # Where the work is, as opposed to where its state is kept. Both the
+        # vertical fragment and the altitude facts describe the work, so both
+        # need the worktree; `root` is the session directory and contains no
+        # paper/, which is how a manuscript-aware gate silently never fired.
+        altitude_root = (
+            Path(request.altitude_root).expanduser()
+            if request.altitude_root is not None
+            else root
+        )
+        vertical_fragment = contract.prompt_fragment(
+            role=banner_role,
+            operation=request.operation,
+            stage=stage,
+            scope=scope,
+            project_root=altitude_root,
+        )
+        if vertical_fragment.strip():
+            vertical_banner = "\n\n".join(
+                part
+                for part in (vertical_banner.strip(), vertical_fragment.strip())
+                if part
+            )
+        # A controller-owned external gate is a stronger objective contract than
+        # a generic vertical's optimization style. Keep the stage/checklist state,
+        # but suppress a vertical banner that can otherwise redefine the task.
+        if os.environ.get("ARGUS_SKILL_EXTERNAL_COMPLETION_GATE", "").strip():
+            vertical_banner = ""
+            vertical_fragment = ""
+        role_banner = vertical_banner
         if domain:
             from ...domains import domain_role_banner, load_domain
 
@@ -93,19 +129,14 @@ class RolePromptCatalog:
             role_banner = "\n\n".join(
                 part for part in (role_banner.strip(), domain_banner.strip()) if part
             )
-        stage_order = contract.stage_order
-        stage = str(request.stage or "").strip()
-        if not stage and request.checklist_mode is not ChecklistMode.NONE:
-            from ...skills.stage_machine import current_stage
-
-            stage = current_stage(root or ".")
 
         checklist_mode = request.checklist_mode
         if checklist_mode is ChecklistMode.AUTO:
             checklist_mode = (
                 ChecklistMode.FULL_PIPELINE
                 if request.role is RoleName.REVIEWER
-                and (scope == "final_submission" or stage == "submission")
+                and scope == "final_submission"
+                and vertical != "research"
                 else ChecklistMode.STAGE
             )
 
@@ -129,13 +160,17 @@ class RolePromptCatalog:
             )
 
         search_altitude = (
-            contract.altitude(root)
-            if request.include_search_altitude and root is not None
+            contract.altitude(altitude_root)
+            if request.include_search_altitude and altitude_root is not None
             else ""
         )
         fragment_ids: list[str] = []
         if vertical_banner.strip():
             fragment_ids.append(f"vertical:{vertical}:banner:{banner_role}")
+        if vertical_fragment.strip():
+            fragment_ids.append(
+                f"vertical:{vertical}:prompt:{banner_role}:{request.operation}"
+            )
         if domain_banner.strip():
             fragment_ids.append(f"domain:{domain}:banner:{banner_role}")
         if checklist.strip():
@@ -161,7 +196,11 @@ class RolePromptCatalog:
             stage_checklist=checklist,
             stage_order=stage_order,
             completion_gate=contract.completion_gate,
+            paper_mission=contract.paper_mission,
             workflow_mode=contract.workflow_mode,
+            verification_stage_profiles=dict(
+                contract.verification_stage_profiles or {}
+            ),
             requires_independent_review=contract.requires_independent_review,
             search_altitude=search_altitude,
             fragment_ids=tuple(fragment_ids),

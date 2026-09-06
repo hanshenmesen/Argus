@@ -11,12 +11,15 @@ byte-for-byte.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
+from ..core.role_decision import latest_role_decision
 from ._helpers import (
     _manager_model,
     _manager_reasoning_effort,
@@ -25,6 +28,38 @@ from ._helpers import (
 )
 
 _log = logging.getLogger(__name__)
+
+_MISSING_REVIEW_FIELD = object()
+_NEUTRAL_REVIEW_TEXT = {
+    "",
+    "-",
+    "n/a",
+    "na",
+    "no action",
+    "no further action",
+    "no further work",
+    "none",
+    "not applicable",
+    "nothing further",
+    "null",
+}
+_FRONTIER_CHANGES = {
+    "artifact_improved",
+    "risk_reduced",
+    "uncertainty_reduced",
+    "information_gain",
+    "bounded_regression",
+    "recovered",
+    "unchanged_failure",
+    "expanding_regression",
+    "unexplained_regression",
+}
+_FRONTIER_CONFLICTS = {
+    "bounded_regression",
+    "unchanged_failure",
+    "expanding_regression",
+    "unexplained_regression",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +72,198 @@ class _StageDecisionMixin:
     # ------------------------------------------------------------------
     # Private helpers — each covers one logical phase of decide_stage_transition
     # ------------------------------------------------------------------
+
+    def _stage_context_fingerprint(self, root: Path) -> str:
+        """Bind a verdict to the pipeline and campaign that supplied its evidence."""
+        import hashlib
+
+        from ..core.pipeline_state import read_pipeline_state
+        from .control_state import CampaignControlStore
+
+        control = CampaignControlStore(self.manager_session_root, project_root=root)
+        head = control.read_head()
+        payload = {
+            "pipeline": read_pipeline_state(root),
+            "campaign": asdict(control.campaign_identity()),
+            "control_head": asdict(head) if head is not None else None,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _commit_stage_decision_if_current(
+        self,
+        decision: Any,
+        cur: str,
+        root: Path,
+        *,
+        expected_context: str,
+        source: str = "manager_llm",
+    ) -> "StageTransition":  # noqa: F821
+        """Compare and commit under the same lock used by intent replacements."""
+        from ..core.pipeline_state import read_pipeline_state
+        from ._core import StageTransition
+
+        with self.pipeline_lock():
+            if self._stage_context_fingerprint(root) != expected_context:
+                current = str(read_pipeline_state(root).get("current_stage") or cur)
+                return StageTransition(
+                    "hold",
+                    current,
+                    "project stage or campaign changed while deciding; recheck "
+                    "the current evidence",
+                    current_stage=current,
+                    source="stale_stage_context_hold",
+                    diagnostic="stage_context_changed",
+                )
+            return self._apply_stage_decision_to_disk(decision, cur, root, source=source)
+
+    @staticmethod
+    def _is_clean_reviewer_acceptance(review: Any) -> bool:
+        """Whether ``review`` can be committed without another semantic vote.
+
+        Missing or malformed control fields are deliberately not normalized here:
+        the Reviewer parser normally supplies every one, so an incomplete object
+        is ambiguous evidence and must fall through to the Manager model.
+        """
+
+        def field(name: str) -> Any:
+            return getattr(review, name, _MISSING_REVIEW_FIELD)
+
+        status = field("status")
+        reason = field("reason")
+        next_action = field("next_action")
+        operator_question = field("operator_question")
+        operator_options = field("operator_options")
+        review_source = field("review_source")
+        backend_unavailable = field("backend_unavailable")
+        backend_fatal_error = field("backend_fatal_error")
+        planner_report = field("planner_report")
+        frontier_report = field("frontier_report")
+        session_signal = field("session_signal")
+
+        if not (
+            isinstance(status, str)
+            and status.strip().lower() == "done"
+            and isinstance(reason, str)
+            and bool(reason.strip())
+            and isinstance(next_action, str)
+            and next_action.strip().casefold() in _NEUTRAL_REVIEW_TEXT
+            and isinstance(operator_question, str)
+            and not operator_question.strip()
+            and isinstance(operator_options, (list, tuple))
+            and not operator_options
+            and isinstance(review_source, str)
+            and review_source.strip().lower() == "reviewer"
+            and isinstance(backend_unavailable, bool)
+            and not backend_unavailable
+            and isinstance(backend_fatal_error, str)
+            and not backend_fatal_error.strip()
+            and isinstance(planner_report, dict)
+            and isinstance(frontier_report, dict)
+            and isinstance(session_signal, dict)
+            and not session_signal
+        ):
+            return False
+
+        allowed_plan_fields = {
+            "forward_progress",
+            "plan_signal",
+            "challenge",
+            "alternative",
+            "authority_impact",
+        }
+        if not set(planner_report).issubset(allowed_plan_fields):
+            return False
+        if "forward_progress" in planner_report:
+            progress = planner_report["forward_progress"]
+            if not isinstance(progress, bool) or not progress:
+                return False
+        if "plan_signal" in planner_report:
+            signal = planner_report["plan_signal"]
+            if not isinstance(signal, str):
+                return False
+            signal = signal.strip().lower()
+            if signal not in {"", "continue", "reconsider"}:
+                return False
+        for name in ("challenge", "alternative"):
+            if name in planner_report:
+                value = planner_report[name]
+                if not isinstance(value, str):
+                    return False
+        if "authority_impact" in planner_report:
+            authority = planner_report["authority_impact"]
+            if not isinstance(authority, str):
+                return False
+            authority = authority.strip().lower()
+            if authority not in {"", "technical", "manager_contract", "operator"}:
+                return False
+            if authority in {"manager_contract", "operator"}:
+                return False
+
+        allowed_frontier_fields = {
+            "change",
+            "summary",
+            "resolved_obligations",
+            "new_obligations",
+            "regressed_obligations",
+            "remaining_work",
+            "proxy_changes",
+            "artifacts",
+            "evidence",
+            "hypothesis",
+            "uncertainty",
+            "next_decision_point",
+            "regression",
+        }
+        if not set(frontier_report).issubset(allowed_frontier_fields):
+            return False
+        if frontier_report:
+            change = frontier_report.get("change", _MISSING_REVIEW_FIELD)
+            if not isinstance(change, str):
+                return False
+            change = change.strip().lower()
+            if change not in _FRONTIER_CHANGES or change in _FRONTIER_CONFLICTS:
+                return False
+        for name in (
+            "resolved_obligations",
+            "new_obligations",
+            "regressed_obligations",
+            "remaining_work",
+            "proxy_changes",
+            "artifacts",
+            "evidence",
+        ):
+            if name in frontier_report:
+                values = frontier_report[name]
+                if not isinstance(values, list) or not all(
+                    isinstance(value, str) for value in values
+                ):
+                    return False
+        for name in (
+            "summary",
+            "hypothesis",
+            "uncertainty",
+            "next_decision_point",
+        ):
+            if name in frontier_report and not isinstance(frontier_report[name], str):
+                return False
+        if "regression" in frontier_report and not isinstance(
+            frontier_report["regression"], dict
+        ):
+            return False
+        if any(
+            frontier_report.get(name)
+            for name in (
+                "new_obligations",
+                "regressed_obligations",
+                "remaining_work",
+                "next_decision_point",
+                "regression",
+            )
+        ):
+            return False
+        return True
 
     def _gather_stage_context(
         self,
@@ -69,10 +296,7 @@ class _StageDecisionMixin:
             cur,
             project_root=root,
         )
-        checklist_state = str(
-            getattr(getattr(checklist_contract, "state", ""), "value", "")
-            or getattr(checklist_contract, "state", "")
-        )
+        checklist_state = checklist_contract.state.value
         if (
             not checklist_contract.checklist_optional
             and checklist_state != "loaded"
@@ -90,7 +314,6 @@ class _StageDecisionMixin:
     def _build_stage_run_exec(
         self,
         run_exec: Any,
-        root: Path,
         on_event: Any,
     ) -> "tuple[Any, StageTransition | None]":  # noqa: F821
         """Phase 2: build the LLM caller (with cost metering) if not supplied.
@@ -102,7 +325,7 @@ class _StageDecisionMixin:
 
         if run_exec is not None:
             return run_exec, None
-        if self.runner is None and self._session is None:
+        if self.runner is None:
             return None, StageTransition(
                 "hold", "", "no manager backend", current_stage="",
                 source="no_runner_hold",
@@ -144,21 +367,12 @@ class _StageDecisionMixin:
         self,
         run_exec: Any,
         prompt: str,
-        root: Path,
         root_task_id: str | None,
     ) -> str:
-        """Phase 3: run the model with empty-output retry and checkpoint refresh.
+        """Phase 3: run the model with empty-output retry.
 
         Returns the raw model output string (may be empty on repeated failure).
         """
-        from ..roles.prompts.manager import (
-            build_manager_checkpoint_correction_prompt,
-        )
-        from .live_view import (
-            manager_checkpoint_refresh_required,
-            repair_manager_checkpoint_response,
-        )
-
         with self._task_usage_scope(root_task_id):
             raw = self._extract_answer_safe(run_exec(prompt))
             # gpt-5.5/fnyweg (and other backends) occasionally return an EMPTY
@@ -166,35 +380,14 @@ class _StageDecisionMixin:
             # "manager held (default)" — which, after a DONE reviewer verdict,
             # wedges current_stage FOREVER (research completes but never advances
             # to plan, because no later mission re-triggers a stage decision).
-            # Retry a couple of times on an empty response before accepting a
-            # hold, mirroring the planner's empty-output retry. A genuine,
+            # Replay once on an empty response before accepting a hold,
+            # matching the non-idempotent model-call retry discipline. A genuine,
             # non-empty hold verdict is never retried.
             _empty_retries = 0
-            while not str(raw or "").strip() and _empty_retries < 2:
+            while not str(raw or "").strip() and _empty_retries < 1:
                 _empty_retries += 1
                 time.sleep(1.0)
                 raw = self._extract_answer_safe(run_exec(prompt))
-            if str(raw or "").strip() and manager_checkpoint_refresh_required(
-                self.execution_workdir,
-                raw,
-                manifest_root=self.manager_session_root,
-            ):
-                correction_prompt = build_manager_checkpoint_correction_prompt(
-                    prompt
-                )
-                candidate = self._extract_answer_safe(run_exec(correction_prompt))
-                if str(candidate or "").strip():
-                    raw = candidate
-            if str(raw or "").strip() and manager_checkpoint_refresh_required(
-                self.execution_workdir,
-                raw,
-                manifest_root=self.manager_session_root,
-            ):
-                raw = repair_manager_checkpoint_response(
-                    self.execution_workdir,
-                    raw,
-                    manifest_root=self.manager_session_root,
-                )
         return raw or ""
 
     @staticmethod
@@ -202,9 +395,65 @@ class _StageDecisionMixin:
         """Wrap extract_answer so it never raises; returns '' on any failure."""
         from .stage_decider import extract_answer
         try:
+            process_decision = latest_role_decision(result, "manager")
+            if process_decision is not None:
+                return json.dumps(process_decision, ensure_ascii=True)
             return extract_answer(result) or ""
         except Exception:  # noqa: BLE001
             return ""
+
+    def report_project_completion(
+        self,
+        *,
+        completion_context: Mapping[str, Any],
+        continuous_objective: str = "",
+        completion_reason: str = "",
+        on_event: Any = None,
+        root_task_id: str | None = None,
+    ) -> str:
+        """Return a Manager-authored operator report for a completed stage ledger."""
+        from ..roles.prompts.manager import build_project_completion_report_prompt
+
+        prompt = build_project_completion_report_prompt(
+            objective=continuous_objective,
+            completion_reason=completion_reason,
+            completion_context=completion_context,
+        )
+        run_exec, hold = self._build_stage_run_exec(None, on_event)
+        if hold is not None or run_exec is None:
+            from ..core.operator_messages import uses_cjk
+
+            stages = completion_context.get("stages")
+            stage_names = list(stages) if isinstance(stages, dict) else []
+            route = " -> ".join(stage_names)
+            if uses_cjk(continuous_objective):
+                return (
+                    "项目已完成。Manager 已收到完整阶段记录"
+                    + (f"（{route}）。" if route else "。")
+                    + (
+                        f" 完成原因：{completion_reason.strip()}"
+                        if completion_reason.strip()
+                        else ""
+                    )
+                )
+            return (
+                "Project completed. Manager received the full stage ledger"
+                + (f" ({route})." if route else ".")
+                + (
+                    f" Completion reason: {completion_reason.strip()}"
+                    if completion_reason.strip()
+                    else ""
+                )
+            )
+        raw = self._run_stage_model(run_exec, prompt, root_task_id)
+        if not raw.strip():
+            return ""
+        from ..core.role_reply import strip_control_footer
+
+        return strip_control_footer(
+            raw,
+            ("ACTION", "TARGET_STAGE", "REASON", "RESOLVES_WAIT"),
+        ).strip()
 
     def _parse_and_finalize_stage_decision(
         self,
@@ -308,8 +557,6 @@ class _StageDecisionMixin:
                     ),
                 })
 
-        decision = parse_stage_decision(raw, current_stage=cur, stage_order=order)
-
         from ..core.external_completion_gate import external_completion_gate_issue
         from ..core.research_contract import resolve_research_target_level
         from ..skills.vertical_select import (
@@ -317,8 +564,44 @@ class _StageDecisionMixin:
             resolve_workflow_mode,
         )
 
+        decision = parse_stage_decision(raw, current_stage=cur, stage_order=order)
+
         _completion_vertical = resolve_vertical(root)
         _research_target_level = resolve_research_target_level(root)
+        # Direct mode is the operator's explicit one-package deliverable. It may
+        # complete without traversing unrelated later stages, including an
+        # Idea-only Research request. Paper production is routed as staged.
+        _allow_early_completion = (
+            not open_ended
+            and resolve_workflow_mode(root) == "direct"
+        )
+        _completion_blockers = [
+            blocker
+            for blocker in (external_completion_gate_issue(self.execution_workdir),)
+            if blocker
+        ]
+        if (
+            _research_target_level in {"publishable", "doctoral"}
+            and not _allow_early_completion
+        ):
+            from ..verticals._base import (
+                load_vertical,
+                vertical_stage_completion_issues,
+            )
+
+            # Final completion must re-run the active provider's own strongest
+            # stage validator, but Manager must not import a named vertical to
+            # do it. The contract keeps this path domain-blind and also lets
+            # project-local/plugin research providers enforce equivalent gates.
+            _completion_blockers.extend(
+                vertical_stage_completion_issues(
+                    load_vertical(_completion_vertical, project_root=root),
+                    stage=order[-1],
+                    project_root=self.execution_workdir,
+                    state_root=root,
+                )
+            )
+        _completion_blocker = "; ".join(_completion_blockers)
         if decision.action == "complete":
             final_decision = final_stage_completion_decision(
                 review,
@@ -329,30 +612,67 @@ class _StageDecisionMixin:
                 project_root=root,
                 research_target_level=_research_target_level,
                 checklist_contract=checklist_contract,
-                completion_blocker=external_completion_gate_issue(
-                    self.execution_workdir
-                ),
+                completion_blocker=_completion_blocker,
                 trigger_diagnostic=decision.diagnostic,
                 trigger_reason=completion_trigger_reason(
                     decision.action,
                     decision.reason,
                 ),
-                allow_early_completion=(
-                    not open_ended
-                    and resolve_workflow_mode(root) == "direct"
-                ),
+                allow_early_completion=_allow_early_completion,
             )
             if final_decision is not None:
                 decision = final_decision
             else:
-                from .stage_decider import StageDecision
-
-                decision = StageDecision(
-                    "hold",
-                    cur,
-                    "Manager completion rejected by the project completion contract",
-                    "manager_completion_rejected",
+                from .stage_decider import (
+                    StageDecision,
+                    final_stage_completion_blockers,
+                    stage_position_is_the_only_completion_blocker,
                 )
+
+                # Report which of the checks refused. The bare "rejected by the
+                # project completion contract" left the Planner guessing:
+                # testbed run 13 answered it by queueing a mission to "record
+                # the missing route/ledger state or equivalent gate metadata",
+                # when the real answer was that it was sitting at ``scope`` and
+                # needed to advance.
+                blockers = final_stage_completion_blockers(
+                    review,
+                    current_stage=cur,
+                    stage_order=order,
+                    vertical=_completion_vertical,
+                    mission_scope=mission_scope,
+                    project_root=root,
+                    research_target_level=_research_target_level,
+                    checklist_contract=checklist_contract,
+                    completion_blocker=_completion_blocker,
+                    allow_early_completion=_allow_early_completion,
+                )
+                if stage_position_is_the_only_completion_blocker(blockers):
+                    # Nothing is wrong with this completion except where the
+                    # pipeline is standing, so stand somewhere else. Reporting
+                    # the refusal better was not enough on its own: run 15 got
+                    # the improved sentence and still sat at ``scope`` with the
+                    # problem solved, because a Manager cannot act on an
+                    # explanation it is given after its turn has ended.
+                    decision = StageDecision(
+                        "advance",
+                        order[order.index(cur) + 1],
+                        decision.reason or "operator objective complete",
+                        "complete_at_nonfinal_advanced",
+                    )
+                else:
+                    detail = "; ".join(blockers)
+                    decision = StageDecision(
+                        "hold",
+                        cur,
+                        (
+                            f"Manager completion rejected: {detail}"
+                            if detail
+                            else "Manager completion rejected by the project "
+                            "completion contract"
+                        ),
+                        "manager_completion_rejected",
+                    )
         rework_decision = external_completion_gate_rework_decision(
             review,
             current_stage=cur,
@@ -370,6 +690,14 @@ class _StageDecisionMixin:
         )
 
         from .stage_decider import StageDecision
+
+        if _completion_vertical == "research" and decision.action == "rollback":
+            decision = StageDecision(
+                "hold",
+                cur,
+                "research stages are forward-only; schedule repair work in Review",
+                "research_rollback_rejected",
+            )
 
         if (
             planner_wait_reconciliation
@@ -389,6 +717,8 @@ class _StageDecisionMixin:
         decision: Any,
         cur: str,
         root: Path,
+        *,
+        source: str = "manager_llm",
     ) -> "StageTransition":  # noqa: F821
         """Phase 5: write the chosen action to ``PIPELINE_STATE.json`` and return a
         ``StageTransition`` describing what happened."""
@@ -422,13 +752,25 @@ class _StageDecisionMixin:
                     diagnostic="stage_write_illegal_target",
                 )
             return StageTransition("advance", decision.target_stage, decision.reason,
-                                   cur, "manager_llm", decision.diagnostic,
+                                   cur, source, decision.diagnostic,
                                    decision.resolves_wait)
 
         if decision.action == "complete":
+            from ..skills.vertical_select import resolve_workflow_mode
+
             try:
+                # ``allow_early_completion`` is re-derived here rather than
+                # threaded from the decision: this is a backstop at the
+                # primitive, not the authority. ``final_stage_completion_decision``
+                # already applied the stricter test (it also requires the mission
+                # not be open-ended); a decision that reached this line has
+                # passed it. What this argument stops is the path that never
+                # went through the decider at all — see ``complete_final_stage``.
                 _complete(root, reason=decision.reason, completed_by="manager",
-                          evidence_root=self.execution_workdir)
+                          evidence_root=self.execution_workdir,
+                          allow_early_completion=(
+                              resolve_workflow_mode(root) == "direct"
+                          ))
             except StageCompletionError as exc:
                 return StageTransition(
                     "hold", cur, str(exc), current_stage=cur,
@@ -442,10 +784,22 @@ class _StageDecisionMixin:
                     diagnostic="stage_write_illegal_target",
                 )
             return StageTransition("complete", decision.target_stage, decision.reason,
-                                   cur, "manager_llm", decision.diagnostic,
+                                   cur, source, decision.diagnostic,
                                    decision.resolves_wait)
 
         if decision.action == "rollback":
+            from ..skills.vertical_select import resolve_vertical
+
+            if resolve_vertical(root) == "research":
+                return StageTransition(
+                    "hold",
+                    cur,
+                    "research stages are forward-only; schedule repair work in "
+                    "the current stage",
+                    current_stage=cur,
+                    source="illegal_target_hold",
+                    diagnostic="research_rollback_rejected",
+                )
             try:
                 _rollback(root, target_stage=decision.target_stage,
                           reason=decision.reason, rolled_back_by="manager",
@@ -457,11 +811,11 @@ class _StageDecisionMixin:
                     diagnostic="stage_write_illegal_target",
                 )
             return StageTransition("rollback", decision.target_stage, decision.reason,
-                                   cur, "manager_llm", decision.diagnostic,
+                                   cur, source, decision.diagnostic,
                                    decision.resolves_wait)
 
         return StageTransition("hold", cur, decision.reason or "manager held",
-                               cur, "manager_llm", decision.diagnostic,
+                               cur, source, decision.diagnostic,
                                decision.resolves_wait)
 
     # ------------------------------------------------------------------
@@ -480,6 +834,7 @@ class _StageDecisionMixin:
         open_ended: bool = False,
         continuous_objective: str = "",
         mission_scope: str = "",
+        stage_closing: bool = False,
     ) -> "StageTransition":  # noqa: F821
         """Independently decide advance / hold / rollback / complete for the stage,
         then WRITE it. The Manager is the SOLE writer of
@@ -501,10 +856,25 @@ class _StageDecisionMixin:
         root = Path(project_root) if project_root is not None else self.project_root
 
         # --- Phase 1: Gather context (may return early on config hold) ---
-        ctx = self._gather_stage_context(root)
-        if isinstance(ctx, StageTransition):
-            return ctx
+        with self.pipeline_lock():
+            ctx = self._gather_stage_context(root)
+            if isinstance(ctx, StageTransition):
+                return ctx
+            expected_context = self._stage_context_fingerprint(root)
         cur, order, checklist_contract = ctx
+
+        if (
+            getattr(review, "engineer_aborted_before_review", False) is True
+            and getattr(review, "backend_stop_kind", None) == "operator_abort"
+        ):
+            return StageTransition(
+                "hold",
+                cur,
+                "engineer was operator-aborted before review",
+                current_stage=cur,
+                source="operator_abort_hold",
+                diagnostic="engineer_aborted_before_review",
+            )
 
         # --- Phase 2: Compute reconciliation flags ---
         # An open-ended final-stage checkpoint may need a new solve cycle after
@@ -560,8 +930,119 @@ class _StageDecisionMixin:
                     ),
                 )
 
+        manuscript_binding = getattr(review, "manuscript_snapshot", None)
+        if isinstance(manuscript_binding, dict):
+            try:
+                from ..core.manuscript_snapshot import (
+                    manuscript_review_status,
+                )
+
+                freshness = manuscript_review_status(
+                    {"manuscript_snapshot": manuscript_binding},
+                    self.execution_workdir,
+                )
+            except Exception:  # noqa: BLE001 - a bound review fails closed
+                freshness = {
+                    "status": "unbound",
+                    "message": "unbound (reviewed manuscript cannot be read)",
+                }
+            if freshness.get("status") != "current":
+                return StageTransition(
+                    "hold",
+                    cur,
+                    str(freshness.get("message") or "stale manuscript review"),
+                    current_stage=cur,
+                    source="stale_manuscript_review_hold",
+                    diagnostic="reviewed_manuscript_version_mismatch",
+                )
+
+        # A parsed, conflict-free Reviewer acceptance is already the semantic
+        # judgment for a stage. Manager still performs the exact stage-machine
+        # preflight and remains the sole writer; only its duplicate model vote is
+        # skipped. Every ambiguous signal continues through the model path below.
+        next_stage = (
+            order[order.index(cur) + 1]
+            if cur in order and order.index(cur) + 1 < len(order)
+            else ""
+        )
+        terminal_stage = bool(order and cur == order[-1])
+        external_gate_issue = ""
+        if next_stage or terminal_stage:
+            from ..core.external_completion_gate import external_completion_gate_issue
+
+            external_gate_issue = external_completion_gate_issue(
+                self.execution_workdir
+            )
+        deterministic_candidate = bool(
+            stage_closing
+            and (next_stage or terminal_stage)
+            and self._is_clean_reviewer_acceptance(review)
+            and planner_verdict is None
+            and not external_gate_issue
+        )
+        if deterministic_candidate:
+            try:
+                from ..skills.stage_machine import _ensure_stage_completion
+                from ..skills.vertical_select import (
+                    resolve_vertical,
+                    resolve_workflow_mode,
+                )
+                from .stage_decider import StageDecision
+
+                allow_early_completion = (
+                    not open_ended
+                    and resolve_workflow_mode(root) == "direct"
+                )
+                if not (allow_early_completion and not terminal_stage):
+                    _ensure_stage_completion(
+                        root,
+                        cur,
+                        evidence_root=self.execution_workdir,
+                    )
+                if terminal_stage or allow_early_completion:
+                    from ..core.research_contract import resolve_research_target_level
+                    from .stage_decider import final_stage_completion_decision
+
+                    decision = final_stage_completion_decision(
+                        review,
+                        current_stage=cur,
+                        stage_order=order,
+                        vertical=resolve_vertical(root),
+                        mission_scope=mission_scope,
+                        project_root=root,
+                        research_target_level=resolve_research_target_level(root),
+                        checklist_contract=checklist_contract,
+                        trigger_diagnostic="deterministic_reviewer_done",
+                        trigger_reason=(
+                            "Reviewer certified the current-stage checklist and "
+                            "deterministic completion checks passed"
+                        ),
+                        allow_early_completion=allow_early_completion,
+                    )
+                else:
+                    decision = StageDecision(
+                        "advance",
+                        next_stage,
+                        "Reviewer certified the current-stage checklist and "
+                        "deterministic completion checks passed",
+                        "deterministic_reviewer_done",
+                    )
+                if decision is not None:
+                    return self._commit_stage_decision_if_current(
+                        decision,
+                        cur,
+                        root,
+                        expected_context=expected_context,
+                        source="manager_deterministic",
+                    )
+            except Exception:  # noqa: BLE001 - ambiguity retains Manager semantics
+                log.debug(
+                    "deterministic stage advance preflight failed; using Manager",
+                    exc_info=True,
+                )
+
         # --- Phase 5: Build the LLM caller ---
-        run_exec, hold = self._build_stage_run_exec(run_exec, root, on_event)
+        run_exec, hold = self._build_stage_run_exec(run_exec, on_event)
         if hold is not None:
             return StageTransition(
                 hold.action, cur, hold.reason, current_stage=cur,
@@ -571,15 +1052,21 @@ class _StageDecisionMixin:
         # --- Phase 6–7: Run model, parse, finalize (wrapped in fail-safe) ---
         try:
             cur_idx = order.index(cur) if cur in order else -1
-            next_stage = order[cur_idx + 1] if 0 <= cur_idx < len(order) - 1 else ""
             later_stages = order[cur_idx + 1 :] if 0 <= cur_idx < len(order) - 1 else []
             earlier = order[:cur_idx] if cur_idx > 0 else []
             from ..roles.prompts import resolve_role_prompt
             from ..roles.prompts.manager import (
                 assemble_manager_prompt,
                 build_stage_decision_prompt,
-                manager_rendering_prompt,
                 stage_decision_request,
+            )
+            from ..skills.vertical_select import (
+                resolve_vertical,
+                resolve_workflow_mode,
+            )
+
+            allow_direct_completion = (
+                not open_ended and resolve_workflow_mode(root) == "direct"
             )
 
             prompt_context = resolve_role_prompt(
@@ -597,13 +1084,10 @@ class _StageDecisionMixin:
                     checklist_md=prompt_context.stage_checklist,
                     review=review,
                     planner_verdict=planner_verdict,
-                    rendering_block=manager_rendering_prompt(
-                        self.execution_workdir,
-                        review=review,
-                        manifest_root=self.manager_session_root,
-                    ),
                     open_ended=open_ended,
                     continuous_objective=continuous_objective,
+                    allow_rollback=resolve_vertical(root) != "research",
+                    allow_early_completion=allow_direct_completion,
                 ),
                 role_banner=prompt_context.role_banner,
                 role_skill_block=self._role_skill_block(
@@ -615,7 +1099,6 @@ class _StageDecisionMixin:
             raw = self._run_stage_model(
                 run_exec,
                 prompt,
-                self.execution_workdir,
                 root_task_id,
             )
 
@@ -639,18 +1122,17 @@ class _StageDecisionMixin:
             )
 
         # --- Phase 8: Apply decision to disk ---
-        return self._apply_stage_decision_to_disk(decision, cur, root)
+        return self._commit_stage_decision_if_current(
+            decision, cur, root, expected_context=expected_context
+        )
 
     # ---- progress view ----
     def current_stage(self) -> str:
         """Which Stage the engine is on now (read from PIPELINE_STATE.json)."""
-        import json as _json
+        from ..core.pipeline_state import read_pipeline_state
 
         try:
-            state = _json.loads(
-                (self.project_root / "research" / "PIPELINE_STATE.json")
-                .read_text(encoding="utf-8")
-            )
+            state = read_pipeline_state(self.project_root)
             return str(state.get("current_stage") or "") or self.plan_stages(
                 self._resolve_vertical_for_current_stage()
             )[0]

@@ -8,12 +8,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-_PYTHON_ADMIN_COMMANDS = frozenset({"update", "wiki", "learn"})
+_PYTHON_ADMIN_COMMANDS = frozenset({"doctor", "repair", "update", "wiki", "learn"})
 
 _PYTHON_ADMIN_FLAGS = frozenset(
     {
         "-h",
         "--help",
+        "-doctor",
         "--version",
         "--update",
         "--daemon",
@@ -26,8 +27,9 @@ _PYTHON_ADMIN_FLAGS = frozenset(
         "--gc",
         "--watch",
         "--follow",
-        "--web",
         "--pair-plan",
+        "--answer",
+        "--ask",
         "--notify",
         "--init-identity",
         "--setup",
@@ -36,8 +38,6 @@ _PYTHON_ADMIN_FLAGS = frozenset(
         "--init-model-api",
         "--install-ppt-master",
         "--ppt-master-status",
-        "--approve-publication",
-        "--list-pending-publications",
         "--export-builtin-skills",
         "--evidence-chain-check",
         "--anti-mediocrity-check",
@@ -52,8 +52,12 @@ _PYTHON_PRE_ACTION_VALUE_OPTIONS = frozenset(
         "--life-dir",
         "--gc-days",
         "--objective",
+        "--mission-width",
         "--web-host",
+        "--host",
         "--web-port",
+        "--port",
+        "--answer-item",
         "--notify-stage",
         "--backend",
         "--auth-mode",
@@ -70,6 +74,10 @@ _PYTHON_PRE_ACTION_BOOL_OPTIONS = frozenset(
     {
         "--drain",
         "--force",
+        "--fix-safe",
+        "--json",
+        "--deep",
+        "--verify",
         "--gc-dry-run",
         "--no-daemon",
         "--new",
@@ -87,6 +95,23 @@ _PYTHON_PRE_ACTION_BOOL_OPTIONS = frozenset(
 )
 
 
+def _configure_windows_console_encoding(*, platform_name: str | None = None) -> None:
+    """Keep the Python admin CLI usable on legacy Windows code pages.
+
+    The CLI deliberately renders status glyphs and multilingual diagnostics.
+    A normal zh-CN PowerShell process still exposes CP936 text streams, where
+    writing one of those glyphs raises ``UnicodeEncodeError`` before the actual
+    command can report its result.  Reconfigure only the Windows console-facing
+    streams; child processes already receive an explicit UTF-8 environment.
+    """
+    if (os.name if platform_name is None else platform_name) != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def _bundle_path() -> Path | None:
     explicit = os.environ.get("ARGUS_TUI_BUNDLE")
     candidates = [
@@ -99,7 +124,7 @@ def _bundle_path() -> Path | None:
     return next((path for path in candidates if path is not None and path.is_file()), None)
 
 
-def _node_major(node: str) -> int | None:
+def _node_version(node: str) -> tuple[int, int, int] | None:
     try:
         completed = subprocess.run(
             [node, "--version"],
@@ -110,8 +135,14 @@ def _node_major(node: str) -> int | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    match = re.search(r"v?(\d+)", completed.stdout or completed.stderr or "")
-    return int(match.group(1)) if match else None
+    match = re.search(
+        r"v?(\d+)\.(\d+)(?:\.(\d+))?",
+        completed.stdout or completed.stderr or "",
+    )
+    if match is None:
+        return None
+    major, minor, patch = (int(part or 0) for part in match.groups())
+    return major, minor, patch
 
 
 def _run_python_admin(argv: list[str]) -> int:
@@ -120,7 +151,40 @@ def _run_python_admin(argv: list[str]) -> int:
     return cli_main(argv)
 
 
+def _headless_stdin_error() -> str:
+    """Explain that the cockpit needs a terminal, or ``""`` when it has one.
+
+    Ink puts stdin in raw mode, so a piped, redirected or cron-launched
+    `argus` used to die inside the bundle with a JavaScript stack trace and a
+    link to Ink's README — after already announcing that it was starting the
+    backend. The surfaces that do work without a terminal are named here
+    because that is the question the operator actually has.
+    """
+    if os.environ.get("ARGUS_SKILL_ALLOW_HEADLESS_TUI", "").strip() == "1":
+        return ""
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            return ""
+    except (AttributeError, OSError, ValueError):
+        pass
+    return (
+        "argus: the cockpit needs an interactive terminal and stdin is not "
+        "one. Use `argus --web` for the browser cockpit, `argus --watch` for "
+        "a live read-only view, `argus --status` for a one-shot summary, or "
+        "`argus --daemon` to run unattended."
+    )
+
+
 def _uses_python_admin(argv: list[str]) -> bool:
+    # `argus --web` is a cockpit surface: it needs the TUI's automatic port
+    # selection and browser launch. Keep the legacy raw WebAPI spelling on the
+    # Python path only when its backend-specific options are present.
+    if "--web" in argv and any(
+        arg == option or arg.startswith(f"{option}=")
+        for arg in argv
+        for option in ("--web-host", "--host", "--web-port", "--port")
+    ):
+        return True
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -211,15 +275,14 @@ def _needs_foreground_spawn() -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_windows_console_encoding()
     forwarded = list(sys.argv[1:] if argv is None else argv)
     if _uses_python_admin(forwarded):
         return _run_python_admin(forwarded)
     forwarded = _configure_tui_life_dir(forwarded)
-    from ..life.special_prompts import describe_special_prompt_gate
-
-    ok, detail = describe_special_prompt_gate()
-    if not ok:
-        sys.stderr.write(f"argus: {detail}\n")
+    headless = _headless_stdin_error()
+    if headless:
+        sys.stderr.write(f"{headless}\n")
         return 2
     bundle = _bundle_path()
     if bundle is None:
@@ -229,13 +292,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     node = shutil.which("node")
     if node is None:
-        sys.stderr.write("argus: Ink TUI requires Node.js 18 or newer.\n")
+        sys.stderr.write("argus: Ink TUI requires Node.js 22.12 or newer.\n")
         return 2
-    major = _node_major(node)
-    if major is None or major < 18:
-        found = "unknown" if major is None else str(major)
+    node_version = _node_version(node)
+    if node_version is None or node_version < (22, 12, 0):
+        found = (
+            "unknown"
+            if node_version is None
+            else ".".join(str(part) for part in node_version)
+        )
         sys.stderr.write(
-            f"argus: Ink TUI requires Node.js 18 or newer (found {found}).\n"
+            f"argus: Ink TUI requires Node.js 22.12 or newer (found {found}).\n"
         )
         return 2
     _configure_tui_backend_bin()

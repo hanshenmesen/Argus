@@ -7,6 +7,7 @@ subcommand.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -23,19 +24,35 @@ def test_public_help_distinguishes_human_and_automation_surfaces() -> None:
     assert "supervised foreground worker" in help_text
     assert "argus --daemon" in help_text
     assert "persistent unattended background worker" in help_text
-    assert "argus --doctor" in help_text
+    assert "argus doctor" in help_text
+    assert "argus repair --plan" in help_text
     assert "argus update" in help_text
     assert "--status" not in help_text
     assert "dashboard" not in help_text.lower()
     assert "wiki" not in help_text
 
 
-def test_version_reports_release_identity(capsys) -> None:
+def test_version_reports_package_version(capsys) -> None:
     with pytest.raises(SystemExit, match="0"):
         build_parser().parse_args(["--version"])
     rendered = capsys.readouterr().out
-    assert "argus-skill 0.1.1" in rendered
-    assert "0.1.1+" in rendered
+    assert rendered == "argus-skill 0.1.1\n"
+
+
+def test_main_pins_pip_user_off_before_any_child_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI counterpart of the daemon boot pin: the default engineer spawn is
+    dangerous_yolo, whose codex child inherits this process env untouched, so
+    main() itself must neutralize pip's silent user-install fallback (the
+    2026-09-05 launcher hijack) before any command runs. Dropping the
+    configure_framework_python_env call from main must fail HERE."""
+    monkeypatch.setenv("PIP_USER", "1")
+
+    with pytest.raises(SystemExit, match="0"):
+        main(["--version"])
+
+    assert os.environ["PIP_USER"] == "0"
 
 
 def test_debug_help_still_exposes_internal_flags(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,6 +61,54 @@ def test_debug_help_still_exposes_internal_flags(monkeypatch: pytest.MonkeyPatch
     assert "--daemon" in help_text
     assert "--status" in help_text
     assert "wiki" in help_text
+
+
+def test_parser_exposes_doctor_and_repair_subcommands() -> None:
+    doctor = build_parser().parse_args(
+        ["doctor", "--json", "--deep", "--advisor", "claude"]
+    )
+    assert doctor.command == "doctor"
+    assert doctor.json is True
+    assert doctor.deep is True
+    assert doctor.advisor == "claude"
+    for backend in ("qoder", "dsh"):
+        parsed = build_parser().parse_args(["doctor", "--advisor", backend])
+        assert parsed.advisor == backend
+    assert build_parser().parse_args(["doctor"]).advisor == "none"
+
+    repair = build_parser().parse_args(["repair", "--safe", "--json"])
+    assert repair.command == "repair"
+    assert repair.safe is True
+    assert repair.json is True
+
+
+def test_parser_accepts_doctor_safe_fix_and_repair_lifecycle() -> None:
+    doctor = build_parser().parse_args(["doctor", "--fix-safe", "--json"])
+    legacy = build_parser().parse_args(["-doctor", "--fix-safe", "--json"])
+    apply = build_parser().parse_args(["repair", "--apply", "rp-20260814T000000Z-abc12345", "--yes"])
+    prepare = build_parser().parse_args(["repair", "--prepare-pr", "rp-20260814T000000Z-abc12345"])
+    submit = build_parser().parse_args(["repair", "--submit-pr", "rp-20260814T000000Z-abc12345", "--yes"])
+
+    assert doctor.command == "doctor" and doctor.fix_safe is True
+    assert legacy.doctor is True and legacy.fix_safe is True and legacy.json is True
+    assert apply.apply == "rp-20260814T000000Z-abc12345" and apply.yes is True
+    assert prepare.prepare_pr == "rp-20260814T000000Z-abc12345"
+    assert submit.submit_pr == "rp-20260814T000000Z-abc12345" and submit.yes is True
+
+
+def test_missing_repair_plan_fails_without_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main([
+        "--life-dir", str(tmp_path),
+        "repair", "--apply", "rp-20260814T000000Z-deadbeef", "--yes",
+    ])
+
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert "repair refused" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_parser_exposes_update_subcommand():
@@ -75,6 +140,11 @@ def test_parser_accepts_stage_targeted_notify() -> None:
     assert args.notify_stage == "optimize"
 
 
+def test_parser_accepts_ask_question() -> None:
+    args = build_parser().parse_args(["--ask", "what is 2+2?"])
+    assert args.ask == "what is 2+2?"
+
+
 def test_parser_accepts_noninteractive_backend_setup_contract() -> None:
     args = build_parser().parse_args(
         [
@@ -84,7 +154,6 @@ def test_parser_accepts_noninteractive_backend_setup_contract() -> None:
             "codex",
             "--auth-mode",
             "subscription_cli",
-            "--accept-house-rules",
             "--allow-prerelease",
         ]
     )
@@ -93,7 +162,6 @@ def test_parser_accepts_noninteractive_backend_setup_contract() -> None:
     assert args.non_interactive is True
     assert args.backend == "codex"
     assert args.auth_mode == "subscription_cli"
-    assert args.accept_house_rules is True
     assert args.allow_prerelease is True
 
 
@@ -107,11 +175,21 @@ def test_parser_accepts_grok_backend() -> None:
     assert args.backend == "grok"
 
 
+def test_parser_accepts_qoder_backend() -> None:
+    args = build_parser().parse_args(["--doctor", "--backend", "qoder"])
+    assert args.backend == "qoder"
+
+
 def test_parser_exposes_cli_doctor() -> None:
     args = build_parser().parse_args(["--doctor", "--backend", "copilot"])
 
     assert args.doctor is True
     assert args.backend == "copilot"
+
+
+def test_parser_accepts_hidden_single_dash_doctor_alias() -> None:
+    args = build_parser().parse_args(["-doctor"])
+    assert args.doctor is True
 
 
 def test_parser_accepts_wiki_ingest_subcommand(tmp_path: Path):
@@ -254,8 +332,15 @@ def test_parser_no_daemon_default_false():
     assert args.no_daemon is False
 
 
-def test_parser_accepts_documented_web_port_alias():
-    args = build_parser().parse_args(["--web", "--port", "8800"])
+def test_parser_accepts_documented_web_host_and_port_aliases():
+    args = build_parser().parse_args([
+        "--web",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8800",
+    ])
+    assert args.web_host == "0.0.0.0"
     assert args.web_port == 8800
 
 
@@ -274,11 +359,14 @@ def test_web_uses_documented_flags_and_explicit_life_dir(
     assert main([
         "--web",
         "--no-open",
+        "--host",
+        "127.0.0.1",
         "--port",
         "8800",
         "--life-dir",
         str(tmp_path),
     ]) == 0
+    assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8800
     assert captured["global_root"] == tmp_path
 
@@ -328,9 +416,11 @@ def test_main_exports_builtin_skills(
     out = capsys.readouterr().out
 
     assert rc == 0
-    assert (target / "engineer/auto-research-pipeline.md").exists()
-    assert (target / "engineer/emnlp-paper-drafting.md").exists()
-    assert (target / "engineer/arxiv-paper-search.md").exists()
+    assert (target / "engineer/argus-engineer-role.md").exists()
+    assert (target / "engineer/semantic-scholar-search.md").exists()
+    assert not (target / "engineer/auto-research-pipeline.md").exists()
+    assert not (target / "engineer/emnlp-paper-drafting.md").exists()
+    assert not (target / "engineer/arxiv-paper-search.md").exists()
     assert not (target / "engineer/research-visualization-router.md").exists()
     assert "exported built-in skills" in out
     assert "vertical: none (common skills only)" in out
@@ -352,6 +442,9 @@ def test_main_exports_decided_vertical_skills(
     assert rc == 0
     assert "vertical: research" in out
     assert (target / "engineer/research-visualization-router.md").exists()
+    for stage in ("idea", "experiment", "paper", "review"):
+        assert (target / f"research-{stage}-playbook.md").exists()
+    assert not (target / "engineer/auto-research-pipeline.md").exists()
 
 
 def test_export_target_does_not_inherit_unrelated_cwd_vertical(
@@ -379,7 +472,10 @@ def test_export_prunes_legacy_unmodified_research_fallback(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from argus_skill.skills.builtins import seed_vertical_skills
+    from argus_skill.skills.builtins import (
+        iter_vertical_skill_texts,
+        seed_vertical_skills,
+    )
 
     target = tmp_path / "legacy-project" / "argus_builtin_skills"
     seed_vertical_skills(target, "research")
@@ -393,7 +489,8 @@ def test_export_prunes_legacy_unmodified_research_fallback(
     assert not (
         target / "engineer/research_visual_scripts/browser_render.py"
     ).exists()
-    assert "pruned : 2 inactive unmodified context seed(s)" in out
+    expected = len(dict(iter_vertical_skill_texts("research")))
+    assert f"pruned : {expected} inactive unmodified context seed(s)" in out
 
 
 def test_export_preserves_edited_legacy_research_fallback(
@@ -451,6 +548,31 @@ def test_main_rejects_objective_without_continuous(capsys: pytest.CaptureFixture
     assert "--objective requires --continuous" in err
 
 
+def test_main_loads_objective_file_before_continuous_validation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    objective = tmp_path / "objective.txt"
+    objective.write_text("Fix the Harbor task", encoding="utf-8")
+
+    rc = main(["--objective-file", str(objective)])
+
+    assert rc == 2
+    assert "--objective requires --continuous" in capsys.readouterr().err
+
+
+def test_main_reports_missing_objective_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "missing.txt"
+
+    rc = main(["--continuous", "--objective-file", str(missing)])
+
+    assert rc == 2
+    assert "could not read --objective-file" in capsys.readouterr().err
+
+
 def test_main_rejects_continuous_without_objective(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["--continuous"])
     err = capsys.readouterr().err
@@ -499,26 +621,10 @@ def test_main_rejects_continuous_on_persisted_memory_backend(
     assert "cannot plan" in err
 
 
-def _seed_trusted_special_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Create one trusted operator directive so the lifetime entry gate passes.
-
-    chmod 0644 is required because the trust check rejects group/world-writable
-    files (the sandbox umask otherwise yields 0664).
-    """
-    sp = tmp_path / "special_prompts"
-    sp.mkdir()
-    f = sp / "10-house-rules.md"
-    f.write_text("Operational house rules for this box.\n", encoding="utf-8")
-    f.chmod(0o644)
-    monkeypatch.setenv("ARGUS_SKILL_SPECIAL_PROMPTS_DIR", str(sp))
-
-
 def test_main_forwards_continuous_objective_to_ink(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ARGUS_SKILL_LIFE_BACKEND", "codex")
-    _seed_trusted_special_prompt(tmp_path, monkeypatch)
 
     captured: dict[str, object] = {}
 
@@ -541,9 +647,6 @@ def test_main_forwards_real_process_argv_to_ink(
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(sys, "argv", ["argus-skill", "--resume", "s-session01"])
-    monkeypatch.setattr(
-        "argus_skill.apps.cli._core._lifetime_entry_error", lambda args: ""
-    )
 
     def fake_run_tui(argv):
         captured["argv"] = argv
@@ -558,11 +661,9 @@ def test_main_forwards_real_process_argv_to_ink(
 def test_main_bare_launch_enters_ink_without_objective(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A bare ``argus-skill`` enters the single supported Ink cockpit."""
     monkeypatch.setenv("ARGUS_SKILL_LIFE_BACKEND", "codex")
-    _seed_trusted_special_prompt(tmp_path, monkeypatch)
     monkeypatch.setenv("ARGUS_SKILL_HOME", str(tmp_path / "home"))
 
     called = {"hit": False}
@@ -578,14 +679,12 @@ def test_main_bare_launch_enters_ink_without_objective(
     assert called["hit"] is True
 
 
-def test_main_ink_launch_requires_special_prompt(
+def test_main_ink_launch_allows_empty_special_prompt_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Cockpit may wait for an objective, but never without machine rules."""
+    """Cockpit startup does not require machine-specific prompt files."""
     monkeypatch.setenv("ARGUS_SKILL_LIFE_BACKEND", "codex")
-    # Point the special-prompts dir at an empty location so the gate trips.
     monkeypatch.setenv(
         "ARGUS_SKILL_SPECIAL_PROMPTS_DIR", str(tmp_path / "empty_special")
     )
@@ -599,9 +698,8 @@ def test_main_ink_launch_requires_special_prompt(
     monkeypatch.setattr("argus_skill.apps.tui_launcher.main", fake_run_tui)
 
     rc = main(["--continuous", "--objective", "hardening objective"])
-    assert rc == 2
-    assert called["hit"] is False
-    assert "special prompt" in capsys.readouterr().err.lower()
+    assert rc == 0
+    assert called["hit"] is True
 
 
 def test_wiki_ingest_init_flag_parses_without_abbreviation_collision():
@@ -625,3 +723,127 @@ def test_top_level_abbreviation_is_disabled():
     p = build_parser()
     with pytest.raises(SystemExit):
         p.parse_args(["--objec", "x"])
+
+
+def test_public_help_names_the_browser_cockpit() -> None:
+    """`--web` is a first-class human surface, so it must be discoverable.
+
+    The flag, its host/port options and a doctor check (ARGUS-WEB-001) all
+    existed while the product-facing help never mentioned it, so the only way
+    to learn the web UI exists was to read the source or set a debug env var.
+    """
+    help_text = build_parser().format_help()
+    assert "argus --web" in help_text
+    assert "argus --watch" in help_text
+
+
+def test_every_supported_backend_is_selectable_and_documented() -> None:
+    """One list, three renderings.
+
+    The backend set was written out by hand in the `--backend` choices, the
+    `--advisor` choices, the readiness check and the operator knob help. The
+    knob help had drifted to five of the eight, so `argus --config-help` — the
+    documented operator control surface — hid three backends the CLI accepts.
+    """
+    from argus_skill.agent_cli.runner_backend import SUPPORTED_BACKENDS
+    from argus_skill.core.backend_readiness import _SUPPORTED_BACKENDS
+    from argus_skill.core.knobs import format_config_help
+
+    assert set(SUPPORTED_BACKENDS) == set(_SUPPORTED_BACKENDS)
+
+    actions = {action.dest: action for action in build_parser()._actions}
+    assert set(actions["backend"].choices) == set(SUPPORTED_BACKENDS)
+
+    backend_line = next(
+        line for line in format_config_help().splitlines()
+        if "agent backend:" in line
+    )
+    for backend in SUPPORTED_BACKENDS:
+        assert backend in backend_line, f"{backend} is selectable but undocumented"
+
+
+def test_config_help_reports_the_backend_selected_by_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from argus_skill.core.knob_store import write_persisted_knob
+    from argus_skill.core.knobs import format_config_help
+
+    monkeypatch.setenv("ARGUS_SKILL_HOME", str(tmp_path))
+    monkeypatch.delenv("ARGUS_SKILL_RUNNER_BACKEND", raising=False)
+    write_persisted_knob("ARGUS_SKILL_RUNNER_BACKEND", "pi")
+
+    help_text = format_config_help(env={})
+
+    assert (
+        "ARGUS_SKILL_RUNNER_BACKEND  (default: codex)  = pi (persisted)"
+        in help_text
+    )
+    assert "ARGUS_SKILL_ENGINEER_BACKEND  (default: (=RUNNER_BACKEND))" in help_text
+
+
+def test_a_missing_web_dependency_is_reported_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The guard must fire before anything claims the server is up.
+
+    `webapi.server` imports uvicorn lazily inside `serve()`, so guarding only
+    the `webapi.server` import let the pairing banner print a URL and then a
+    bare ImportError escape as a traceback — the message the guard exists to
+    print was unreachable.
+    """
+    from argus_skill.apps.cli import _core
+
+    monkeypatch.setattr(
+        _core, "_missing_web_dependency", lambda: "uvicorn"
+    )
+
+    assert main(["--web"]) == 2
+    err = capsys.readouterr().err
+    assert "uvicorn is missing" in err
+    assert "Traceback" not in err
+    assert "http://" not in err, "no URL may be offered when the server cannot start"
+
+
+def test_a_negative_gc_window_is_refused_before_anything_moves(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CLI must name the mistake rather than let the sweep run.
+
+    `argus --gc --gc-days -5` reached the collector, which trusted the value,
+    and 50 projects were moved to trash on a real global root — 42 of them
+    ones the same run's `--gc-dry-run` had not listed.
+    """
+    from argus_skill.core import project_gc
+
+    monkeypatch.setattr(
+        project_gc,
+        "gc_stale_projects",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not sweep")),
+    )
+
+    assert main(["--gc", "--gc-days", "-5"]) == 2
+    err = capsys.readouterr().err
+    assert "--gc-days must not be negative" in err
+    assert "every project would be trashed" in err
+
+
+@pytest.mark.parametrize("value", ["99999", "-1", "abc"])
+def test_an_unbindable_web_port_is_refused_by_the_parser(value: str) -> None:
+    """uvicorn would raise `OverflowError: bind(): port must be 0-65535`.
+
+    It raised it *after* the pairing banner had already printed a URL on that
+    port, so the operator was offered an address that could never exist and
+    then shown a traceback.
+    """
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--web", "--web-port", value])
+
+
+@pytest.mark.parametrize("value", ["0", "8799", "65535"])
+def test_a_bindable_web_port_is_accepted(value: str) -> None:
+    """Zero is legal: it asks the kernel for any free port."""
+    args = build_parser().parse_args(["--web", "--web-port", value])
+    assert args.web_port == int(value)

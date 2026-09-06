@@ -164,24 +164,20 @@ def test_research_owns_workflow_when_chemistry_is_active(tmp_path: Path) -> None
     persist_vertical(tmp_path, "research", domain="chemistry")
 
     payload = json.loads(
-        (tmp_path / "research" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
+        (tmp_path / ".argus" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
     )
     research = load_vertical("research", project_root=tmp_path)
 
     assert payload["vertical"] == "research"
     assert payload["domain"] == "chemistry"
-    assert payload["current_stage"] == "research"
+    assert payload["current_stage"] == "idea"
     assert resolve_domain_if_decided(tmp_path) == "chemistry"
     assert resolve_skill_scope(tmp_path) == "chemistry"
     assert vertical_checklist_stage_order(research) == (
-        "research",
-        "plan",
-        "benchmark",
-        "run",
-        "analysis",
-        "draft",
+        "idea",
+        "experiment",
+        "paper",
         "review",
-        "submission",
     )
     assert vertical_completion_gate(research) == "certified"
 
@@ -196,7 +192,7 @@ def test_switching_to_non_research_clears_domain(tmp_path: Path) -> None:
     persist_vertical(tmp_path, "software")
 
     payload = json.loads(
-        (tmp_path / "research" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
+        (tmp_path / ".argus" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
     )
     assert payload["vertical"] == "software"
     assert "domain" not in payload
@@ -221,22 +217,28 @@ def test_domain_checklist_is_mandatory_scientific_floor(tmp_path: Path) -> None:
     persist_vertical(tmp_path, "research", domain="chemistry")
     chemistry = domain_checklist_items(load_domain("chemistry"))
 
-    plan = resolve_stage_checklist_contract("plan", project_root=tmp_path)
-    run = resolve_stage_checklist_contract("run", project_root=tmp_path)
+    idea = resolve_stage_checklist_contract("idea", project_root=tmp_path)
+    experiment = resolve_stage_checklist_contract(
+        "experiment", project_root=tmp_path
+    )
     review = resolve_stage_checklist_contract("review", project_root=tmp_path)
 
-    assert {item.id for item in chemistry["plan"]} <= {item.id for item in plan.items}
-    assert {item.id for item in chemistry["run"]} <= {item.id for item in run.items}
+    assert {item.id for item in chemistry["idea"]} <= {item.id for item in idea.items}
+    assert {item.id for item in chemistry["experiment"]} <= {
+        item.id for item in experiment.items
+    }
     assert {item.id for item in chemistry["review"]} <= {
         item.id for item in review.items
     }
-    assert "plan.experiment" in {item.id for item in plan.items}
-    assert "run.chemistry-primary-evidence" in {item.id for item in run.items}
+    assert "experiment.implementation" in {item.id for item in experiment.items}
+    assert "experiment.chemistry-primary-evidence" in {
+        item.id for item in experiment.items
+    }
     assert {
         stage
         for stage, items in chemistry.items()
         if items
-    } == {"research", "plan", "benchmark", "run", "analysis", "review"}
+    } == {"idea", "experiment", "review"}
 
 
 def test_chemistry_package_contains_foundations_tools_and_eight_domains() -> None:

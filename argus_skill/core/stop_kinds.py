@@ -56,6 +56,9 @@ def stop_kind_from_external_interrupt(value: Any) -> StopKind | None:
     if normalized.startswith("external interrupt:"):
         normalized = normalized.removeprefix("external interrupt:").lstrip()
     for prefix, kind in (
+        ("global daily budget exhausted", "budget_exhausted"),
+        ("unresolved provider cost", "budget_exhausted"),
+        ("cost control unavailable", "backend_unavailable"),
         ("daemon stop requested", "daemon_shutdown"),
         ("operator pause requested", "operator_pause"),
         ("operator abort requested", "operator_abort"),

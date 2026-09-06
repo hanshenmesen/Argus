@@ -117,6 +117,41 @@ def test_different_scope_cannot_mix_into_existing_dossier(tmp_path: Path) -> Non
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("population", "pediatric patients"),
+        ("date_from", "2025-01-01"),
+        ("date_to", "2026-01-01"),
+        ("decision_question", "Should this target advance to clinical validation?"),
+        ("output_language", "zh-CN"),
+        ("intervention_class", "small molecule"),
+        ("disease_aliases", ("NSCLC", "lung adenocarcinoma")),
+    ],
+)
+def test_material_scope_change_cannot_reuse_existing_history(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    _build(tmp_path)
+    changed_scope = {
+        "target": "EGFR",
+        "disease": "non-small cell lung cancer",
+        "disease_aliases": ("NSCLC",),
+        "population": "biomarker-selected adults",
+        field: value,
+    }
+
+    with pytest.raises(ValueError, match="requested scope"):
+        build_target_disease_dossier(
+            tmp_path,
+            **changed_scope,
+            pubmed_payload=_fixture("pubmed_esummary.json"),
+            retrieved_at=NOW,
+        )
+
+
 def test_transport_failures_are_persisted_but_not_counted_as_evidence(
     tmp_path: Path,
 ) -> None:
@@ -153,6 +188,8 @@ def test_memo_keeps_cumulative_infrastructure_failure_count(tmp_path: Path) -> N
         tmp_path,
         target="EGFR",
         disease="non-small cell lung cancer",
+        disease_aliases=("NSCLC",),
+        population="biomarker-selected adults",
         retrieved_at=NOW,
         live=True,
         opener=opener,
@@ -179,7 +216,10 @@ def test_validator_rejects_missing_raw_artifact(tmp_path: Path) -> None:
     assert any("raw_artifact does not exist" in issue for issue in issues)
 
 
-def test_validator_rejects_query_raw_symlink_outside_project(tmp_path: Path) -> None:
+def test_validator_rejects_query_raw_symlink_outside_project(
+    tmp_path: Path,
+    require_symlink_support,
+) -> None:
     _build(tmp_path)
     medical = tmp_path / "medical"
     outside = tmp_path.parent / f"{tmp_path.name}-outside.json"

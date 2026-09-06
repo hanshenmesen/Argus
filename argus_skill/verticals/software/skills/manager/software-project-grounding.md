@@ -7,10 +7,10 @@ description: "Inspect the repository before handing software work to Planner or 
 
 ## When to use
 
-Use for staged software repairs/features, or when
-`ARGUS_SKILL_SOFTWARE_REQUIRE_GROUNDING=1`. Direct software tasks normally let
-the fresh Engineer perform the bounded repository inspection once, avoiding a
-duplicate Manager pass.
+Use only when the operator explicitly sets
+`ARGUS_SKILL_SOFTWARE_REQUIRE_GROUNDING=1`. Normal software tasks leave
+technical repository grounding to Planner or Engineer, avoiding a duplicate
+Manager pass.
 
 ## Grounding method
 
@@ -25,7 +25,7 @@ duplicate Manager pass.
 4. Identify the narrow build/test commands and any held-back-test risks:
    return type, argument order, zero/default values, complete field mappings,
    invalid input, boundary behavior, and root/platform assumptions.
-5. Produce a compact grounding brief. Preserve the operator task verbatim;
+5. Produce a compact grounding brief. Preserve the Manager mission brief;
    add evidence and risks, never invent requirements.
 
 ## Handoff

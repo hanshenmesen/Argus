@@ -6,8 +6,10 @@ grep-the-source exercise. These pin the curated control-surface registry and the
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +20,8 @@ from argus_skill.core.knobs import (
     resolve_budget_caps,
     resolve_role_model,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +55,7 @@ def test_registry_covers_the_key_operator_knobs() -> None:
         "ARGUS_SKILL_PLAN_PREVIEW_REASONING_EFFORT",
         "ARGUS_SKILL_ENGINEER_REASONING_EFFORT",
         "ARGUS_SKILL_REQUIRE_RELEASE_MATCH",
+        "ARGUS_SKILL_SOURCE_ROOT",
     ):
         assert must in names
     # HAPI's per-role backend knobs are registered too (so they stop being invisible).
@@ -61,7 +66,7 @@ def test_registry_covers_the_key_operator_knobs() -> None:
     assert "ARGUS_SKILL_SUPERVISOR_MODEL" in names
 
 
-def test_mission_round_default_is_bounded_and_consistent() -> None:
+def test_mission_round_default_is_unbounded_and_consistent() -> None:
     from argus_skill.engineer.round_config import SupervisedConfig
     from argus_skill.loop import SkillLoopConfig
 
@@ -69,9 +74,9 @@ def test_mission_round_default_is_bounded_and_consistent() -> None:
         knob for knob in KNOBS if knob.name == "ARGUS_SKILL_MAX_ROUNDS"
     )
 
-    assert max_rounds_knob.default == "32"
-    assert SkillLoopConfig().max_rounds == 32
-    assert SupervisedConfig().max_rounds == 32
+    assert max_rounds_knob.default == "0"
+    assert SkillLoopConfig().max_rounds == 0
+    assert SupervisedConfig().max_rounds == 0
 
 
 def test_manager_planner_and_self_reasoning_defaults_are_high() -> None:
@@ -99,6 +104,11 @@ def test_registry_covers_the_active_team_knobs() -> None:
         "ARGUS_TEAMMATE_MAX_ROUNDS",
         "ARGUS_TEAMMATE_RESULT_FILE",
         "ARGUS_LEADERBOARD_LOWER_IS_BETTER",
+        "ARGUS_TEAM_MAX_WIDTH",
+        "ARGUS_TEAM_MAX_ACTIVE_CAMPAIGNS",
+        "ARGUS_TEAM_MAX_TASKS_PER_FORMATION",
+        "ARGUS_TEAM_MAX_TOTAL_IN_FLIGHT",
+        "ARGUS_SKILL_ALLOW_NESTED_TEAM",
     ):
         assert must in names, must
     assert "ARGUS_TEAMMATE_FORCE_RESEARCH" not in names
@@ -138,6 +148,7 @@ def test_format_shows_persisted_value_when_env_is_unset() -> None:
 def test_budget_caps_share_env_persisted_default_precedence() -> None:
     from argus_skill.core import knob_store
 
+    assert resolve_budget_caps(env={}).global_daily_cap_usd == 1000.0
     knob_store.write_persisted_knob("ARGUS_SKILL_GLOBAL_DAILY_CAP_USD", "12.5")
     persisted = resolve_budget_caps(env={})
     overridden = resolve_budget_caps(env={"ARGUS_SKILL_GLOBAL_DAILY_CAP_USD": "90"})
@@ -162,18 +173,39 @@ def test_cockpit_value_normalization_is_typed() -> None:
         "ARGUS_SKILL_AUTONOMY_MODE", "PRAGMATIC"
     ) == "pragmatic"
     assert normalize_cockpit_knob_value("ARGUS_SKILL_ENGINEER_BACKEND", "COPILOT") == "copilot"
+    assert normalize_cockpit_knob_value("ARGUS_SKILL_ENGINEER_BACKEND", "CURSOR") == "cursor"
     assert normalize_cockpit_knob_value("ARGUS_SKILL_ENGINEER_BACKEND", "opencod") == "opencode"
     assert normalize_cockpit_knob_value("ARGUS_SKILL_ENGINEER_BACKEND", "PI") == "pi"
     assert normalize_cockpit_knob_value("ARGUS_SKILL_ENGINEER_BACKEND", "GROK") == "grok"
+    assert normalize_cockpit_knob_value("ARGUS_SKILL_ENGINEER_BACKEND", "QODER") == "qoder"
+    assert normalize_cockpit_knob_value("ARGUS_SKILL_ENGINEER_BACKEND", "DSH") == "dsh"
     with pytest.raises(
         ValueError,
-        match="codex, claude, copilot, opencode, pi, or grok",
+        match="codex, claude, copilot, cursor, opencode, pi, grok, qoder, dsh",
     ):
         normalize_cockpit_knob_value("ARGUS_SKILL_ENGINEER_BACKEND", "magic")
     with pytest.raises(ValueError, match="non-negative integer"):
         normalize_cockpit_knob_value("ARGUS_SKILL_MAX_ACTIVE_DAEMONS", "-1")
     with pytest.raises(ValueError, match="cautious, pragmatic, or autonomous"):
         normalize_cockpit_knob_value("ARGUS_SKILL_AUTONOMY_MODE", "reckless")
+
+
+def test_cockpit_path_knob_requires_an_absolute_path(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    assert normalize_cockpit_knob_value(
+        "ARGUS_SKILL_SOURCE_ROOT", f"{checkout}{os.sep}"
+    ) == str(checkout)
+    assert normalize_cockpit_knob_value("ARGUS_SKILL_SOURCE_ROOT", "~/argus") == str(
+        Path("~/argus").expanduser()
+    )
+    # A missing directory is accepted on purpose: the startup preflight
+    # fail-closes on it, so a typo refuses startup loudly instead of being
+    # rejected only on hosts where the path happens to exist.
+    assert normalize_cockpit_knob_value(
+        "ARGUS_SKILL_SOURCE_ROOT", str(tmp_path / "not-yet-deployed")
+    ) == str(tmp_path / "not-yet-deployed")
+    with pytest.raises(ValueError, match="absolute path"):
+        normalize_cockpit_knob_value("ARGUS_SKILL_SOURCE_ROOT", "relative/checkout")
 
 
 def test_shared_model_default_feeds_role_model_resolution() -> None:
@@ -250,6 +282,8 @@ def test_cli_config_help_exits_zero_and_prints_knobs() -> None:
         [sys.executable, "-m", "argus_skill", "--config-help"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        cwd=ROOT,
     )
     assert proc.returncode == 0, proc.stderr
     assert "ARGUS_SKILL_LIFE_BACKEND" in proc.stdout
@@ -262,6 +296,8 @@ def test_cli_config_snapshot_writes_file(tmp_path) -> None:
         [sys.executable, "-m", "argus_skill", "--config-snapshot", str(out)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        cwd=ROOT,
     )
 
     assert proc.returncode == 0, proc.stderr

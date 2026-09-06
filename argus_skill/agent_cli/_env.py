@@ -12,6 +12,7 @@ _CAPTURE_STDOUT_LINES_ENV = "ARGUS_SKILL_RUNNER_CAPTURE_STDOUT_LINES"
 _CAPTURE_STDERR_LINES_ENV = "ARGUS_SKILL_RUNNER_CAPTURE_STDERR_LINES"
 _CAPTURE_JSON_EVENTS_ENV = "ARGUS_SKILL_RUNNER_CAPTURE_JSON_EVENTS"
 _STREAM_QUEUE_LINES_ENV = "ARGUS_SKILL_RUNNER_STREAM_QUEUE_LINES"
+# These deques bound RAM; complete provider output is persisted in agent I/O logs.
 _DEFAULT_CAPTURE_STDOUT_LINES = 512
 _DEFAULT_CAPTURE_STDERR_LINES = 256
 _DEFAULT_CAPTURE_JSON_EVENTS = 2048
@@ -20,6 +21,22 @@ _ENGINEER_TURN_MAX_SECONDS_ENV = "ARGUS_SKILL_ENGINEER_TURN_MAX_SECONDS"
 _DEFAULT_ENGINEER_TURN_MAX_SECONDS = 0
 _SCIENTIST_TURN_MAX_SECONDS_ENV = "ARGUS_SKILL_SCIENTIST_TURN_MAX_SECONDS"
 _DEFAULT_SCIENTIST_TURN_MAX_SECONDS = 0
+_MANAGER_TURN_MAX_SECONDS_ENV = "ARGUS_SKILL_MANAGER_TURN_MAX_SECONDS"
+_DEFAULT_MANAGER_TURN_MAX_SECONDS = 0
+# These labels sit inside the synchronous Manager request even though they use
+# older or role-specific names. An operator may still give them an explicit cap.
+_SYNCHRONOUS_MANAGER_TURN_LABELS = frozenset(
+    {
+        "chat-1",
+        "router-classify",
+        "self-debug",
+        "self-implement",
+        "self-micro",
+        "self-review",
+        "self-synthesize",
+        "simple-1",
+    }
+)
 
 
 def _positive_env_int(name: str, default: int) -> int:
@@ -42,8 +59,21 @@ def _nonnegative_env_int(name: str, default: int) -> int:
         return default
 
 
+def _is_manager_turn_label(run_label: str | None) -> bool:
+    label = str(run_label or "").strip().lower()
+    return (
+        label.startswith(("manager-", "manager."))
+        or label in _SYNCHRONOUS_MANAGER_TURN_LABELS
+    )
+
+
 def _turn_wall_clock_seconds(run_label: str | None) -> int:
     label = str(run_label or "").strip().lower()
+    if _is_manager_turn_label(label):
+        return _nonnegative_env_int(
+            _MANAGER_TURN_MAX_SECONDS_ENV,
+            _DEFAULT_MANAGER_TURN_MAX_SECONDS,
+        )
     if label == "scientist.skill_distill":
         return _nonnegative_env_int(
             _SCIENTIST_TURN_MAX_SECONDS_ENV,

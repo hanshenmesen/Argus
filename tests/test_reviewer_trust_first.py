@@ -20,7 +20,7 @@ import json
 
 from argus_skill.reviewer import Reviewer
 from argus_skill.reviewer._core import _verification_directive
-from argus_skill.roles.prompts.reviewer import _format_academic_paper_review_skill_block
+from argus_skill.verticals.research.prompt_policy import academic_paper_review_block
 
 
 def _prompt(*, measured: bool, monkeypatch) -> str:
@@ -43,33 +43,36 @@ def _prompt(*, measured: bool, monkeypatch) -> str:
 
 def test_directive_trusts_and_drops_reflexive_rerun():
     d = _verification_directive()
-    assert "Trust consistent shown results" in d
+    assert "Trust clear, consistent evidence" in d
     assert "missing" in d
     assert "contradictory" in d
-    assert "next step" in d
-    assert "empty git diff" in d.lower()
-    assert "untracked" in d.lower()
+    assert "identity drift" in d.lower()
+    assert "git diff" in d.lower()
     assert "hashes" not in d.lower()
     assert len(d) < 420
     # the OLD reflexive "use your own output as ground truth" framing is gone
     assert "use *your own* output as ground truth" not in d
 
 
-def test_paper_review_requires_built_artifact_quality_checks():
-    block = _format_academic_paper_review_skill_block(include=True)
+def test_paper_review_requires_idea_and_built_artifact_quality():
+    block = academic_paper_review_block().lower()
 
-    assert "undefined citations" in block
-    assert "bibliography warnings" in block
-    assert "overfull boxes" in block
-    assert "PDF title/author metadata" in block
-    assert "Render the relevant pages" in block
+    assert "executed code" in block
+    assert "raw rows" in block
+    assert "real evaluator" in block
+    assert "strong same-information baselines" in block
+    assert "positive controls" in block
+    assert "venue compliance" in block
+    assert "rendered layout" in block
+    assert "inside the verdict's `reason=` value" in block
+    assert "never reopen selection or move backward" in block
 
 
 def _persist_review_stage(tmp_path, vertical: str) -> None:
     from argus_skill.skills.vertical_select import persist_vertical
 
     persist_vertical(tmp_path, vertical)
-    state_path = tmp_path / "research" / "PIPELINE_STATE.json"
+    state_path = tmp_path / ".argus" / "PIPELINE_STATE.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["current_stage"] = "review"
     state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -98,7 +101,7 @@ def test_math_review_omits_paper_review_rubric(tmp_path) -> None:
     prompt, reviewer = _project_reviewer_prompt(tmp_path)
 
     assert "## Near-complete paper review" not in prompt
-    assert reviewer.last_prompt_block_stats["paper_review"]["chars"] == 0
+    assert reviewer.last_prompt_block_stats["static_total"]["chars"] > 0
 
 
 def test_final_certification_review_keeps_paper_review_rubric(tmp_path) -> None:
@@ -106,25 +109,52 @@ def test_final_certification_review_keeps_paper_review_rubric(tmp_path) -> None:
 
     prompt, reviewer = _project_reviewer_prompt(tmp_path)
 
-    assert "## Near-complete paper review" in prompt
-    assert reviewer.last_prompt_block_stats["paper_review"]["chars"] > 0
+    assert "## Integrated final paper review" in prompt
+    assert reviewer.last_prompt_block_stats["static_total"]["chars"] > 0
 
 
-def test_final_submission_keeps_paper_review_rubric_for_any_vertical(tmp_path) -> None:
+def test_final_submission_does_not_make_math_a_paper_vertical(tmp_path) -> None:
     _persist_review_stage(tmp_path, "math")
 
-    prompt, reviewer = _project_reviewer_prompt(
+    prompt, _reviewer = _project_reviewer_prompt(
         tmp_path,
         scope="final_submission",
     )
 
-    assert "## Near-complete paper review" in prompt
-    assert reviewer.last_prompt_block_stats["paper_review"]["chars"] > 0
+    assert "## Near-complete paper review" not in prompt
+    assert "## Final paper review" not in prompt
+
+
+def test_certified_medical_review_does_not_inherit_paper_policy(tmp_path) -> None:
+    _persist_review_stage(tmp_path, "medical")
+
+    prompt, _reviewer = _project_reviewer_prompt(
+        tmp_path,
+        scope="final_submission",
+    )
+
+    assert "## Near-complete paper review" not in prompt
+    assert "## Final paper review" not in prompt
+
+
+def test_final_submission_forces_certify_over_operator_explore(tmp_path) -> None:
+    _persist_review_stage(tmp_path, "research")
+    state_path = tmp_path / ".argus" / "PIPELINE_STATE.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["verification_profile"] = "explore"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    prompt, _reviewer = _project_reviewer_prompt(
+        tmp_path,
+        scope="final_submission",
+    )
+
+    assert "This round: `certify`" in prompt
 
 
 def test_build_prompt_uses_trust_first_not_old_rerun(monkeypatch):
     p = _prompt(measured=False, monkeypatch=monkeypatch)
-    assert "Trust consistent shown results" in p
+    assert "Trust clear, consistent evidence" in p
     assert "use *your own* output as ground truth" not in p
     assert "## Evidence policy" not in p
 
@@ -140,27 +170,26 @@ def test_measured_mode_trusts_scorer_and_refocuses(monkeypatch):
     assert "OVERRIDES the generic" in p
 
 
-def test_non_measured_keeps_anti_fabrication_floor(monkeypatch):
-    # Trust-first must NOT remove the floor: the reviewer still defaults to
-    # `continue` (not `done`) when a claim is NOT backed by shown evidence.
+def test_non_measured_blocks_only_on_claim_critical_evidence(monkeypatch):
     p = _prompt(measured=False, monkeypatch=monkeypatch)
-    assert "Default to `continue` whenever the agent's claims are not backed" in p
+    assert "Only missing claim-critical evidence means `continue`" in p
+    assert "optional evidence and minor weaknesses stay advisory" in p
 
 
-def test_done_means_goal_achieved_not_merely_error_free(monkeypatch):
+def test_done_tracks_the_current_verification_profile(monkeypatch):
     p = _prompt(measured=False, monkeypatch=monkeypatch)
 
-    assert "`done` requires concrete evidence" in p
-    assert "exact adherence to material operator constraints" in p
-    assert "Do not automatically turn an honest result" in p
+    assert "works at the current verification profile" in p
+    assert "not exhaustive proof or artifact completeness" in p
+    assert "Operator>objective>mission>preregistration" in p
+    assert "One timeout, failed attempt" in p
 
 
 def test_reviewer_separates_integrity_from_scientific_value(monkeypatch):
     p = _prompt(measured=False, monkeypatch=monkeypatch)
-    assert "integrity is a hard constraint" in p
+    assert "Integrity is mandatory" in p
     assert "not scientific value by itself" in p
-    assert "An agent-designed weak proxy is not evidence" in p
-    assert "otherwise return `replan_requested`" in p
+    assert "`replan_requested` for a wrong target" in p
 
 
 def test_reviewer_reasons_in_prose_structured_only_at_handoff(monkeypatch):
@@ -170,9 +199,6 @@ def test_reviewer_reasons_in_prose_structured_only_at_handoff(monkeypatch):
     # the property stronger, not weaker: the prose and the verdict now live in
     # the same message instead of the verdict replacing it.
     p = _prompt(measured=False, monkeypatch=monkeypatch)
-    assert "reason and use tools normally" in p.lower()
-    assert "STATUS=done|continue|blocked|replan_requested" in p
-    assert "REASON=" in p and "NEXT_ACTION=" in p
-    # no role is forced into a serialisation format
-    assert "JSON" not in p
-    assert "matching the attached schema" not in p
+    assert "Reason naturally" in p
+    assert "ARGUS_ROLE_DECISION=" not in p
+    assert "STATUS=done" in p

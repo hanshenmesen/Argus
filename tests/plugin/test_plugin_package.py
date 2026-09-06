@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
+import signal
 import subprocess
+import sys
+import time
 import tomllib
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,17 +49,82 @@ def test_host_mcp_wrappers_launch_the_same_bundled_command() -> None:
 
     assert set(codex) == {"mcpServers"}
     assert set(claude) == {"mcpServers"}
-    codex_command = codex["mcpServers"]["argus"]["command"]
-    claude_command = claude["mcpServers"]["argus"]["command"]
-    assert codex_command == "${PLUGIN_ROOT}/bin/argus-plugin-mcp"
-    assert claude_command == "${CLAUDE_PLUGIN_ROOT}/bin/argus-plugin-mcp"
+    codex_server = codex["mcpServers"]["argus"]
+    claude_server = claude["mcpServers"]["argus"]
+    assert codex_server == {
+        "command": "node",
+        "args": ["${PLUGIN_ROOT}/bin/argus-plugin-mcp.mjs"],
+    }
+    assert claude_server == {
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/bin/argus-plugin-mcp.mjs"],
+    }
 
     launcher = PLUGIN / "bin" / "argus-plugin-mcp"
     assert os.access(launcher, os.X_OK)
     launcher_text = launcher.read_text(encoding="utf-8")
-    assert "ARGUS_PLUGIN_PYTHON" in launcher_text
-    assert "argus-plugin-server" in launcher_text
-    assert "python3 -m argus_skill.plugin.mcp_server" in launcher_text
+    assert "argus-plugin-mcp.mjs" in launcher_text
+    assert (PLUGIN / "bin" / "argus-plugin-mcp.cmd").is_file()
+    node_launcher = (PLUGIN / "bin" / "argus-plugin-mcp.mjs").read_text(
+        encoding="utf-8"
+    )
+    assert "ARGUS_PLUGIN_PYTHON" in node_launcher
+    assert "venv', 'Scripts', 'python.exe" in node_launcher
+    assert "argus_skill.plugin.mcp_server" in node_launcher
+
+
+def test_node_launcher_resolves_explicit_python_cross_platform() -> None:
+    completed = subprocess.run(
+        ["node", str(PLUGIN / "bin" / "argus-plugin-mcp.mjs")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ARGUS_PLUGIN_PYTHON": sys.executable,
+            "ARGUS_PLUGIN_LAUNCHER_DRY_RUN": "1",
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, (str(ROOT), os.environ.get("PYTHONPATH")))
+            ),
+        },
+    )
+
+    selected = json.loads(completed.stdout)
+    assert Path(selected["command"]).resolve() == Path(sys.executable).resolve()
+    assert selected["args"] == ["-m", "argus_skill.plugin.mcp_server"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal propagation")
+def test_node_launcher_exits_after_forwarded_termination_signal(
+    tmp_path: Path,
+) -> None:
+    fake_python = tmp_path / "python"
+    ready = tmp_path / "child-ready"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"-c\" ]; then exit 0; fi\n"
+        f"touch {shlex.quote(str(ready))}\n"
+        "exec sleep 30\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    process = subprocess.Popen(
+        ["node", str(PLUGIN / "bin" / "argus-plugin-mcp.mjs")],
+        env={**os.environ, "ARGUS_PLUGIN_PYTHON": str(fake_python)},
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.is_file()
+        process.send_signal(signal.SIGTERM)
+        returncode = process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert returncode in {0, -signal.SIGTERM}
 
 
 def test_python_package_installs_plugin_server_entrypoint() -> None:
@@ -125,31 +196,41 @@ def test_documentation_covers_both_hosts_and_medical_boundary() -> None:
     assert "docs/plugin.md" in readme
     assert "docs/plugin.md" in readme_zh
     assert "install.sh" in plugin_readme
+    assert "install.ps1" in plugin_readme
     assert "medical` vertical" in plugin_readme
 
 
 def test_one_command_installer_and_short_guide() -> None:
     installer = PLUGIN / "install.sh"
+    windows_installer = PLUGIN / "install.ps1"
     guide = ROOT / "docs" / "plugin.md"
 
     assert installer.is_file()
+    assert windows_installer.is_file()
     assert os.access(installer, os.X_OK)
-    subprocess.run(["sh", "-n", str(installer)], check=True)
+    if shutil.which("sh"):
+        subprocess.run(["sh", "-n", str(installer)], check=True)
 
     installer_text = installer.read_text(encoding="utf-8")
-    launcher_text = (PLUGIN / "bin" / "argus-plugin-mcp").read_text(
+    windows_installer_text = windows_installer.read_text(encoding="utf-8")
+    launcher_text = (PLUGIN / "bin" / "argus-plugin-mcp.mjs").read_text(
         encoding="utf-8"
     )
     guide_text = guide.read_text(encoding="utf-8")
 
     assert "ARGUS_HOME" in installer_text
+    assert "Node.js 22.12+" in installer_text
     assert 'repo="lbx154/Argus"' in installer_text
     assert 'codex plugin marketplace add "$repo" --ref main' in installer_text
     assert 'claude plugin marketplace add "$repo"' in installer_text
-    assert "managed_python=" in launcher_text
-    assert ".local/share/argus" in launcher_text
-    assert "/venv/bin/python" in launcher_text
+    assert "py -m pip install --upgrade --force-reinstall" in windows_installer_text
+    assert "python3 -m venv" not in windows_installer_text
+    assert "Node.js 22.12+" in windows_installer_text
+    assert "ARGUS_PLUGIN_PYTHON" in launcher_text
+    assert "argus_skill.plugin.mcp_server" in launcher_text
     assert "install.sh | sh -s -- codex" in guide_text
     assert "install.sh | sh -s -- claude" in guide_text
     assert "install.sh | sh -s -- all" in guide_text
+    assert "argus-plugin-install.ps1" in guide_text
+    assert "Node.js 22.12+" in guide_text
     assert "target-disease-research" in guide_text

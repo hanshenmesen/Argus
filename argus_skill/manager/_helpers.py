@@ -12,11 +12,13 @@ import os
 from typing import Any
 
 from ..core.run_gateway import run_exec as gateway_run_exec  # noqa: F401 — re-exported
-from ..core.runner_errors import result_has_missing_resume_target  # noqa: F401 — re-exported
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_MANAGER_REASONING_EFFORT = "high"
+_DEFAULT_FAST_ROUTE_MIN_CONFIDENCE = 0.75
+_DEFAULT_FAST_ROUTE_MAX_TASK_CHARS = 12_000
+_DEFAULT_FAST_ROUTE_MAX_PROMPT_CHARS = 24_000
 _DEFAULT_GROUNDED_ROUTE_MAX_PROMPT_CHARS = 32_000
 
 
@@ -65,6 +67,21 @@ def _manager_model() -> str:
         "manager",
         role_env="ARGUS_SKILL_MANAGER_MODEL",
     )
+
+
+def _manager_fast_route_enabled() -> bool:
+    raw = os.environ.get("ARGUS_SKILL_MANAGER_FAST_ROUTE")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _manager_fast_route_min_confidence() -> float:
+    raw = (os.environ.get("ARGUS_SKILL_MANAGER_FAST_ROUTE_MIN_CONFIDENCE") or "").strip()
+    try:
+        return min(1.0, max(0.0, float(raw))) if raw else _DEFAULT_FAST_ROUTE_MIN_CONFIDENCE
+    except ValueError:
+        return _DEFAULT_FAST_ROUTE_MIN_CONFIDENCE
 
 
 def _manager_route_positive_int(name: str, default: int) -> int:

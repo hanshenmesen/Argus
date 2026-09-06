@@ -39,6 +39,7 @@ from .daemon_lock import is_pid_running, read_daemon_pid
 log = logging.getLogger(__name__)
 
 _DEFAULT_RETENTION_DAYS = 30
+# This grace protects new empty project state from GC; it never bounds work.
 _DEFAULT_EMPTY_GRACE_SECONDS = 3600.0
 _LOCK_FILES = ("daemon.pid",)
 # Files whose mtime signals real activity in a project (appends bump the
@@ -150,6 +151,16 @@ def gc_stale_projects(
     """
     if retention_days is None:
         retention_days = retention_days_default()
+    # A negative window puts the cutoff in the future, so every project reads
+    # as untouched for longer than it and the whole tree is trashed — a typo
+    # of `--gc-days -5` for `--gc-days 5` was enough. `retention_days_default`
+    # already clamps the env spelling; refusing here covers every caller of
+    # what is a destructive operation.
+    if retention_days < 0:
+        raise ValueError(
+            f"retention_days must not be negative (got {retention_days}); "
+            "a negative window would prune every project"
+        )
     exclude = exclude or set()
     now = time.time() if now is None else now
     cutoff = now - retention_days * 86400.0

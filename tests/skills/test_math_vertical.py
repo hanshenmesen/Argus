@@ -110,14 +110,60 @@ def test_math_vertical_contains_only_contract_skills_and_metadata() -> None:
         if path.is_file() and "__pycache__" not in path.parts
     }
 
-    # Math stays light on machinery compared with kernel_engineering. The three
+    # Math stays light on machinery compared with kernel_engineering. The
     # modules below are the exception, and the reason is narrow: without a way
     # to measure the distance to the goal, "how hard was this step" silently
-    # replaces "how much closer did this get us". They measure; they do not
-    # add stages, roles, or required paperwork.
+    # replaces "how much closer did this get us". `lean_evidence` is the same
+    # kind of exception for formal proof — it reads what a compiler recorded so
+    # a `sorry`, a stale pass, or a formalization of the wrong statement cannot
+    # be presented as evidence. They measure; they do not add stages, roles, or
+    # required paperwork, and a project with no `.lean` file never sees them.
+    #
+    # Two of them are not measures. `math_state` is the write path into the
+    # research-math kernel, and it lives here rather than inside that package
+    # for two reasons: it holds the repository's file lock, which the kernel may
+    # not import without losing the property that lets it travel, and the rule
+    # it enforces — that no agent-typed argument selects an evidence tier which
+    # confers kernel status — is policy about this host's agents, which the
+    # kernel is deliberately free of. `context_projection` is an adapter: it
+    # reads that same state kernel and the claimed backlog item and renders what
+    # *this* mission needs to know about the one claim it is about, and it lives
+    # here because it is the only part that touches an Argus type
+    # (`BacklogItem`), which that package's whole point is to do without.
+    # Neither adds a stage or a required file: a project with no recorded claim
+    # never loads either.
+    #
+    # `citation_check` is the third of that kind and the one that earns its
+    # place least obviously, since a project can cite nothing and never load it.
+    # It is here because the risk it addresses has no other checker: Lean can
+    # certify that a theorem follows from its hypotheses and can say nothing
+    # about whether the hypothesis imported as "Theorem 3.2 of [K]" is in [K],
+    # and a fabricated reference is not a citation defect, it is a proof that
+    # does not exist. It adds no stage and no required file — it derives its own
+    # work list from the ledger — and blocks only at `review`.
+    # `lean_async` is the one module here that is machinery rather than a
+    # measure, and it is worth being uncomfortable about: starting a process and
+    # asking later is a generic capability, and generic capabilities belong in
+    # core. It is here because everything that makes it more than `Popen` is
+    # policy that only this vertical holds — that a compiler answer is bound to
+    # the digest of the source *and* of the statement fidelity document, that a
+    # run whose text moved publishes nothing rather than something, and that a
+    # worker which died is an environment failure and not a broken proof. Those
+    # rules live in `lean_evidence`, and this is `verify` with the waiting taken
+    # out, so a caller reaches it through the same CLI and gets the same records.
+    # It is a separate module rather than more of `lean_evidence` for one
+    # concrete reason: `lean_evidence` is imported by `stages.py` on every
+    # completion check, and the completion gate has no business importing a
+    # process launcher. It adds no stage and no required file, and nothing loads
+    # it unless someone types `submit`.
     assert files == {
         "__init__.py",
         "stages.py",
+        "citation_check.py",
+        "context_projection.py",
+        "lean_async.py",
+        "lean_evidence.py",
+        "math_state.py",
         "objective_mode.py",
         "proof_graph.py",
         "proof_graph_check.py",
@@ -161,12 +207,13 @@ def test_math_completion_hook_requires_objective_and_policy_graph(tmp_path: Path
     assert "objective mode" in " ".join(stage_completion_issues("scope", tmp_path))
 
     objective_mode.set_objective(tmp_path, mode="targeted", goal="G")
-    state_path = tmp_path / "research" / "PIPELINE_STATE.json"
+    state_path = tmp_path / ".argus" / "PIPELINE_STATE.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["verification_profile"] = "develop"
     state_path.write_text(json.dumps(state), encoding="utf-8")
     assert "PROOF_GRAPH.json" in " ".join(stage_completion_issues("solve", tmp_path))
 
+    (tmp_path / "research").mkdir(parents=True, exist_ok=True)
     (tmp_path / "research" / "PROOF_GRAPH.json").write_text(
         json.dumps({
             "goal": "G",
@@ -209,12 +256,16 @@ def test_math_engineer_uses_one_checkpoint_without_process_artifacts() -> None:
 def test_math_checklist_is_small_and_judges_results_not_files() -> None:
     items = vertical_checklist_items(load_vertical("math"))
     assert {stage: len(stage_items) for stage, stage_items in items.items()} == {
-        "scope": 2,
+        "scope": 3,
         "solve": 4,
         "review": 4,
     }
     assert {stage: {item.id for item in stage_items} for stage, stage_items in items.items()} == {
-        "scope": {"scope.problem-explicit", "scope.success-criterion"},
+        "scope": {
+            "scope.problem-explicit",
+            "scope.success-criterion",
+            "scope.known-status-recorded",
+        },
         "solve": {
             "solve.substantive-result",
             "solve.witness-valid",
@@ -270,6 +321,34 @@ def test_math_roles_keep_methods_optional_and_checks_real() -> None:
     assert "separate audit artifact" in reviewer
     assert "required workflow or evidence package" in scientist_create
     assert "Do not create a process artifact" in scientist_adapt
+
+
+def test_parallel_routes_are_dispatched_without_a_prescribed_width() -> None:
+    """Several attacks on one goal are the OR the ledger already models.
+
+    The two things this guidance must not lose. It must not name a number:
+    how many routes are worth opening is a mathematical judgement about
+    whether they fail for different reasons, and a fixed width would turn a
+    judgement into a quota. And it must say which file the workers legitimately
+    share, because the generic team gate asks for disjoint writable paths and a
+    reader who applies that literally will either serialize the ledger or, worse,
+    give each route its own copy and lose the OR.
+    """
+    math = load_vertical("math")
+    planner = vertical_role_banner(math, "planner")
+    engineer = vertical_role_banner(math, "engineer")
+
+    assert "two routes — an OR — and" in planner
+    assert "leave the\ncount to the Engineer" in planner
+
+    assert "one task per route" in engineer
+    assert "fail for different reasons" in engineer
+    assert "agent-team-lead.md" in engineer
+    # The dispatcher describes the goal; the worker does the thinking.
+    assert "do not hand over a\ndecomposition into steps" in engineer
+    # Shared ledger, private working files.
+    assert "research/MATH_STATE.json`. That one is safe to share" in engineer
+    assert "statement_fidelity.md" in engineer
 
 
 def test_math_review_checklist_is_loaded_and_required(tmp_path: Path) -> None:
@@ -367,21 +446,51 @@ def test_doctoral_non_breakthrough_results_are_not_success(result: dict) -> None
     assert _final_stage_decision(result, "doctoral") is None
 
 
-def test_doctoral_verified_new_publishable_or_doctoral_result_succeeds() -> None:
-    for significance in ("publishable", "doctoral"):
-        result = _research_result(
-            "new_theorem",
-            novelty="verified_new",
-            significance=significance,
-        )
-        assert (
-            research_completion_issue(
-                result,
-                research_target_level="doctoral",
-            )
-            == ""
-        )
-        assert _final_stage_decision(result, "doctoral") is not None
+def test_a_doctoral_target_is_not_cleared_by_publishable_significance() -> None:
+    """This test used to assert the opposite, and that was the defect.
+
+    ``publishable`` and ``doctoral`` accepted the same significance set for
+    every original result, so asking for doctoral work bought nothing: a
+    correct, verified-new theorem its own author graded ``publishable``
+    completed a doctoral project. The survey branch of the same function had
+    the ladder right the whole time, which is what made the omission easy to
+    miss — the vocabulary, the prompts, and the operator's expectation all had
+    two levels, and only the check had one.
+    """
+    publishable = _research_result(
+        "new_theorem", novelty="verified_new", significance="publishable"
+    )
+
+    assert (
+        research_completion_issue(publishable, research_target_level="doctoral")
+        == "significance_below_doctoral:publishable"
+    )
+    assert _final_stage_decision(publishable, "doctoral") is None
+
+    # ...and the same result still completes the target it was graded for.
+    assert (
+        research_completion_issue(publishable, research_target_level="publishable")
+        == ""
+    )
+    assert _final_stage_decision(publishable, "publishable") is not None
+
+
+def test_doctoral_significance_completes_a_doctoral_target() -> None:
+    result = _research_result(
+        "new_theorem", novelty="verified_new", significance="doctoral"
+    )
+
+    assert research_completion_issue(result, research_target_level="doctoral") == ""
+    assert _final_stage_decision(result, "doctoral") is not None
+
+
+def test_a_higher_rating_never_fails_a_lower_target() -> None:
+    """The ladder is monotone: nothing is refused for being too good."""
+    from argus_skill.core.research_contract import ACCEPTED_SIGNIFICANCE
+
+    order = ("exploratory", "publishable", "doctoral")
+    for index, target in enumerate(order):
+        assert ACCEPTED_SIGNIFICANCE[target] == frozenset(order[index:]), target
 
 
 def test_literature_review_uses_survey_quality_not_original_novelty() -> None:
@@ -536,7 +645,7 @@ def test_math_stage_completion_enforces_persisted_target() -> None:
 
 def test_research_target_persists_and_non_target_vertical_clears_it(tmp_path) -> None:
     persist_vertical(tmp_path, "math", research_target_level="doctoral")
-    state_path = tmp_path / "research" / "PIPELINE_STATE.json"
+    state_path = tmp_path / ".argus" / "PIPELINE_STATE.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
 
     assert resolve_research_target_level(tmp_path) == "doctoral"
@@ -546,3 +655,108 @@ def test_research_target_persists_and_non_target_vertical_clears_it(tmp_path) ->
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert "research_target_level" not in state
     assert "research_target_set_at" not in state
+
+
+def test_reviewer_keeps_its_stage_checklist_when_the_daemon_names_the_vertical(
+    tmp_path: Path,
+) -> None:
+    """The daemon passes ``vertical_override`` for a real campaign.
+
+    That used to route the Reviewer down the same branch as a vertical named
+    for a directory with no pipeline state, which suppresses the checklist —
+    so a math Reviewer in ``solve`` was judging without the ~2k characters of
+    acceptance criteria the Engineer's own prompt still carried.
+    """
+    import json
+
+    from argus_skill import SkillLoop, SkillLoopConfig
+    from argus_skill.adapters.memory_backend import CannedResponse, MemoryBackend
+    from argus_skill.verticals.math.objective_mode import set_objective
+
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (tmp_path / ".argus").mkdir(exist_ok=True)
+    (tmp_path / ".argus" / "PIPELINE_STATE.json").write_text(
+        json.dumps({"vertical": "math", "current_stage": "solve"}), encoding="utf-8"
+    )
+    set_objective(tmp_path, mode="targeted", goal="G")
+
+    backend = MemoryBackend()
+    backend.queue("engineer-r1", CannedResponse(message="Worked the route."))
+    backend.queue("reviewer", CannedResponse(message=json.dumps({
+        "status": "done",
+        "reason": "Verified.",
+        "next_action": "None.",
+        "round_summary_markdown": "# Review\n\n- verified\n",
+        "completion_summary_markdown": "Verified.",
+    })))
+    loop = SkillLoop(
+        skills_dir=skills,
+        engineer_runner=backend,
+        reviewer_runner=backend,
+        config=SkillLoopConfig(
+            max_rounds=1, workflow_mode="direct", active_vertical="math",
+        ),
+    )
+    loop.run("Prove G.", workdir=tmp_path, scope="bounded")
+
+    reviewer_prompt = next(
+        prompt for label, prompt, _options in backend.history if label == "reviewer"
+    )
+    assert "Stage checklist (solve)" in reviewer_prompt
+    assert "solve.substantive-result" in reviewer_prompt
+    # The failure this replaced: a stage the checklist loader could not resolve
+    # renders as a manufactured blocker rather than as nothing.
+    assert "Configuration error" not in reviewer_prompt
+
+
+def test_math_never_certifies_its_own_proof() -> None:
+    """A proof is the one deliverable whose author cannot certify it.
+
+    Without this declaration the contract defaults to ``False``, and a testbed
+    run closed an open conjecture in a single round on the Engineer's own
+    verdict — "independent review was not required for this mission" — with no
+    Reviewer, no artifact and no proof graph. Every sibling research vertical
+    already declares it; math was the omission.
+    """
+    from argus_skill.verticals._base import (
+        load_vertical,
+        vertical_requires_independent_review,
+    )
+
+    assert vertical_requires_independent_review(load_vertical("math")) is True
+
+
+def test_math_review_survives_a_direct_workflow_decision(tmp_path: Path) -> None:
+    """The guard has to hold on the path that actually broke.
+
+    ``_independent_review_required_for_project_root`` reads the vertical
+    contract with no ``workflow_mode == "direct"`` exemption — unlike the paper
+    and completion-gate checks beside it. A Manager that collapses a proof into
+    one direct work package must still not collapse away its verification.
+    """
+    from argus_skill.apps._runtime_supervisor import (
+        _independent_review_required_for_project_root,
+    )
+
+    persist_vertical(tmp_path, "math", workflow_mode="direct")
+
+    assert _independent_review_required_for_project_root(tmp_path) is True
+
+
+def test_the_scope_instruction_survived_the_deletion() -> None:
+    """The reviewer checklist held one instruction that lived nowhere else.
+
+    Everything else in it restated "review the mathematics, not the paperwork",
+    which the review skill already says. This did not: establish the problem's
+    known status while scoping, instead of letting each later worker rediscover
+    it. Deleting the dict without moving it would have deleted the instruction.
+    """
+    skill = (
+        Path(__file__).resolve().parents[2]
+        / "argus_skill/verticals/math/skills/reviewer/math-research-review.md"
+    ).read_text(encoding="utf-8")
+
+    assert "known status of the problem" in " ".join(skill.split())
+    assert "was established here, and written down" in " ".join(skill.split())
+    assert "rediscover" in skill

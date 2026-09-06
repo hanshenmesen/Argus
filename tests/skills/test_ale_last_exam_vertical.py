@@ -23,7 +23,7 @@ from argus_skill.verticals._base import load_vertical, vertical_completion_gate
 
 
 def _ale_project(tmp_path: Path) -> Path:
-    state = tmp_path / "research" / "PIPELINE_STATE.json"
+    state = tmp_path / ".argus" / "PIPELINE_STATE.json"
     state.parent.mkdir(parents=True)
     state.write_text(
         json.dumps({"vertical": "ale_last_exam", "current_stage": "execute"}),
@@ -40,8 +40,6 @@ def test_ale_last_exam_is_registered_and_loadable() -> None:
     mod = load_vertical("ale_last_exam")
     assert mod.STAGE_ORDER == ["execute"]
     assert mod.CHECKLIST_STAGE_ORDER == ("execute",)
-    assert tuple(mod.STAGE_CHECKS) == ("execute",)
-    assert tuple(mod.REVIEWER_CHECKLISTS) == ("execute",)
     assert vertical_completion_gate(mod) == "none"
 
 

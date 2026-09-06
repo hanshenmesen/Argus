@@ -52,6 +52,8 @@ def _mission_outcome_presentation(
     mission_status, role_status, label, tone = _MISSION_OUTCOME_PRESENTATIONS[
         outcome_class
     ]
+    if outcome_class == "completed" and event.get("campaign_continues") is True:
+        return "continued", "done", "Task continued", "info"
     if (
         outcome_class == "completed"
         and event.get("final_submission_certified") is True
@@ -92,6 +94,7 @@ def reduce_mission_lifecycle_event(
         # but operators and supervision tooling must not mistake it for current
         # evidence.
         view["review"] = {"status": "", "reason": "", "rejected_attempts": 0}
+        view["delivery"] = None
         view["outcome"] = {}
         _set_role(view, "reviewer", "waiting", "Awaiting engineer handoff", ts)
         _set_role(view, "engineer", "active", "Starting mission", ts)
@@ -111,16 +114,29 @@ def reduce_mission_lifecycle_event(
             event,
             event_type,
         )
-        final_output = str(event.get("final_output") or "").strip()
+        final_output = (
+            str(event.get("final_output") or "").strip()
+            if "final_output" in event
+            else mission.get("final_output", "")
+            if _text(event, "item_id") == mission.get("id")
+            and mission.get("started_at") is not None
+            and mission.get("completed_at") in {None, ts}
+            else ""
+        )
         mission.update({
             "id": _text(event, "item_id") or mission.get("id", ""),
             "title": _text(event, "title", 240) or mission.get("title", ""),
             "objective": _text(event, "objective", 2000) or mission.get("objective", ""),
             "summary": _text(event, "summary", 1200),
-            "final_output": final_output or mission.get("final_output", ""),
+            "final_output": final_output,
             "status": mission_status,
             "completed_at": ts,
         })
+        raw_delivery = event.get("delivery")
+        if bool(event.get("success")) and isinstance(raw_delivery, dict):
+            view["delivery"] = dict(raw_delivery)
+        elif not bool(event.get("success")):
+            view["delivery"] = None
         raw_outcome = event.get("outcome")
         if isinstance(raw_outcome, dict):
             view["outcome"] = dict(raw_outcome)
@@ -131,6 +147,12 @@ def reduce_mission_lifecycle_event(
                 stop_kind=event.get("stop_kind"),
                 resumable=bool(event.get("resumable")),
             )
+        if event.get("final_submission_certified") is True:
+            view["outcome"]["final_submission_certified"] = True
+            if isinstance(event.get("manuscript_snapshot"), dict):
+                view["outcome"]["manuscript_snapshot"] = dict(
+                    event["manuscript_snapshot"]
+                )
         _set_role(view, "engineer", role_status, label, ts)
         detail = (
             _text(event, "summary", 1200)
@@ -240,17 +262,26 @@ def reduce_round_event(
         kind = _text(event, "kind")
         label = _PROGRESS_LABELS.get(kind, "Working")
         _set_role(view, role, "active", label, ts)
-        if role == "engineer" and kind in {
-            "assistant_message",
-            "agent_message",
-            "message",
-        }:
+        if (
+            role == "engineer"
+            and kind in {"assistant_message", "agent_message", "message"}
+            and event.get("final_delivery") is True
+            and mission.get("started_at") is not None
+            and mission.get("completed_at") is None
+            and ts >= mission["started_at"]
+            and (not event.get("item_id") or event["item_id"] == mission.get("id"))
+        ):
             candidate = strip_named_lines(
                 str(event.get("text") or ""),
-                ("MILESTONE_STATUS", "OPERATOR_QUESTION", "OPERATOR_OPTIONS"),
+                (
+                    "MILESTONE_STATUS",
+                    "NEXT_OWNER",
+                    "OPERATOR_QUESTION",
+                    "OPERATOR_OPTIONS",
+                    "ROLE_DECISION",
+                ),
             ).strip()
-            if candidate:
-                mission["final_output"] = candidate
+            mission["final_output"] = candidate
         detail = (
             _text(event, "action_summary", 4000)
             or _text(event, "text", 4000)
@@ -321,6 +352,10 @@ def reduce_round_event(
             "rejected_attempts": int(view.get("review", {}).get("rejected_attempts") or 0)
             + (1 if status in {"continue", "blocked"} else 0),
         }
+        if isinstance(event.get("manuscript_snapshot"), dict):
+            view["review"]["manuscript_snapshot"] = dict(
+                event["manuscript_snapshot"]
+            )
         frontier_change = _text(event, "frontier_change")
         if frontier_change:
             view["frontier"] = {

@@ -49,7 +49,7 @@ def test_planner_role_skill_no_longer_classified_as_engineer() -> None:
 # --------------------------------------------------------------------------
 def test_manager_in_role_subdirs_and_pools() -> None:
     assert "manager" in _ROLE_SUBDIRS
-    assert ROLE_SKILL_POOLS["manager"] == frozenset({"manager"})
+    assert ROLE_SKILL_POOLS["manager"] == frozenset({"manager", "general"})
     # Manager sees every other role's standards as read-only references.
     assert ROLE_CROSS_READ_POOLS["manager"] == frozenset({
         "engineer",
@@ -64,9 +64,9 @@ def test_manager_role_skill_file_exists_and_loads() -> None:
     text = load_builtin_skill_text("argus-manager-role.md")
     compact = " ".join(text.split())
     assert "Argus Manager Role" in text
-    assert "Runtime maintenance must use an isolated worktree" in text
-    assert "controlled canary" in text
-    assert "Publishing that repair is optional" in compact
+    assert "evidence-backed ordinary mission in an isolated worktree" in text
+    assert "Reviewer `done`" in text
+    assert "operator-approved deployment boundary" in compact
     assert "never automatic" in compact
 
 
@@ -146,7 +146,10 @@ def test_manager_decision_prompt_carries_paths_not_skill_body(
     assert "Role: manager" in prompt
     assert "DO NOT PRELOAD THIS MANAGER BODY" not in prompt
     assert "Argus Manager Role" not in prompt
-    assert "ACTION=advance|hold|rollback|complete" in prompt
+    assert "ARGUS_ROLE_DECISION=" not in prompt
+    assert "ACTION=hold" in prompt
+    assert "Right-sidebar presentation" not in prompt
+    assert "LIVE_VIEW_PATHS" not in prompt
     assert decision.action == "hold"
 
 
@@ -173,76 +176,3 @@ def test_manager_stage_decision_is_read_only(tmp_path: Path) -> None:
     assert call["run_label"] == "manager-stage"
     assert call["options"].sandbox_mode == "read-only"
     assert call["options"].dangerous_yolo is False
-
-
-# --------------------------------------------------------------------------
-# 4. Manager does NOT inject role skill into front-door classify
-# --------------------------------------------------------------------------
-class _CapturingRunner:
-    """A runner whose ``run_exec`` records the prompt; tolerates the persistent
-    session's extra ``resume_thread_id`` kwarg. Used to capture the approve gate's
-    prompt at the Manager level (the approval call goes through the session)."""
-
-    def __init__(self, message: str = '{"approve": true, "why": "ok"}') -> None:
-        self.message = message
-        self.prompts: list[str] = []
-
-    def run_exec(
-        self, *, prompt: str, options=None, run_label: str = "", resume_thread_id=None
-    ) -> object:
-        self.prompts.append(prompt)
-
-        class _R:
-            last_agent_message = self.message
-            thread_id = None
-
-        return _R()
-
-
-def test_manager_classify_prompt_stays_minimal_when_store_present(
-    tmp_path: Path,
-) -> None:
-    from argus_skill.skills.store import SkillStore
-
-    store = SkillStore(tmp_path / "skills")
-    mgr = Manager(project_root=tmp_path, runner=object(), skill_store=store)
-
-    seen: list[str] = []
-
-    def run_exec(prompt: str) -> object:
-        seen.append(prompt)
-
-        class _R:
-            last_agent_message = "TEAM"
-            exit_code = 0
-
-        return _R()
-
-    mgr.is_conversational("是不是要做点什么", run_exec=run_exec)
-    assert seen, "manager never built a classify prompt"
-    assert "Argus manager role skill" not in seen[0]
-    assert "Argus Manager Role" not in seen[0]
-    assert "CHAT" in seen[0] and "TASK" in seen[0]
-
-
-def test_manager_classify_prompt_unchanged_without_store(tmp_path: Path) -> None:
-    from argus_skill.life.router import build_classify_prompt
-
-    mgr = Manager(project_root=tmp_path, runner=object(), skill_store=None)
-    seen: list[str] = []
-
-    def run_exec(prompt: str) -> object:
-        seen.append(prompt)
-
-        class _R:
-            last_agent_message = "TEAM"
-            exit_code = 0
-
-        return _R()
-
-    text = "是不是要做点什么"
-    mgr.is_conversational(text, run_exec=run_exec)
-    assert seen
-    # No store → no role-skill header, byte-for-byte the legacy classify prompt.
-    assert "Argus manager role skill" not in seen[0]
-    assert seen[0] == build_classify_prompt(text)

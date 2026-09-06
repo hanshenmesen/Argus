@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def _default_subagent_family_failure_streak_limit() -> int:
+    # Function-level import: life.supervisor.__init__ pulls in _core, which
+    # would create an import cycle at module load time.
+    from ..life.supervisor._config import LifeSupervisorConfig
+
+    return LifeSupervisorConfig.subagent_family_failure_streak_limit
+
+
+def _default_subagent_family_failure_window_hours() -> float:
+    from ..life.supervisor._config import LifeSupervisorConfig
+
+    return LifeSupervisorConfig.subagent_family_failure_window_hours
 
 
 @dataclass
@@ -27,12 +41,17 @@ class LifeWorkerConfig:
     engineer_reasoning_effort: str = "xhigh"
     reviewer_reasoning_effort: str = "high"
     global_daily_cap_usd: float = 0.0
-    planner_task_iteration_max_cycles: int = 6
+    mission_width: int = 2
+    planner_task_iteration_max_cycles: int = 0
     # See LifeSupervisorConfig.subagent_family_failure_streak_limit /
     # ..._window_hours (life/supervisor/_config.py) for the circuit breaker
-    # this configures.
-    subagent_family_failure_streak_limit: int = 3
-    subagent_family_failure_window_hours: float = 72.0
+    # this configures; that class is the single source of the defaults.
+    subagent_family_failure_streak_limit: int = field(
+        default_factory=_default_subagent_family_failure_streak_limit
+    )
+    subagent_family_failure_window_hours: float = field(
+        default_factory=_default_subagent_family_failure_window_hours
+    )
     poll_interval: float = 5.0
     log_path: Path | None = None  # defaults to <life_dir>/daemon.log
     project_workdir: Path | None = None
@@ -45,6 +64,7 @@ class LifeWorkerConfig:
     event_log_verbosity: str = "full"
     continuous: bool = False
     continuous_objective: str = ""
+    continuous_objective_file: Path | None = None
     # Opt-in to adopt THIS project's persisted continuous campaign
     # (``<life_dir>/continuous.json``) at boot. Off by default: a fresh/manual
     # daemon must NOT silently inherit a project-level campaign it was not asked
@@ -55,6 +75,16 @@ class LifeWorkerConfig:
     # mission alive after the planner certifies ``project_done`` instead of
     # hard-stopping. Set False (via ``--bounded``) for a one-shot bounded goal.
     continuous_open_ended: bool = True
+    # Parent-only diagnostic populated by the clean launcher.  It is
+    # deliberately excluded from config_payload(): the child does not need to
+    # receive its own launch failure, while WebAPI needs the captured helper
+    # stderr after the integer return code comes back.
+    last_spawn_error: str = field(default="", init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self.mission_width = int(self.mission_width)
+        if self.mission_width < 0:
+            raise ValueError("mission_width must be zero or a positive integer")
 
 def config_payload(config: LifeWorkerConfig) -> dict[str, Any]:
     return {
@@ -68,6 +98,7 @@ def config_payload(config: LifeWorkerConfig) -> dict[str, Any]:
         "engineer_reasoning_effort": config.engineer_reasoning_effort,
         "reviewer_reasoning_effort": config.reviewer_reasoning_effort,
         "global_daily_cap_usd": config.global_daily_cap_usd,
+        "mission_width": config.mission_width,
         "planner_task_iteration_max_cycles": config.planner_task_iteration_max_cycles,
         "subagent_family_failure_streak_limit": config.subagent_family_failure_streak_limit,
         "subagent_family_failure_window_hours": config.subagent_family_failure_window_hours,
@@ -76,6 +107,11 @@ def config_payload(config: LifeWorkerConfig) -> dict[str, Any]:
         "project_workdir": str(config.project_workdir) if config.project_workdir is not None else "",
         "continuous": config.continuous,
         "continuous_objective": config.continuous_objective,
+        "continuous_objective_file": (
+            str(config.continuous_objective_file)
+            if config.continuous_objective_file is not None
+            else ""
+        ),
         "resume_continuous": config.resume_continuous,
         "continuous_open_ended": config.continuous_open_ended,
     }
@@ -87,9 +123,27 @@ def config_from_payload(data: dict[str, Any]) -> LifeWorkerConfig:
     log_path = str(data.get("log_path") or "")
     global_root = str(data.get("global_root") or "")
     project_workdir = str(data.get("project_workdir") or "")
+    continuous_objective_file = str(data.get("continuous_objective_file") or "")
+    backend = str(data.get("backend") or "codex")
+
+    def _model(name: str, route: str, role_env: str) -> str:
+        if name in data:
+            return str(data.get(name) or "")
+        return resolve_role_model(route, role_env=role_env, backend=backend)
+
     def _number(name: str, default: float) -> float:
+        # ``is None``, not ``or``: an explicit 0/0.0/False is a real value
+        # (e.g. "breaker off") and must survive the round trip. A value that
+        # does not parse as a number ("", "abc", a list) falls back to the
+        # default instead of raising: this runs on the daemon recovery path,
+        # where one malformed handoff field must not prevent boot.
         value = data.get(name)
-        return default if value is None else float(value)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     return LifeWorkerConfig(
         life_dir=Path(str(data["life_dir"])).expanduser(),
@@ -97,14 +151,16 @@ def config_from_payload(data: dict[str, Any]) -> LifeWorkerConfig:
         project_workdir=Path(project_workdir).expanduser() if project_workdir else None,
         project_fingerprint=str(data.get("project_fingerprint") or ""),
         project_label=str(data.get("project_label") or ""),
-        backend=str(data.get("backend") or "codex"),
-        engineer_model=str(
-            data.get("engineer_model")
-            or resolve_role_model("engineer", role_env="ARGUS_SKILL_ENGINEER_MODEL")
+        backend=backend,
+        engineer_model=_model(
+            "engineer_model",
+            "engineer",
+            "ARGUS_SKILL_ENGINEER_MODEL",
         ),
-        reviewer_model=str(
-            data.get("reviewer_model")
-            or resolve_role_model("reviewer", role_env="ARGUS_SKILL_REVIEWER_MODEL")
+        reviewer_model=_model(
+            "reviewer_model",
+            "reviewer",
+            "ARGUS_SKILL_REVIEWER_MODEL",
         ),
         engineer_reasoning_effort=str(
             data.get("engineer_reasoning_effort") or "xhigh"
@@ -113,19 +169,32 @@ def config_from_payload(data: dict[str, Any]) -> LifeWorkerConfig:
             data.get("reviewer_reasoning_effort") or "high"
         ),
         global_daily_cap_usd=_number("global_daily_cap_usd", 30.0),
+        mission_width=int(data.get("mission_width", 2)),
         planner_task_iteration_max_cycles=int(
-            data.get("planner_task_iteration_max_cycles") or 6
+            data.get("planner_task_iteration_max_cycles", 0) or 0
         ),
+        # ``is None`` (via _number), not ``or``: an explicit 0 disables the F6
+        # breaker (see _planner_orchestration) and must survive a payload round
+        # trip instead of silently reverting to the default.
         subagent_family_failure_streak_limit=int(
-            data.get("subagent_family_failure_streak_limit") or 3
+            _number(
+                "subagent_family_failure_streak_limit",
+                _default_subagent_family_failure_streak_limit(),
+            )
         ),
-        subagent_family_failure_window_hours=float(
-            data.get("subagent_family_failure_window_hours") or 72.0
+        subagent_family_failure_window_hours=_number(
+            "subagent_family_failure_window_hours",
+            _default_subagent_family_failure_window_hours(),
         ),
         poll_interval=float(data.get("poll_interval") or 5.0),
         log_path=Path(log_path).expanduser() if log_path else None,
         continuous=bool(data.get("continuous")),
         continuous_objective=str(data.get("continuous_objective") or ""),
+        continuous_objective_file=(
+            Path(continuous_objective_file).expanduser()
+            if continuous_objective_file
+            else None
+        ),
         resume_continuous=bool(data.get("resume_continuous")),
         continuous_open_ended=bool(data.get("continuous_open_ended", True)),
     )

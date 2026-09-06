@@ -48,6 +48,9 @@ import { HtmlPreview } from '../components/HtmlPreview';
 import { formatStructuredData, parseDelimited } from '../components/DataPreview';
 import { Button } from '../components/primitives';
 import { ArgusMark, Wordmark } from '../components/Wordmark';
+import { ConnectionProblemBanner, pairingTokenFromInput } from '../components/ConnectionProblemBanner';
+import { LocalArgusUnavailableError, PairingRequiredError } from '../api';
+import { isMarkdownArtifact } from '../lib/artifactPresentation';
 
 const typedUsageEvent: UsageRecordedEvent = {
   type: 'usage.recorded',
@@ -61,25 +64,68 @@ const typedUsageEvent: UsageRecordedEvent = {
 };
 
 describe('shared frontend core', () => {
-  it('uses Rounded 02 geometry with one continuous brand gradient', () => {
+  it('renders Markdown by kind, MIME type, or filename', () => {
+    expect(isMarkdownArtifact({ kind: 'markdown', name: 'report.bin' })).toBe(true);
+    expect(isMarkdownArtifact({ kind: 'text', mime: 'text/markdown; charset=utf-8', name: 'report.txt' })).toBe(true);
+    expect(isMarkdownArtifact({ kind: 'text', mime: 'text/plain', name: 'REPORT.MD' })).toBe(true);
+    expect(isMarkdownArtifact({ kind: 'text', mime: 'text/plain', path: 'notes/readme.markdown' })).toBe(true);
+    expect(isMarkdownArtifact({ kind: 'text', mime: 'text/plain', name: 'report.txt' })).toBe(false);
+  });
+
+  it('renders an actionable pairing message instead of a raw 401 loop', () => {
+    const html = renderToStaticMarkup(createElement(ConnectionProblemBanner, {
+      error: new PairingRequiredError(),
+      onRetry: () => undefined,
+    }));
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('not paired with Argus');
+    expect(html).toContain('reopen the workbench from Argus Desktop');
+    expect(html).toContain('Pair again');
+  });
+
+  it('accepts a fresh pairing token or extracts one from a pairing link', () => {
+    vi.stubGlobal('window', { location: { href: 'http://127.0.0.1:8765/' } });
+
+    expect(pairingTokenFromInput('fresh-token')).toBe('fresh-token');
+    expect(pairingTokenFromInput('http://127.0.0.1:8765/?token=fresh-link-token')).toBe('fresh-link-token');
+    expect(pairingTokenFromInput('http://127.0.0.1:8765/')).toBe('');
+    expect(pairingTokenFromInput('not a token')).toBe('');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('renders an actionable local-service message instead of Failed to fetch', () => {
+    const html = renderToStaticMarkup(createElement(ConnectionProblemBanner, {
+      error: new LocalArgusUnavailableError('GET', '/api/meta'),
+      onRetry: () => undefined,
+    }));
+
+    expect(html).toContain('local Argus service is unavailable');
+    expect(html).toContain('Argus Desktop running');
+    expect(html).toContain('Retry');
+  });
+
+  it('uses theme-aware Rounded 02 eye geometry', () => {
     const lockup = renderToStaticMarkup(createElement(Wordmark, { size: 24 }));
     const mark = renderToStaticMarkup(createElement(ArgusMark, { size: 32 }));
     expect(lockup).toContain('data-logo="rounded-horizontal"');
     expect(mark).toContain('data-logo="rounded-mark"');
-    expect(lockup).toContain('gradientUnits="userSpaceOnUse"');
-    expect(lockup).toContain('x1="180"');
-    expect(lockup).toContain('x2="1280"');
-    expect(lockup).not.toContain('var(--spectral-violet)');
-    expect(lockup).not.toContain('NightPupil');
+    expect(lockup).toContain('fill="rgb(var(--brand-body))"');
+    expect(lockup).not.toContain('linearGradient');
+    expect(mark).toContain('fill="rgb(var(--brand-eye))"');
+    expect(mark).toContain('fill="rgb(var(--brand-pupil))"');
+    expect(mark).toContain('fill="rgb(var(--brand-highlight))"');
+    expect(mark).toContain('argus-mark-eye');
   });
 
   it('defines the public-brand workbench surface contract', () => {
     const css = fs.readFileSync(path.resolve('src/index.css'), 'utf8');
     for (const token of [
-      '--spectral-blue',
-      '--spectral-violet',
-      '--spectral-rose',
-      '--spectral-gold',
+      '--blue',
+      '--ok',
+      '--warn',
+      '--err',
       '--glass',
       '--glass-raised',
       '--glass-edge',
@@ -101,20 +147,19 @@ describe('shared frontend core', () => {
     ]) {
       expect(css).toContain(selector);
     }
-    expect(css).toContain('@keyframes ambient-drift');
-    expect(css).toContain('[data-page-visible=\"false\"]');
-    expect(css).not.toContain('--spectral-violet: 105 73 205');
-    expect(css).not.toContain('--spectral-rose: 190 67 119');
+    expect(css).not.toContain('@keyframes ambient-drift');
+    expect(css).not.toContain('will-change: transform, opacity');
+    expect(css).not.toContain('--spectral-');
     expect(css).not.toContain('#89dceb');
     expect(css).not.toContain('#cba6f7');
     expect(css).toContain('.workspace-tab-indicator');
     expect(css).toContain('.role-log-group[data-open=\"true\"]');
   });
 
-  it('keeps light-theme spectral info text at WCAG AA contrast', () => {
+  it('keeps light-theme blue info text at WCAG AA contrast', () => {
     const css = fs.readFileSync(path.resolve('src/index.css'), 'utf8');
     const root = css.match(/:root\s*\{([\s\S]*?)\}/)?.[1] ?? '';
-    const channels = root.match(/--spectral-blue:\s*(\d+)\s+(\d+)\s+(\d+)/);
+    const channels = root.match(/--blue:\s*(\d+)\s+(\d+)\s+(\d+)/);
     expect(channels).not.toBeNull();
     const relativeLuminance = (rgb: number[]) => {
       const linear = rgb.map((channel) => {
@@ -165,6 +210,28 @@ describe('shared frontend core', () => {
       second,
       { type: 'provider.request.completed', call_id: 'b' },
     ])).toEqual(first);
+  });
+
+  it('closes orphaned provider requests at mission completion', () => {
+    const orphaned = {
+      type: 'provider.request.started',
+      call_id: 'orphaned-manager-call',
+      run_label: 'manager-classify-grounded',
+    };
+    expect(activeProviderRequest([
+      orphaned,
+      { type: 'life.mission.completed', item_id: 'mission-1', status: 'done' },
+    ])).toBeNull();
+    const next = {
+      type: 'provider.request.started',
+      call_id: 'next-manager-call',
+      run_label: 'manager-classify-grounded',
+    };
+    expect(activeProviderRequest([
+      orphaned,
+      { type: 'life.mission.completed', item_id: 'mission-1', status: 'done' },
+      next,
+    ])).toEqual(next);
   });
 
   it('uses the canonical event catalog and explicit legacy aliases', () => {
@@ -230,11 +297,13 @@ describe('shared frontend core', () => {
 
   it('renders a readable backend handshake before GSAP loads', () => {
     const html = renderToStaticMarkup(createElement(BackendHandshake));
-    expect(html).toContain('Connecting to Argus');
-    expect(html).toContain('API');
-    expect(html).toContain('Protocol');
-    expect(html).toContain('Workspace');
-    expect(html).toContain('aria-label="Connecting to Argus backend"');
+    expect(html).toContain('Getting Argus ready');
+    expect(html).toContain('Service');
+    expect(html).toContain('Project');
+    expect(html).toContain('Ready');
+    expect(html).toContain('Reopening your workspace');
+    expect(html).toContain('aria-label="Getting Argus ready"');
+    expect(html).not.toContain('Protocol');
     expect(motionQueries).toEqual({
       all: '(min-width: 0px)',
       reduceMotion: '(prefers-reduced-motion: reduce)',
@@ -257,6 +326,7 @@ describe('shared frontend core', () => {
       },
     }])).toEqual({
       tone: 'warn',
+      kind: 'validation',
       text: 'invalid event agent.io.error: missing required fields: error',
     });
   });
@@ -465,26 +535,59 @@ describe('shared frontend core', () => {
   });
 
   it('keeps the opening animation lightweight and bounded', () => {
-    expect(WEB_SPLASH_DURATION_MS).toBeLessThanOrEqual(200);
+    expect(WEB_SPLASH_DURATION_MS).toBeLessThanOrEqual(1000);
   });
 
-  it('uses Rounded 02 SVGs for both boot splash widths', () => {
+  it('reserves stable shell, scrollbar, and font geometry', () => {
+    const css = fs.readFileSync(path.resolve('src/index.css'), 'utf8');
+    const html = fs.readFileSync(path.resolve('index.html'), 'utf8');
+    const canvas = fs.readFileSync(path.resolve('src/components/ResearchCanvas.tsx'), 'utf8');
+    expect(css).toContain('height: 100dvh');
+    expect(css).toContain('scrollbar-gutter: stable');
+    expect(html.match(/rel="preload"/g)).toHaveLength(2);
+    expect(canvas).not.toContain('key={showLiveProgress');
+    expect(canvas).not.toContain('gsap.fromTo');
+  });
+
+  it('uses one large animated mark for the boot splash', () => {
     const html = renderToStaticMarkup(
       createElement(BootSplash, { onDone: () => undefined }),
     );
-    expect(html).toContain('data-logo="rounded-horizontal"');
     expect(html).toContain('data-logo="rounded-mark"');
+    expect(html.match(/data-logo=/g)).toHaveLength(1);
+    expect(html).toContain('argus-mark-eye');
+    expect(html).toContain('width:168px');
     expect(html).not.toContain('<pre');
     expect(html).not.toContain('ARGUS-SKILL');
   });
 
-  it('favicon uses Rounded 02 geometry with fixed blue-gold gradient', () => {
+  it('favicon uses monochrome Rounded 02 geometry', () => {
     const svg = fs.readFileSync(path.resolve('public/favicon.svg'), 'utf8');
-    expect(svg).toContain('gradientUnits="userSpaceOnUse"');
-    expect(svg).toContain('#075fe4');
-    expect(svg).toContain('#d99a16');
+    expect(svg).toContain('fill="#000"');
+    expect(svg).toContain('fill="#fff"');
+    expect(svg).not.toContain('linearGradient');
     expect(svg).toMatch(/A\s*42\s+42/);
-    expect(svg).not.toContain('<rect');
+    expect(svg).toContain('<rect');
+  });
+
+  it('ships a non-inverted dark-mode favicon and full semantic palette', () => {
+    const svg = fs.readFileSync(path.resolve('public/favicon-dark.svg'), 'utf8');
+    const css = fs.readFileSync(path.resolve('src/index.css'), 'utf8');
+    const html = fs.readFileSync(path.resolve('index.html'), 'utf8');
+    const manifest = fs.readFileSync(path.resolve('public/manifest.webmanifest'), 'utf8');
+    expect(svg).toContain('fill="#d7d9dc"');
+    expect(svg).toContain('fill="#ffffff"');
+    expect(svg).toContain('fill="#202326"');
+    expect(svg).toContain('fill="#080a0b"');
+    expect(css).toContain('--brand-body: 215 217 220');
+    expect(css).toContain('--brand-eye: 255 255 255');
+    expect(css).toContain('--brand-pupil: 32 35 38');
+    expect(css).toContain('--brand-highlight: 255 255 255');
+    expect(html).toContain('href="/favicon-dark.svg" media="(prefers-color-scheme: dark)"');
+    expect(html).toContain('href="/apple-touch-icon-dark.png" media="(prefers-color-scheme: dark)"');
+    expect(manifest).toContain('/icon-dark-192.png');
+    expect(manifest).toContain('/icon-dark-512.png');
+    expect(manifest).toContain('/icon-maskable-dark-512.png');
   });
 
   it('lets the Manager choose the live canvas and prefers its rendered output', () => {
@@ -661,7 +764,7 @@ describe('shared frontend core', () => {
 
   it('renders conversation Markdown without executing raw HTML', () => {
     const html = renderToStaticMarkup(
-      createElement(MarkdownContent, null, '## Result\n\n- **passed**\n\n`score = 1`\n\n```\nraw block\n```\n\n<script>alert(1)</script>'),
+      createElement(MarkdownContent, null, '## Result\n\n- **passed**\n\n\\[x^2\\]\n\nInline \\(y\\). Costs $20 and $30 today. Literal \\\\(not math\\\\).\n\n`score = \\(literal\\)`\n\n    \\(indented code\\)\n\n[artifact](notes/\\(draft\\).md)\n\n[reference][ref]\n\n[ref]: notes/\\(draft\\).md\n\n```\nraw block\n```\n\n<script>alert(1)</script>'),
     );
     expect(html).toContain('<h2');
     expect(html).toContain('<strong');
@@ -671,6 +774,44 @@ describe('shared frontend core', () => {
     expect(html).not.toContain('min-w-max');
     expect(html).not.toContain('<script>');
     expect(html).toContain('&lt;script&gt;');
+    expect(html).toContain('katex-display');
+    expect(html).toContain('class="katex"');
+    expect(html).toContain('Costs $20 and $30 today.');
+    expect(html).toContain('score = \\(literal\\)');
+    expect(html).toContain('\\(indented code\\)');
+    expect(html).toContain('Literal \\(not math\\).');
+    expect(html).toContain('href="notes/(draft).md"');
+    expect(html).not.toContain('notes/$draft$.md');
+  });
+
+  it('keeps Markdown syntax inside TeX atomic', () => {
+    const html = renderToStaticMarkup(
+      createElement(MarkdownContent, null, String.raw`Inline \(a * b + [x](y)\).`),
+    );
+
+    expect(html).toContain('class="katex"');
+    expect(html).not.toContain('<a ');
+    expect(html).not.toContain('<em>');
+  });
+
+  it('preserves reference targets and malformed fenced code literally', () => {
+    const markdown = [
+      '[paper][ref]',
+      '',
+      '[ref]: notes/\\(draft\\).md "Title \\(literal\\)"',
+      '',
+      '```text',
+      '\\[not_math\\]',
+      '``',
+      '\\(still_code\\)',
+    ].join('\n');
+    const html = renderToStaticMarkup(createElement(MarkdownContent, null, markdown));
+
+    expect(html).toContain('href="notes/(draft).md"');
+    expect(html).toContain('title="Title (literal)"');
+    expect(html).toContain('\\[not_math\\]');
+    expect(html).toContain('\\(still_code\\)');
+    expect(html).not.toContain('class="katex"');
   });
 
   it('turns API JSON detail into a useful operator-facing error', async () => {

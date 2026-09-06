@@ -1,8 +1,8 @@
 """Round-loop phase: engineer prompt/context assembly.
 
 Owns building the per-round engineer prompt (static task/skill contract on
-round 1 or when compact continuation prompts are disabled; otherwise a
-compact Reviewer-delta prompt), attaching the shared CHECKPOINT.md and the
+every fresh provider session, or when compact continuation prompts are
+disabled; otherwise a compact Reviewer-delta prompt), attaching the shared CHECKPOINT.md and the
 background-subagent / external-work
 advisories, and emitting the ``round.start`` event. This is purely prompt
 text assembly — it makes no completion or control-flow decisions.
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..core.event_catalog import EventType
+from ..life.context_packet import render_mission_brief
 from ..roles.prompts.engineer import assemble_round_prompt
 from .checkpoint import shared_checkpoint_instructions
 from .external_work import render_external_work_advisory
@@ -41,6 +42,7 @@ class RoundPromptMixin:
         # free-form reviewer prose in the next Engineer prompt.
         include_static = (
             round_index == 1
+            or role_session.policy == "fresh"
             or not supervised_config.compact_continuation_prompts
             or (
                 role_session.policy != "fresh"
@@ -66,26 +68,33 @@ class RoundPromptMixin:
                 "approval again. Read the canonical checkpoint and latest reviewed "
                 "handoff below first."
             )
-        checkpoint_has_state = False
-        if round_index == 1 and checkpoint_path is not None:
-            try:
-                checkpoint_has_state = bool(
-                    checkpoint_path.read_text(encoding="utf-8").strip()
-                )
-            except OSError:
-                checkpoint_has_state = False
+        # ``getattr``, not attribute access: tests/test_checkpoint.py drives this
+        # phase with a partial ``SimpleNamespace`` config that omits the field.
+        mission_brief = render_mission_brief(
+            getattr(supervised_config, "context_packet_path", "")
+        )
         checkpoint_block = "\n\n".join(
             block
             for block in (
+                mission_brief,
                 role_session.prompt_block(),
                 rotation_block,
-                (
-                    shared_checkpoint_instructions(
-                        checkpoint_path,
-                        role="engineer",
-                    )
-                    if round_index > 1 or checkpoint_has_state
-                    else ""
+                # Unconditional, including round 1. The baton has to be WRITTEN
+                # by the round before the one that reads it, and gating this on
+                # `round_index > 1` meant round 1 was never told the file
+                # existed: it finished, sealed a handoff record advertising
+                # `checkpoint.path`, and round 2 opened that path to a missing
+                # file and restarted the work from nothing. Round 1's findings
+                # were only ever in a rotated-away provider context.
+                #
+                # This does not impose ceremony on a one-round mission — the
+                # instruction itself is already conditional ("create or update
+                # it only when another round needs current state, evidence
+                # paths, blockers, or a next action"), so a mission that ends in
+                # round 1 still writes nothing.
+                shared_checkpoint_instructions(
+                    checkpoint_path,
+                    role="engineer",
                 ),
             )
             if block

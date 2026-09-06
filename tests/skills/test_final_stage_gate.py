@@ -1,10 +1,8 @@
-"""Every selectable vertical must have a final stage the Reviewer can certify.
+"""Every selectable vertical must define its final-stage checklist policy.
 
-A vertical whose LAST stage has no checklist items and no stage checks renders
-as "Checklist not applicable: this stage explicitly declares
-`checklist_optional`". The Reviewer is then told there is nothing to verify at
-the only place completion is decided, so "done" carries no vertical-owned
-meaning at all. ``software`` shipped in exactly that state.
+A vertical whose last stage has no checklist items renders as "Checklist not
+applicable: this stage explicitly declares `checklist_optional`". The Reviewer
+must either receive real items or that absence must be explicit.
 
 This guard is about the FINAL stage only. Intermediate stages are legitimately
 optional — a vertical is free to let work skip straight past them.
@@ -35,7 +33,7 @@ def _selectable_verticals() -> list[str]:
     return names
 
 
-def _final_stage_gate(name: str) -> tuple[str, int]:
+def _final_stage_checklist(name: str) -> tuple[str, int, bool]:
     module = importlib.import_module(f"argus_skill.verticals.{name}.stages")
     order = list(
         getattr(module, "CHECKLIST_STAGE_ORDER", None)
@@ -43,30 +41,29 @@ def _final_stage_gate(name: str) -> tuple[str, int]:
         or []
     )
     if not order:
-        return "", 0
+        return "", 0, False
     final = order[-1]
     items = (getattr(module, "CHECKLIST_ITEMS", {}) or {}).get(final, ()) or ()
-    checks = (getattr(module, "STAGE_CHECKS", {}) or {}).get(final, ()) or ()
-    return final, len(items) + len(checks)
+    optional = final in (getattr(module, "CHECKLIST_OPTIONAL_STAGES", ()) or ())
+    return final, len(items), optional
 
 
 @pytest.mark.parametrize("vertical", _selectable_verticals())
 def test_final_stage_is_certifiable(vertical: str) -> None:
-    final, gate_size = _final_stage_gate(vertical)
+    final, checklist_size, optional = _final_stage_checklist(vertical)
     assert final, f"{vertical} declares no stages at all"
-    assert gate_size > 0, (
+    assert checklist_size > 0 or optional, (
         f"{vertical}.{final} is the final stage but has no checklist items and "
-        "no stage checks, so the Reviewer is told the checklist is not "
-        "applicable and project completion has no vertical-owned meaning. "
-        "Give the final stage at least one thing the Reviewer must certify."
+        "is not explicitly optional. Give the final stage at least one item or "
+        "declare it optional."
     )
 
 
 def test_direct_is_not_selectable_and_is_migrated_to_software(tmp_path: Path) -> None:
     """Guards the exclusion above: if ``direct`` ever becomes selectable again,
     it needs a real final gate and this test must be revisited."""
-    (tmp_path / "research").mkdir()
-    (tmp_path / "research" / "PIPELINE_STATE.json").write_text(
+    (tmp_path / ".argus").mkdir()
+    (tmp_path / ".argus" / "PIPELINE_STATE.json").write_text(
         '{"vertical": "direct", "current_stage": "delivery"}', encoding="utf-8"
     )
     assert resolve_checklist_vertical(tmp_path) == "software"

@@ -10,59 +10,41 @@ import type {
   StatusView,
   Turn,
 } from './types';
+import { authHeaders, authToken, compatibleApiMeta, requestWithTimeout } from '../api';
 
-const TOKEN_KEY = 'argus_web_token';
-let memoryToken = '';
-
-export function adoptTokenFromUrl(): void {
-  try {
-    const url = new URL(window.location.href);
-    const value = url.searchParams.get('token');
-    if (!value) return;
-    memoryToken = value;
-    localStorage.setItem(TOKEN_KEY, value);
-    url.searchParams.delete('token');
-    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-  } catch {
-    // The local API normally has no token. Storage failures must not block boot.
-  }
-}
-
-function token(): string {
-  if (memoryToken) return memoryToken;
-  try {
-    return localStorage.getItem(TOKEN_KEY) ?? '';
-  } catch {
-    return '';
-  }
-}
+const LOCAL_READ_TIMEOUT_MS = 12_000;
 
 export function apiAuthHeaders(json = false): Record<string, string> {
-  const value: Record<string, string> = {};
+  const value: Record<string, string> = { ...authHeaders() };
   if (json) value['Content-Type'] = 'application/json';
-  const auth = token();
-  if (auth) value.Authorization = `Bearer ${auth}`;
   return value;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, {
+  await compatibleApiMeta();
+  const requestInit: RequestInit = {
     ...init,
     headers: { ...apiAuthHeaders(Boolean(init.body)), ...(init.headers ?? {}) },
     cache: 'no-store',
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    let message = detail;
-    try {
-      const parsed = JSON.parse(detail) as { detail?: string };
-      message = parsed.detail ?? detail;
-    } catch {
-      // Keep plain-text detail.
+  };
+  const method = String(init.method ?? 'GET').toUpperCase();
+  const consume = async (response: Response): Promise<T> => {
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      let message = detail;
+      try {
+        const parsed = JSON.parse(detail) as { detail?: string };
+        message = parsed.detail ?? detail;
+      } catch {
+        // Keep plain-text detail.
+      }
+      throw new Error(message || `${init.method ?? 'GET'} ${path} failed (${response.status})`);
     }
-    throw new Error(message || `${init.method ?? 'GET'} ${path} failed (${response.status})`);
-  }
-  return (await response.json()) as T;
+    return (await response.json()) as T;
+  };
+  return method === 'GET'
+    ? requestWithTimeout(path, requestInit, LOCAL_READ_TIMEOUT_MS, consume)
+    : consume(await fetch(path, requestInit));
 }
 
 const projectPath = (sid: string, suffix = '') =>
@@ -119,7 +101,10 @@ export const api = {
   projects: (signal?: AbortSignal) => request<ProjectIndex>('/api/projects', { signal }),
 
   snapshot: (sid: string, signal?: AbortSignal) =>
-    request<Snapshot>(projectPath(sid, '/snapshot?events_limit=40&compact=false'), { signal }),
+    request<Snapshot>(
+      projectPath(sid, '/snapshot?events_limit=40&compact=false'),
+      { signal },
+    ),
 
   status: (sid: string, signal?: AbortSignal) =>
     request<StatusView>(projectPath(sid, '/status'), { signal }),
@@ -144,15 +129,18 @@ export const api = {
     request<ArtifactInfo>(projectPath(sid, `/artifact?${new URLSearchParams({ path })}`), { signal }),
 
   artifactBlob: async (sid: string, path: string, download = false, signal?: AbortSignal) => {
+    await compatibleApiMeta();
     const params = new URLSearchParams({ path });
     if (download) params.set('download', 'true');
-    const response = await fetch(projectPath(sid, `/artifact/raw?${params}`), {
+    const requestPath = projectPath(sid, `/artifact/raw?${params}`);
+    return requestWithTimeout(requestPath, {
       headers: apiAuthHeaders(),
       signal,
       cache: 'no-store',
+    }, LOCAL_READ_TIMEOUT_MS, async (response) => {
+      if (!response.ok) throw new Error(`Artifact unavailable (${response.status})`);
+      return response.blob();
     });
-    if (!response.ok) throw new Error(`Artifact unavailable (${response.status})`);
-    return response.blob();
   },
 
   gitDiff: (sid: string, signal?: AbortSignal) =>
@@ -172,6 +160,7 @@ export const api = {
     }),
 
   uploadAttachments: async (sid: string, files: File[], signal?: AbortSignal) => {
+    await compatibleApiMeta();
     const form = new FormData();
     files.forEach((file) => form.append('files', file, file.name));
     const response = await fetch(projectPath(sid, '/attachments'), {
@@ -227,6 +216,7 @@ export const api = {
     signal?: AbortSignal,
     attachments: Array<{ attachment_id: string }> = [],
   ): Promise<ManagerResult> {
+    await compatibleApiMeta();
     const path = projectPath(sid, '/message/stream');
     const response = await fetch(path, {
       method: 'POST',
@@ -281,7 +271,7 @@ export function openEventStream(
     if (closed) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const params = new URLSearchParams({ replay: '40', view: 'ui' });
-    const auth = token();
+    const auth = authToken();
     if (auth) params.set('token', auth);
     socket = new WebSocket(
       `${protocol}//${window.location.host}${projectPath(sid, '/stream')}?${params}`,

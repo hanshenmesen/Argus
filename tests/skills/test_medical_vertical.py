@@ -67,7 +67,7 @@ def test_medical_persists_and_starts_at_scope(tmp_path: Path) -> None:
     persist_vertical(tmp_path, "medical")
 
     state = json.loads(
-        (tmp_path / "research" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
+        (tmp_path / ".argus" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
     )
     assert state["vertical"] == "medical"
     assert state["current_stage"] == "scope"

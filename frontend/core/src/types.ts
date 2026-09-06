@@ -44,6 +44,7 @@ export interface Daemon {
   backend: string | null;
   backend_label?: string | null;
   global_daily_cap_usd: number | null;
+  mission_width?: number | null;
   read_status?: 'ok' | 'error';
   read_error?: string;
   protocol?: { name: string; major: number | null; minor: number | null };
@@ -91,8 +92,32 @@ export interface MissionOutcomeDimensions {
   resumable: boolean;
 }
 
+/** One safe, workspace-relative file selected for a completed delivery. */
+export interface DeliveryTarget {
+  path: string;
+  label: string;
+  source: string;
+  why: string;
+}
+
+/** Durable receipt shared by the completion event, chat card, and preview. */
+export interface DeliveryReceipt {
+  schema_version: number;
+  delivery_id: string;
+  kind: 'task_completed' | 'submission_certified' | string;
+  item_id: string;
+  title: string;
+  summary: string;
+  status: string;
+  review_status: string;
+  delivered_at: number;
+  primary_target: DeliveryTarget | null;
+  targets: DeliveryTarget[];
+}
+
 export interface ContinuousState {
   enabled: boolean;
+  open_ended?: boolean;
   objective: string;
   done_reason?: string;
   done_at?: string;
@@ -288,8 +313,9 @@ export interface MissionStorageView {
 }
 
 export interface MissionView {
-  schema_version: 4;
+  schema_version: 6;
   bootstrapped?: boolean;
+  health?: string;
   mission: {
     id: string;
     title: string;
@@ -304,6 +330,14 @@ export interface MissionView {
     campaign_elapsed_seconds: number;
   };
   stage: { id: string; label: string };
+  routing: {
+    route: string;
+    vertical: string;
+    workflow_mode: string;
+    lifetime: string;
+    continuous: boolean;
+    open_ended: boolean;
+  };
   round: { current: number; max: number };
   active_role: string;
   roles: MissionRoleView[];
@@ -317,6 +351,7 @@ export interface MissionView {
   achievement: MissionAchievement | null;
   review: { status: string; reason: string; rejected_attempts: number };
   frontier: { change: string; summary: string; updated_at: number };
+  delivery: DeliveryReceipt | null;
   outcome: Partial<MissionOutcomeDimensions>;
   last_event_ts: number;
   updated_at: number;
@@ -427,7 +462,9 @@ export interface ArtifactInfo {
   mime: string;
   size: number;
   mtime: number | null;
-  source?: 'manager_live' | 'reviewer_evidence' | 'research_registered';
+  /** Absolute local location shown on hover; reads still use the protected path. */
+  storage_path?: string;
+  source?: 'manager_live' | 'reviewer_evidence' | 'research_registered' | 'delivery';
   group_title?: string;
   /** Included by the single-artifact endpoint for text/HTML files only. */
   preview?: string;

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -345,8 +346,10 @@ def test_resolve_attachment_refs_rejects_tampered_payload(tmp_path: Path) -> Non
         )
 
 
-@pytest.mark.skipif(os.name != "posix", reason="secure attachment traversal is POSIX-only")
-def test_upload_rejects_symlinked_session_attachment_root(tmp_path: Path) -> None:
+def test_upload_rejects_symlinked_session_attachment_root(
+    tmp_path: Path,
+    require_symlink_support,
+) -> None:
     workspace = _make_project(tmp_path, "s-upload0")
     outside = tmp_path / "outside-root"
     outside.mkdir()
@@ -364,8 +367,10 @@ def test_upload_rejects_symlinked_session_attachment_root(tmp_path: Path) -> Non
     assert list(outside.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="secure attachment traversal is POSIX-only")
-def test_resolve_attachment_refs_rejects_symlinked_attachment_directory(tmp_path: Path) -> None:
+def test_resolve_attachment_refs_rejects_symlinked_attachment_directory(
+    tmp_path: Path,
+    require_symlink_support,
+) -> None:
     workspace = _make_project(tmp_path, "s-upload0")
     upload = upload_attachments(
         "s-upload0",
@@ -421,3 +426,28 @@ def test_upload_cleanup_does_not_follow_symlinked_attachment_directory(
     attachment_dir = workspace / ".argus" / "attachments" / "s-upload0" / "att-abcdef123456"
     assert not attachment_dir.exists()
     assert sentinel.read_text(encoding="utf-8") == "keep me\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction security test")
+def test_upload_rejects_junctioned_session_attachment_root(tmp_path: Path) -> None:
+    workspace = _make_project(tmp_path, "s-upload0")
+    outside = tmp_path / "outside-root"
+    outside.mkdir()
+    session_root = workspace / ".argus" / "attachments"
+    session_root.mkdir(parents=True)
+    junction = session_root / "s-upload0"
+    subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        with pytest.raises(ValueError, match="reparse point"):
+            upload_attachments(
+                "s-upload0",
+                [("notes.md", "text/markdown", b"hello\n")],
+                global_root=tmp_path,
+            )
+        assert list(outside.iterdir()) == []
+    finally:
+        junction.rmdir()

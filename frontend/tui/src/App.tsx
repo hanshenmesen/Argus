@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, useApp, useInput, useStdout } from 'ink';
 import {
   ApiClient,
+  type CreatedDaemon,
   type DaemonStartResult,
   type ArtifactInfo,
   type EventMsg,
@@ -51,6 +52,7 @@ import {
 import { MissionCockpit } from './components/MissionCockpit.js';
 import { consumePasteChunk } from './input/paste.js';
 import {
+  daemonReplacementInputIntent,
   DaemonReplacementPicker,
   type DaemonReplacementState,
 } from './components/DaemonReplacementPicker.js';
@@ -62,6 +64,7 @@ import { useManagerSession } from './appManagerSession.js';
 import { usePanelState } from './appPanelState.js';
 import { dispatchSlashCommand } from './appSlashDispatch.js';
 import { PendingDecisionPrompt } from './components/PendingDecisionPrompt.js';
+import type { ExitPolicy } from './args.js';
 
 export interface AppProps {
   host: string;
@@ -71,6 +74,9 @@ export interface AppProps {
   initialNotice?: string;
   initialAdmission?: DaemonStartResult;
   initialResumeContinuous?: boolean;
+  exitPolicy?: ExitPolicy;
+  onProjectChange?: (sid: string) => void;
+  trackDaemonCreation?: <T extends CreatedDaemon>(promise: Promise<T>) => Promise<T>;
 }
 
 function replacementState(
@@ -99,6 +105,9 @@ export function App({
   initialNotice = '',
   initialAdmission,
   initialResumeContinuous = false,
+  exitPolicy = 'detach',
+  onProjectChange,
+  trackDaemonCreation = (promise) => promise,
 }: AppProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -155,9 +164,17 @@ export function App({
     setDecisionError('');
   }, [pendingDecision?.id]);
   const creatingProjectRef = useRef(false);
+  const mountedRef = useRef(true);
   const dismissedAdmissionRef = useRef(0);
   const pasteActiveRef = useRef(false);
   const rewritingRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!stdout.isTTY) return;
@@ -264,12 +281,14 @@ export function App({
     cancelManagerTurn();
     projectRef.current = id;
     setProject(id);
+    onProjectChange?.(id);
     setReplacement(null);
     dismissedAdmissionRef.current = 0;
     return true;
   };
 
   const quit = () => {
+    mountedRef.current = false;
     cancelManagerTurn();
     shutdownFeed();
     exit();
@@ -332,7 +351,8 @@ export function App({
     creatingProjectRef.current = true;
     setDaemonDraft((current) => current ? { ...current, busy: true, error: '' } : current);
     try {
-      const created = await api.createDaemon(objective, name);
+      const created = await trackDaemonCreation(api.createDaemon(objective, name));
+      if (!mountedRef.current) return;
       setPanel(null);
       setDaemonDraft(null);
       changeProject(created.sid);
@@ -345,6 +365,7 @@ export function App({
           : `created ${created.sid} · message Argus when ready`,
       );
     } catch (error) {
+      if (!mountedRef.current) return;
       setDaemonDraft((current) => current ? {
         ...current,
         busy: false,
@@ -473,7 +494,10 @@ export function App({
       pasteActiveRef.current = paste.active;
       if (pendingDecision && paste.text) {
         const freeform = pendingDecision.options.length === 0;
-        const custom = pendingDecision.options.findIndex((option) => option.requires_note);
+        const selected = pendingDecision.options[decisionSelection];
+        const custom = selected?.requires_note
+          ? decisionSelection
+          : pendingDecision.options.findIndex((option) => option.id === 'custom');
         if (freeform || custom >= 0) {
           if (custom >= 0) {
             setDecisionSelection(custom);
@@ -561,7 +585,7 @@ export function App({
         return;
       }
       if (input && !key.ctrl && !key.meta) {
-        const custom = pendingDecision.options.findIndex((option) => option.requires_note);
+        const custom = pendingDecision.options.findIndex((option) => option.id === 'custom');
         if (custom >= 0) {
           setDecisionSelection(custom);
           setDecisionNote((current) => insert(current, input));
@@ -571,21 +595,24 @@ export function App({
       return;
     }
     if (replacement) {
-      if (key.escape) {
+      const intent = daemonReplacementInputIntent(replacement, input, key);
+      if (intent === 'exit') {
+        quit();
+      } else if (intent === 'dismiss') {
         dismissedAdmissionRef.current = Date.now() / 1000;
         setReplacement(null);
         setNotice('new work remains queued');
-      } else if (!replacement.busy && (key.downArrow || input === 'j')) {
+      } else if (intent === 'next') {
         setReplacement((current) => current ? {
           ...current,
           selection: moveSelection(current.selection, current.running.length, 1),
         } : current);
-      } else if (!replacement.busy && (key.upArrow || input === 'k')) {
+      } else if (intent === 'previous') {
         setReplacement((current) => current ? {
           ...current,
           selection: moveSelection(current.selection, current.running.length, -1),
         } : current);
-      } else if (!replacement.busy && key.return) {
+      } else if (intent === 'replace') {
         void replaceRunningDaemon();
       }
       return;
@@ -611,7 +638,12 @@ export function App({
         return;
       }
       setPendingExit(true);
-      setNotice('Ctrl-C again to exit · Ctrl-D also quits · the daemon keeps running');
+      const policyNotice = exitPolicy === 'stop-all'
+        ? 'current executor and this launch\'s owned API will stop gracefully'
+        : exitPolicy === 'stop-api'
+        ? 'executor keeps running; this launch\'s owned API will stop'
+        : 'terminal UI exits; local API and executor keep running';
+      setNotice(`Ctrl-C again to exit · Ctrl-D also quits · ${policyNotice}`);
       return;
     }
     if (key.ctrl && input === 'd') {
@@ -834,7 +866,7 @@ export function App({
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Header width={terminal.columns} />
+      <Header width={terminal.columns} vertical={missionView?.routing.vertical} />
       {!slashMenuOpen ? <GuardianBanner alert={activeGuardianAlert(events)} /> : null}
       {pendingDecision ? (
         <PendingDecisionPrompt

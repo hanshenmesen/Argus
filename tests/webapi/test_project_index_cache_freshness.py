@@ -12,6 +12,7 @@ mutating endpoint added later cannot forget to do it.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,37 @@ def test_a_rename_is_visible_on_the_very_next_poll(home: Path) -> None:
     # No sleep: the point is that the operator does not have to wait out a TTL.
     assert "after rename" in _names(client)
     assert _snapshot_name(client) == "after rename"
+
+
+def test_project_index_uses_durable_activity(home: Path) -> None:
+    events = home / "projects" / "s-cachetest" / "events.jsonl"
+    events.write_text('{"type":"round.start"}\n')
+    os.utime(events, (100, 100))
+    client = TestClient(server.create_app(global_root=home))
+
+    payload = client.get("/api/projects").json()
+    project = next(row for row in payload["projects"] if row["id"] == "s-cachetest")
+    snapshot = client.get(
+        "/api/projects/s-cachetest/snapshot?compact=true&events_limit=30"
+    ).json()
+
+    assert project["last_active"] == 100
+    assert snapshot["session"]["last_active"] == 100
+
+
+def test_legacy_snapshot_uses_durable_activity(tmp_path: Path) -> None:
+    project = tmp_path / "projects" / "s-legacy"
+    project.mkdir(parents=True)
+    events = project / "events.jsonl"
+    events.write_text('{"type":"round.start"}\n')
+    os.utime(events, (100, 100))
+    client = TestClient(server.create_app(global_root=tmp_path))
+
+    snapshot = client.get(
+        "/api/projects/s-legacy/snapshot?compact=true&events_limit=30"
+    ).json()
+
+    assert snapshot["session"]["last_active"] == 100
 
 
 def test_repeated_polls_reuse_one_scan(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,24 +158,37 @@ def test_repeated_snapshot_polls_reuse_one_build(
     assert builds == [1]
 
 
-def test_repeated_compact_snapshot_polls_reuse_one_manager_prewarm(
-    home: Path, monkeypatch: pytest.MonkeyPatch
+def test_repeated_compact_snapshot_polls_do_not_start_manager_contexts(
+    home: Path,
 ) -> None:
-    prewarms: list[tuple[str, Path | None]] = []
+    from argus_skill.webapi import manager_state
 
-    def counting_prewarm(sid: str, *, global_root=None) -> None:  # noqa: ANN001
-        prewarms.append((sid, Path(global_root) if global_root is not None else None))
-
-    monkeypatch.setattr(
-        "argus_skill.webapi.manager_state.schedule_manager_prewarm",
-        counting_prewarm,
-    )
+    manager_state._STATES.clear()
     client = TestClient(server.create_app(global_root=home))
 
     for _ in range(10):
         response = client.get("/api/projects/s-cachetest/snapshot?compact=true&events_limit=30")
         assert response.status_code == 200
 
+    assert manager_state._STATES == {}
+
+
+def test_active_snapshot_polls_schedule_one_manager_prewarm(
+    home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prewarms: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        "argus_skill.webapi.manager_state.schedule_manager_prewarm",
+        lambda sid, *, global_root=None: prewarms.append((sid, Path(global_root))),
+    )
+    client = TestClient(server.create_app(global_root=home))
+
+    response = client.get(
+        "/api/projects/s-cachetest/snapshot"
+        "?compact=true&events_limit=30&prewarm=true"
+    )
+
+    assert response.status_code == 200
     assert prewarms == [("s-cachetest", home)]
 
 

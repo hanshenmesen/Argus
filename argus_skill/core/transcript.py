@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 _FNAME = "transcript.jsonl"
 
@@ -28,6 +28,7 @@ def append_turn(
     text: str,
     *,
     message_id: str = "",
+    metadata: Mapping[str, Any] | None = None,
 ) -> bool:
     """Append one conversation turn. ``role`` is ``"operator"`` or ``"argus"``."""
     try:
@@ -43,6 +44,20 @@ def append_turn(
                 if prior.get("message_id") == stable_id:
                     return False
             rec["message_id"] = stable_id
+        if metadata:
+            # Transcript metadata is intentionally narrow: it carries a durable
+            # delivery action across Web/API replay without turning transcripts
+            # into an unbounded event-log mirror.
+            for key in (
+                "mission_result",
+                "item_id",
+                "success",
+                "summary",
+                "delivery_id",
+                "delivery",
+            ):
+                if key in metadata:
+                    rec[key] = metadata[key]
         with p.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return True
@@ -70,18 +85,3 @@ def read_turns(life_dir: Any, *, limit: int | None = None) -> list[dict[str, Any
         return out[-limit:] if (limit and limit > 0) else out
     except Exception:  # noqa: BLE001
         return []
-
-
-def first_operator_text(life_dir: Any) -> str:
-    """Return the first operator turn for transcript inspection."""
-    for turn in read_turns(life_dir):
-        if turn.get("role") == "operator":
-            return str(turn.get("text") or "")
-    return ""
-
-
-def has_transcript(life_dir: Any) -> bool:
-    try:
-        return _path(life_dir).exists()
-    except Exception:  # noqa: BLE001
-        return False

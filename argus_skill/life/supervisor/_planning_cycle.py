@@ -9,7 +9,7 @@ from typing import Any
 
 from ...core.event_catalog import EventType
 from ...core.planner_verdict import PlannerVerdictStatus
-from ._constants import MANAGER_RECONCILE_AFTER_IDLE_CYCLES
+from ._constants import MANAGER_RECONCILE_AFTER_IDLE_CYCLES, PLAN_RETRY
 from ._planning_cycle_completion import PlanningCycleCompletionMixin
 from ._planning_cycle_enqueue import PlanningCycleEnqueueMixin
 from ._planning_cycle_helpers import (
@@ -23,6 +23,43 @@ from ._planning_cycle_verdict import PlanningCycleVerdictMixin
 
 log = logging.getLogger(__name__)
 
+_LIVE_WAIT_OBSERVE_MARKERS = (
+    "observe only",
+    "observe the existing",
+    "observe the current",
+    "只观察",
+    "观察现有",
+)
+_LIVE_WAIT_STOP_MARKERS = (
+    "remains live, stop",
+    "still running, stop",
+    "stop without",
+    "record current live status and stop",
+    "仍在运行则停止",
+)
+_INDEPENDENT_WORK_MARKERS = (
+    "independently implement",
+    "independently continue",
+    "regardless of",
+    "in parallel",
+    "while the task runs",
+    "while the job runs",
+    "同时",
+    "并行",
+    "无论",
+)
+_OPERATOR_WAIT_MARKERS = (
+    "operator",
+    "credential",
+    "authorization",
+    "approval",
+    "human input",
+    "人工",
+    "凭据",
+    "授权",
+    "批准",
+)
+
 
 class PlanningCycleMixin(
     PlanningCycleIntakeMixin,
@@ -30,6 +67,211 @@ class PlanningCycleMixin(
     PlanningCycleCompletionMixin,
     PlanningCycleEnqueueMixin,
 ):
+    def _waitable_subagent_jobs(self) -> list[Any]:
+        try:
+            from ...engineer.external_work import scan_external_work
+
+            return [
+                job
+                for job in scan_external_work(self._project_workdir())
+                if job.source == "subagent" and job.waitable
+            ]
+        except Exception:  # noqa: BLE001 - liveness discovery is fail-soft
+            log.debug("failed to inspect waitable subagents", exc_info=True)
+            return []
+
+    @staticmethod
+    def _text_references_live_subagents(text: str, jobs: list[Any]) -> bool:
+        text = " ".join(str(text or "").split()).casefold()
+        return any(job.work_id.casefold() in text for job in jobs)
+
+    @staticmethod
+    def _text_is_monitor_only(text: str) -> bool:
+        text = " ".join(str(text or "").split()).casefold()
+        if any(marker in text for marker in _OPERATOR_WAIT_MARKERS):
+            return False
+        if any(marker in text for marker in _INDEPENDENT_WORK_MARKERS):
+            return False
+        if any(marker in text for marker in _LIVE_WAIT_OBSERVE_MARKERS):
+            return True
+        has_status_probe = (
+            "argus_skill.tools.subagent status" in text
+            or "subagent status --task-id" in text
+            or "check its status" in text
+            or "检查其状态" in text
+        )
+        return has_status_probe and any(
+            marker in text for marker in _LIVE_WAIT_STOP_MARKERS
+        )
+
+    @classmethod
+    def _task_only_waits_for_live_subagents(
+        cls,
+        task: Any,
+        jobs: list[Any],
+    ) -> bool:
+        reference_text = " ".join(
+            str(value or "")
+            for value in (
+                getattr(task, "title", ""),
+                getattr(task, "objective", ""),
+                getattr(task, "acceptance_check", ""),
+            )
+        )
+        monitor_text = " ".join(
+            str(value or "")
+            for value in (
+                getattr(task, "objective", ""),
+                getattr(task, "acceptance_check", ""),
+            )
+        )
+        return cls._text_references_live_subagents(
+            reference_text,
+            jobs,
+        ) and cls._text_is_monitor_only(monitor_text)
+
+    def _live_subagent_event_wait_contract(
+        self,
+        jobs: list[Any],
+    ) -> Any | None:
+        if not jobs:
+            return None
+        from ...planner import WaitingContract
+
+        rows = sorted(
+            (
+                job.work_id,
+                job.run_id or f"started:{job.started_at:.6f}",
+            )
+            for job in jobs
+        )
+        token = hashlib.sha256(repr(rows).encode("utf-8")).hexdigest()
+        job_ids = ", ".join(row[0] for row in rows)
+        observed_revision = self._planner_waiting_observed_revision(
+            wake_on=["subagent_state"],
+            watched_paths=[],
+        )
+        revalidated_rows = sorted(
+            (
+                job.work_id,
+                job.run_id or f"started:{job.started_at:.6f}",
+            )
+            for job in self._waitable_subagent_jobs()
+        )
+        if rows != revalidated_rows:
+            return None
+        return WaitingContract(
+            blocker_fingerprint=f"live-subagents:{token[:24]}",
+            recheck_condition=f"durable task state changes: {job_ids}",
+            recheck_token=token,
+            wait_mode="event",
+            wake_on=("subagent_state",),
+            observed_revision=observed_revision,
+        )
+
+    def _normalize_live_subagent_wait(self, verdict: Any) -> Any:
+        jobs = self._waitable_subagent_jobs()
+        if not jobs:
+            return verdict
+        source = ""
+        waiting = bool(getattr(verdict, "waiting", False))
+        existing_contract = getattr(verdict, "waiting_contract", None)
+        if waiting:
+            waiting_text = " ".join(
+                str(value or "")
+                for value in (
+                    getattr(verdict, "waiting_reason", ""),
+                    getattr(verdict, "reason", ""),
+                    getattr(existing_contract, "blocker_fingerprint", ""),
+                    getattr(existing_contract, "recheck_condition", ""),
+                    getattr(existing_contract, "recheck_token", ""),
+                )
+            ).casefold()
+            references_live_job = self._text_references_live_subagents(
+                waiting_text,
+                jobs,
+            )
+            monitor_only_wait = self._text_is_monitor_only(waiting_text)
+            if references_live_job and monitor_only_wait and existing_contract is None:
+                source = "missing_wait_contract"
+            elif existing_contract is not None:
+                wake_on = set(getattr(existing_contract, "wake_on", ()) or ())
+                existing_wait_mode = str(
+                    getattr(existing_contract, "wait_mode", "poll") or "poll"
+                ).strip().lower()
+                subagent_event_contract = (
+                    existing_wait_mode == "event"
+                    and bool(
+                        {"subagent_state", "subagent_terminal"}.intersection(
+                            wake_on
+                        )
+                    )
+                )
+                if (
+                    references_live_job
+                    and (monitor_only_wait or subagent_event_contract)
+                    and not bool(
+                        getattr(existing_contract, "operator_action_required", False)
+                    )
+                    and not bool(
+                        getattr(
+                            existing_contract,
+                            "stage_reconciliation_required",
+                            False,
+                        )
+                    )
+                ):
+                    if existing_wait_mode != "event":
+                        source = "poll_wait_contract"
+                    elif not str(
+                        getattr(existing_contract, "observed_revision", "") or ""
+                    ):
+                        source = "unvalidated_event_wait_contract"
+        else:
+            tasks = list(getattr(verdict, "new_tasks", []) or [])
+            if tasks and all(
+                self._task_only_waits_for_live_subagents(task, jobs)
+                for task in tasks
+            ):
+                source = "status_only_task"
+        if not source:
+            return verdict
+        contract = self._live_subagent_event_wait_contract(jobs)
+        if contract is None:
+            return verdict
+        reason = (
+            "healthy durable work is already self-watched, so this cycle's "
+            "status-probe tasks were dropped rather than run. Waiting is not "
+            "the only move left: a mission that does not need this job's result "
+            "— a baseline to reproduce, analysis written against the agreed "
+            "schema, a section the paper already owes — would be scheduled "
+            "normally and run beside it. Only status probes are suppressed here."
+        )
+        self._emit(
+            {
+                "type": "life.planner.external_poll_suppressed",
+                "cycle": self._planning_cycles,
+                "source": source,
+                "work_ids": [job.work_id for job in jobs],
+                "recheck_token": contract.recheck_token,
+                "suppressed_task_titles": [
+                    str(getattr(task, "title", "") or "")
+                    for task in list(getattr(verdict, "new_tasks", []) or [])
+                ],
+            }
+        )
+        from dataclasses import replace
+
+        return replace(
+            verdict,
+            project_done=False,
+            reason=reason,
+            new_tasks=[],
+            waiting=True,
+            waiting_reason=reason,
+            waiting_contract=contract,
+        )
+
     def _independent_overlap_task(self, verdict: Any) -> Any | None:
         """Turn a live-job wait into one useful, non-conflicting mission."""
         if not bool(getattr(verdict, "waiting", False)):
@@ -41,24 +283,17 @@ class PlanningCycleMixin(
         contract = getattr(verdict, "waiting_contract", None)
         if bool(getattr(contract, "operator_action_required", False)):
             return None
-        root = self._artifact_root()
-        try:
-            from ...engineer.external_work import scan_external_work
-
-            watched = [
-                job
-                for job in scan_external_work(root)
-                if job.source == "subagent" and job.waitable
-            ]
-        except Exception:  # noqa: BLE001 - overlap is a throughput optimization
+        if str(getattr(contract, "wait_mode", "") or "").strip().lower() == "event":
             return None
+        watched = self._waitable_subagent_jobs()
         if not watched:
             return None
+        root = self._artifact_root()
         title = "Advance independent work while background job runs"
         try:
             if any(
                 item.status in {"pending", "running"} and item.title == title
-                for item in self.memory.backlog.all()
+                for item in self.memory.backlog.active()
             ):
                 return None
         except Exception:  # noqa: BLE001
@@ -82,7 +317,6 @@ class PlanningCycleMixin(
         return TaskSpec(
             title=title,
             objective=objective,
-            impact_score=5,
             impact_area="throughput",
             evidence=f"live self-watched jobs: {job_ids}",
             hypothesis=(
@@ -192,11 +426,13 @@ class PlanningCycleMixin(
 
         from ...skills.stage_machine import current_stage
 
-        stage = current_stage(self._artifact_root()).strip().lower()
+        root = Path(self._artifact_root())
+        candidate_root = Path(self._project_workdir())
+        stage = current_stage(root).strip().lower()
         if not stage:
             return None
         items = sorted(
-            self.memory.backlog.all(),
+            self.memory.backlog.history(),
             key=lambda item: (float(item.finished_ts or 0), float(item.ts or 0)),
             reverse=True,
         )
@@ -207,26 +443,38 @@ class PlanningCycleMixin(
         )
         for item in items:
             outcome = item.outcome if isinstance(item.outcome, dict) else {}
+            item_stage = self._item_pipeline_stage(item)
+            if (
+                (item_stage and item_stage != stage)
+                or not str(outcome.get("review_status") or "").strip()
+                or str(outcome.get("interruption_kind") or "none") != "none"
+            ):
+                continue
             if (
                 item.status != "done"
                 or self._item_skips_stage_transition(item)
+                # ``deferred`` is a Planner node that held the stage instead of
+                # closing it — exactly the reviewed evidence this replay exists
+                # to recover. ``intentionally_skipped`` stays excluded: there
+                # the stage writer was suppressed on purpose and the verdict is
+                # not the campaign's to reuse.
                 or str(outcome.get("stage_certification") or "")
-                != "not_assessed"
+                not in {"not_assessed", "deferred"}
             ):
-                continue
+                return None
             handoff_root = handoff_base / "handoffs" / item.id
             try:
                 mission = json.loads(
                     (handoff_root / "mission.json").read_text(encoding="utf-8")
                 )
             except (OSError, TypeError, ValueError):
-                continue
+                return None
             if (
                 not isinstance(mission, dict)
                 or str(mission.get("mission_id") or "") != item.id
                 or str(mission.get("stage") or "").strip().lower() != stage
             ):
-                continue
+                return None
             for handoff_path in sorted(
                 handoff_root.glob("round-[0-9][0-9][0-9][0-9].json"),
                 reverse=True,
@@ -245,6 +493,56 @@ class PlanningCycleMixin(
                     or not str(review.get("reason") or "").strip()
                 ):
                     continue
+                mission_scope = str(mission.get("scope") or "").strip().lower()
+                manuscript_binding = review.get("manuscript_snapshot")
+                if (
+                    mission_scope == "final_submission"
+                    and not isinstance(manuscript_binding, dict)
+                ):
+                    from ...core.stage_certificate import latest_stage_review
+
+                    stage_review = latest_stage_review(self.memory.root, stage)
+                    if (
+                        not isinstance(stage_review, dict)
+                        or str(stage_review.get("task_id") or "") != item.id
+                        or str(stage_review.get("review_status") or "") != "done"
+                        or Path(
+                            str(stage_review.get("project_root") or "")
+                        ).resolve()
+                        != candidate_root.resolve()
+                    ):
+                        continue
+                    manuscript_binding = stage_review.get("manuscript_snapshot")
+                    try:
+                        reviewed_at = float(stage_review.get("recorded_at") or 0.0)
+                        rendered_at = (candidate_root / "paper" / "main.pdf").stat().st_mtime
+                    except (OSError, TypeError, ValueError):
+                        continue
+                    if reviewed_at <= 0.0 or rendered_at > reviewed_at:
+                        continue
+                if mission_scope == "final_submission":
+                    if not isinstance(manuscript_binding, dict):
+                        continue
+                    try:
+                        from ...core.manuscript_snapshot import (
+                            manuscript_review_status,
+                        )
+
+                        if manuscript_review_status(
+                            {"manuscript_snapshot": manuscript_binding},
+                            candidate_root,
+                        ).get("status") != "current":
+                            continue
+                    except Exception:  # noqa: BLE001 - exact binding fails closed
+                        continue
+                    reviewed_signature = str(
+                        review.get("final_submission_signature") or ""
+                    )
+                    if (
+                        reviewed_signature
+                        and reviewed_signature != self._final_submission_signature()
+                    ):
+                        continue
                 return (
                     item,
                     SimpleNamespace(
@@ -255,14 +553,26 @@ class PlanningCycleMixin(
                             review.get("operator_question") or ""
                         ).strip(),
                         review_source="reviewer",
+                        manuscript_snapshot=manuscript_binding,
                     ),
-                    str(mission.get("scope") or ""),
+                    mission_scope,
                 )
+            return None
         return None
 
     def _reconcile_reviewed_stage_empty_plan(self, verdict: Any) -> str:
-        """Replay real current-stage review evidence to the Manager after upgrade."""
-        if not getattr(self.config, "open_ended", False):
+        """Replay real current-stage review evidence to the Manager.
+
+        Gated on ``continuous``, not ``open_ended``. ``open_ended`` answers a
+        different question — whether a Planner ``project_done`` should be
+        honoured or ignored — and using it here made stage traversal a
+        privilege of never-finishing campaigns. Reconcile before asking the
+        Planner for more work; otherwise its required no-empty-task repair can
+        invent another same-stage mission before the Manager sees accepted
+        review evidence. The empty-plan path still calls this method for
+        persisted campaigns created by older runtimes.
+        """
+        if not getattr(self.config, "continuous", False):
             return ""
         recovered = self._latest_unassessed_review_for_current_stage()
         if recovered is None:
@@ -278,7 +588,9 @@ class PlanningCycleMixin(
             planner_verdict=None,
             project_root=root,
             on_event=getattr(self.sink, "handle_event", None),
-            open_ended=True,
+            # The real value, not a literal: a bounded campaign reaching this
+            # path must not be described to the Manager as open-ended.
+            open_ended=bool(getattr(self.config, "open_ended", False)),
             continuous_objective=self.config.continuous_objective,
             mission_scope=mission_scope,
         )
@@ -293,7 +605,30 @@ class PlanningCycleMixin(
             "trigger": "reviewed_stage_empty_plan_reconciliation",
             "recovered_item_id": item.id,
         })
-        if decision.source == "manager_llm":
+        if (
+            decision.action == "complete"
+            and mission_scope.strip().lower() == "final_submission"
+        ):
+            manuscript_binding = getattr(review, "manuscript_snapshot", None)
+            if not isinstance(manuscript_binding, dict):
+                return ""
+            if not self._emit({
+                "type": EventType.LIFE_MISSION_COMPLETED,
+                "item_id": item.id,
+                "title": item.title,
+                "objective": item.objective,
+                "scope": "final_submission",
+                "independent_review_required": True,
+                "success": True,
+                "status": "done",
+                "summary": "Recovered the existing independent final certification.",
+                "final_submission_certified": True,
+                "final_submission_signature": self._final_submission_signature(),
+                "manuscript_snapshot": dict(manuscript_binding),
+                "certification_recovered": True,
+            }):
+                return ""
+        if decision.source in {"manager_llm", "stage_completion_gate_hold"}:
             outcome = dict(item.outcome)
             outcome["stage_certification"] = {
                 "advance": "certified",
@@ -302,7 +637,7 @@ class PlanningCycleMixin(
                 "rollback": "revoked",
             }.get(decision.action, "not_assessed")
             self.memory.backlog.update(item.id, outcome=outcome)
-        if decision.action not in {"advance", "rollback"}:
+        if decision.action not in {"advance", "complete", "rollback"}:
             return ""
         self._emit_status(
             f"manager reconciled reviewed stage to {decision.target_stage}"
@@ -360,6 +695,19 @@ class PlanningCycleMixin(
         explicitly_requested = bool(
             getattr(contract, "stage_reconciliation_required", False)
         )
+        wake_on = set(getattr(contract, "wake_on", ()) or ())
+        if (
+            str(getattr(contract, "wait_mode", "") or "").strip().lower()
+            == "event"
+            and not explicitly_requested
+            and str(getattr(contract, "blocker_fingerprint", "") or "").startswith(
+                "live-subagents:"
+            )
+            and bool(wake_on)
+            and wake_on <= {"subagent_state", "subagent_terminal"}
+        ):
+            self._planner_waits_since_reconciliation = 0
+            return ""
 
         root = self._artifact_root()
         from ...skills.stage_machine import current_stage
@@ -580,7 +928,7 @@ class PlanningCycleMixin(
             if persisted is None:
                 return {}
             self._emit({
-                "type": "life.vertical.resolved",
+                "type": EventType.LIFE_VERTICAL_RESOLVED,
                 "vertical": persisted,
                 "profile_hint": "persisted",
                 "agent_layer": "planner",
@@ -588,9 +936,11 @@ class PlanningCycleMixin(
             return {"vertical": persisted}
 
         mgr = self._bound_manager()
-        from ...manager.directive import active_manager_directive_message
+        from ...core.operator_context import build_operator_context_block
 
-        directive = active_manager_directive_message(artifact_root)
+        directive, _operator_context_revision = build_operator_context_block(
+            "manager", artifact_root, consume_once=False
+        )
         selection_objective = "\n\n".join(
             part
             for part in (
@@ -640,7 +990,7 @@ class PlanningCycleMixin(
         except Exception:  # noqa: BLE001 - stage is prompt context only
             pass
         self._emit({
-            "type": "life.vertical.resolved",
+            "type": EventType.LIFE_VERTICAL_RESOLVED,
             "vertical": division.vertical,
             "profile_hint": "manager-per-mission",
             "agent_layer": "planner",
@@ -659,17 +1009,18 @@ class PlanningCycleMixin(
         the planner fails and should be retried later.
 
         This orchestrates the planning-cycle lifecycle phases in order: intake
-        gating, preflight short-circuits, planner invocation, verdict
-        normalization, waiting handling, project_done normalization, the
-        no-new-tasks rejection, and finally backlog dedupe/enqueue/commit. Each
-        phase mutates a shared ``_PlanCycleState`` scratch object and returns
-        ``None`` to continue the cycle, or a non-``None`` result that the
-        caller should return immediately.
+        gating, preflight short-circuits, reviewed-stage reconciliation,
+        planner invocation, verdict normalization, waiting handling,
+        project_done normalization, the no-new-tasks rejection, and finally
+        backlog dedupe/enqueue/commit. Each phase mutates a shared
+        ``_PlanCycleState`` scratch object and returns ``None`` to continue the
+        cycle, or a non-``None`` result to return after applying task retirement.
         """
         state = _PlanCycleState(revision_request)
         for phase in (
             self._pc_intake_gate,
             self._pc_preflight_shortcircuits,
+            self._pc_reconcile_reviewed_stage,
             self._pc_invoke_planner,
             self._pc_normalize_verdict,
             self._pc_handle_waiting,
@@ -681,8 +1032,37 @@ class PlanningCycleMixin(
         ):
             result = phase(state)
             if result is not None:
-                return result
+                break
+        if state.verdict is not None and not state.verdict.error:
+            self._pc_retire_tasks(state)
+        if result is not None:
+            return result
         return self._pc_emit_final_verdict(state)
+
+    def _pc_reconcile_reviewed_stage(
+        self,
+        state: _PlanCycleState,
+    ) -> bool | None | str:
+        if state.revision_request is not None:
+            return None
+        action = self._reconcile_reviewed_stage_empty_plan(None)
+        if action in {"advance", "complete", "rollback"}:
+            return PLAN_RETRY
+        if (
+            not state.had_operator_messages
+            and self._effective_final_certification_gate(self._artifact_root())
+            and self._journal_has_final_certification()
+        ):
+            from ...planner import PlannerVerdict
+
+            state.verdict = PlannerVerdict(
+                project_done=True,
+                waiting=False,
+                new_tasks=[],
+                reason="independent final certification is current",
+            )
+            return self._pc_normalize_project_done(state)
+        return None
 
 
 __all__ = [

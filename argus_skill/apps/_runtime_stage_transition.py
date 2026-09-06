@@ -30,6 +30,7 @@ class StageTransitionMixin:
         mission_scope: str = "",
         open_ended: bool = False,
         continuous_objective: str = "",
+        stage_closing: bool = False,
     ) -> dict:
         """Hand this round's reviewer verdict to the Manager — the SOLE
         writer of the pipeline stage — and let it judge
@@ -43,6 +44,24 @@ class StageTransitionMixin:
         """
         try:
             final_review = getattr(rounds_list[-1], "review", None) if rounds_list else None
+            projection_context = None
+            try:
+                from ..manager._session_ops import manager_pipeline_lock
+                from ..manager.control_state import CampaignControlStore
+
+                state_root = Path(getattr(self, "_manager_session_root", workdir))
+                control = CampaignControlStore(
+                    state_root,
+                    project_root=getattr(self, "_artifact_root", workdir),
+                )
+                with manager_pipeline_lock(state_root), control.locked():
+                    projection_context = (
+                        control,
+                        control.campaign_identity(),
+                        control.read_head(),
+                    )
+            except Exception:  # noqa: BLE001 - projection cannot own the verdict
+                log.debug("manager control snapshot unavailable", exc_info=True)
             st = self.manager.bind_execution_workdir(workdir).decide_stage_transition(
                 review=final_review,
                 project_root=getattr(self, "_artifact_root", workdir),
@@ -51,6 +70,7 @@ class StageTransitionMixin:
                 mission_scope=mission_scope,
                 open_ended=open_ended,
                 continuous_objective=continuous_objective,
+                stage_closing=stage_closing,
             )
             decision = {
                 "action": st.action,
@@ -61,25 +81,18 @@ class StageTransitionMixin:
                 "diagnostic": st.diagnostic,
             }
             final_review_status = str(getattr(final_review, "status", "") or "").strip().lower()
-            if st.action != "hold" or final_review_status in {"done", "blocked"}:
+            if projection_context is not None and st.source != "stale_stage_context_hold" and (
+                st.action != "hold" or final_review_status in {"done", "blocked"}
+            ):
                 try:
                     import hashlib
                     import json
 
-                    from ..manager.control_state import CampaignControlStore
+                    control, identity, expected_head = projection_context
+                    from ..core.pipeline_state import pipeline_state_path
 
-                    state_root = Path(getattr(self, "_manager_session_root", workdir))
-                    control = CampaignControlStore(
-                        state_root,
-                        project_root=getattr(self, "_artifact_root", workdir),
-                    )
-                    identity = control.campaign_identity(
-                        objective=continuous_objective,
-                    )
-                    pipeline_path = (
+                    pipeline_path = pipeline_state_path(
                         Path(getattr(self, "_artifact_root", workdir))
-                        / "research"
-                        / "PIPELINE_STATE.json"
                     )
                     try:
                         pipeline_bytes = pipeline_path.read_bytes()
@@ -104,30 +117,36 @@ class StageTransitionMixin:
                             separators=(",", ":"),
                         ).encode("utf-8")
                     ).hexdigest()
-                    control_head = control.clear_wait_for_new_evidence(
-                        identity=identity,
-                        stage_projection={
-                            "action": st.action,
-                            "current_stage": st.current_stage,
-                            "target_stage": st.target_stage,
-                            "pipeline_state_sha256": pipeline_sha256,
-                        },
-                        terminal_evidence=[
-                            {
-                                **review_projection,
-                                "sha256": review_sha256,
-                            }
-                        ],
-                        reason="Manager committed stage and terminal review state",
-                    )
-                    decision["campaign_epoch"] = control_head.campaign_epoch
-                    decision["state_revision"] = control_head.state_revision
+                    with manager_pipeline_lock(control.state_root):
+                        control_head = control.clear_wait_for_new_evidence_if_current(
+                            identity=identity,
+                            expected_head=expected_head,
+                            stage_projection={
+                                "action": st.action,
+                                "current_stage": st.current_stage,
+                                "target_stage": st.target_stage,
+                                "pipeline_state_sha256": pipeline_sha256,
+                            },
+                            terminal_evidence=[
+                                {
+                                    **review_projection,
+                                    "sha256": review_sha256,
+                                }
+                            ],
+                            reason="Manager committed stage and terminal review state",
+                        )
+                    if control_head is not None:
+                        decision["campaign_epoch"] = control_head.campaign_epoch
+                        decision["state_revision"] = control_head.state_revision
                 except Exception:  # noqa: BLE001 - projection cannot own verdict
                     log.debug(
                         "manager control revision projection skipped",
                         exc_info=True,
                     )
-            sink.handle_event({"type": "life.manager.stage_decision", **decision})
+            try:
+                sink.handle_event({"type": "life.manager.stage_decision", **decision})
+            except Exception:  # noqa: BLE001 - an event failure cannot undo the commit
+                log.warning("could not emit committed Manager stage decision", exc_info=True)
             return decision
         except Exception:  # noqa: BLE001 — stage decision must never break a mission
             log.debug("manager stage decision skipped", exc_info=True)

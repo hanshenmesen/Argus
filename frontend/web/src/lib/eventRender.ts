@@ -1,6 +1,7 @@
 import type { EventMsg } from '../api';
 import { theme } from './theme';
 import { missionOutcomePresentation } from '../../../core/src';
+import { formatMissionRouting } from '../../../core/src/missionView';
 import {
   eventKey as sharedEventKey,
   isReasoning,
@@ -39,6 +40,26 @@ function trunc(s: string, n: number): string {
 }
 const firstLine = (s: unknown) => String(s ?? '').split('\n')[0]?.trim() ?? '';
 const S = (ev: EventMsg, k: string) => String((ev as Record<string, unknown>)[k] ?? '');
+
+function managerFailureText(ev: EventMsg, locale: Locale): string {
+  const l = (en: string, zh: string) => locale === 'zh-CN' ? zh : en;
+  const phase = S(ev, 'phase');
+  const cause = S(ev, 'cause') || S(ev, 'backend_error');
+  const raw = S(ev, 'error');
+  if (!phase || !cause) return `${l('routing failed', '分流失败')} ${trunc(raw, 140)}`;
+  const phaseLabel: Record<string, string> = {
+    backend: l('backend', '后端'),
+    parse: l('parse', '解析'),
+    contract: l('contract:', '契约：'),
+    timeout: l('timeout', '超时'),
+  };
+  const attempts = Number((ev as Record<string, unknown>).attempts || 0);
+  const attempt = attempts > 1
+    ? l(` (attempt ${attempts})`, ` (第${attempts}次尝试)`)
+    : '';
+  const summary = `${l('routing failed', '分流失败')} · ${phaseLabel[phase] || phase} ${cause}${attempt}`;
+  return raw ? `${summary} · ${l('raw', '原始错误')}: ${raw}` : summary;
+}
 
 /** Accept both lifecycle event schemas (`round_index` and legacy `round`). */
 const roundNo = (ev: EventMsg): string | number => {
@@ -111,16 +132,16 @@ export function renderEvent(ev: EventMsg, locale: Locale = 'en'): Rendered | nul
       return { role: layer, label: roleLabel(layer), glyph: '▌', text: body, tone: 'bright' };
     }
     if (kind === 'command_execution') {
-      const cmd = trunc(S(ev, 'action_summary') || S(ev, 'command') || text, 160);
+      const cmd = S(ev, 'text') || S(ev, 'command') || S(ev, 'action_summary');
       if (!cmd) return null;
       return { role: layer, label: roleLabel(layer), glyph: '▸ $', text: cmd, tone: 'dim' };
     }
     if (kind === 'file_change') {
-      const f = trunc(text, 160);
+      const f = S(ev, 'text') || S(ev, 'action_summary');
       return { role: layer, label: roleLabel(layer), glyph: '✎', text: f || l('(file change)', '（文件变更）'), tone: 'dim' };
     }
     if (kind === 'tool_use') {
-      const tu = trunc(text, 160);
+      const tu = S(ev, 'text') || S(ev, 'action_summary');
       return { role: layer, label: roleLabel(layer), glyph: '⚙', text: tu || l('(tool)', '（工具）'), tone: 'dim' };
     }
     if (!text) return null;
@@ -130,10 +151,19 @@ export function renderEvent(ev: EventMsg, locale: Locale = 'en'): Rendered | nul
   // ── Manager triage
   if (t === 'life.manager.intent.started')
     return { role: 'manager', label: 'Manager', glyph: '🧭', text: l('classifying request…', '判断任务归属…'), tone: 'info' };
-  if (t === 'life.manager.intent.completed')
-    return { role: 'manager', label: 'Manager', glyph: '🧭', text: `→ ${S(ev, 'vertical') || S(ev, 'kind') || l('resolved', '已确定')}`, tone: 'info' };
+  if (t === 'life.manager.intent.completed') {
+    const routing = formatMissionRouting({
+      route: S(ev, 'route') || 'team',
+      vertical: S(ev, 'vertical'),
+      workflow_mode: S(ev, 'workflow_mode'),
+      lifetime: S(ev, 'lifetime'),
+      continuous: (ev as Record<string, unknown>).continuous === true,
+      open_ended: (ev as Record<string, unknown>).open_ended === true,
+    });
+    return { role: 'manager', label: 'Manager', glyph: '🧭', text: `→ ${routing || S(ev, 'kind') || l('resolved', '已确定')}`, tone: 'info' };
+  }
   if (t === 'life.manager.intent.failed')
-    return { role: 'manager', label: 'Manager', glyph: '⚠', text: `${l('routing failed', '分流失败')} ${trunc(S(ev, 'error'), 140)}`, tone: 'err' };
+    return { role: 'manager', label: 'Manager', glyph: '⚠', text: managerFailureText(ev, locale), tone: 'err' };
   if (t === 'life.manager.stage_decision') {
     const target = S(ev, 'target_stage') || S(ev, 'stage') || S(ev, 'current_stage');
     return { role: 'manager', label: 'Manager', glyph: '🧭', text: `${S(ev, 'action')}${target ? ` → ${target}` : ''} ${trunc(S(ev, 'reason'), 120)}`, tone: 'info' };
@@ -209,7 +239,7 @@ export function renderEvent(ev: EventMsg, locale: Locale = 'en'): Rendered | nul
   if (t === 'plan.completed')
     return { role: 'planner', label: 'Planner', glyph: '📋', text: l('plan completed', '计划已完成'), tone: 'accent' };
   if (t === 'daemon.stopping')
-    return { role: 'system', label: l('Daemon', '守护进程'), glyph: '🛑', text: l('stopping', '正在停止'), tone: 'err' };
+    return { role: 'system', label: 'Argus', glyph: '🛑', text: l('stopping', '正在停止'), tone: 'err' };
 
   // ── Guardian (监视守护) — Argus Panoptes keeping watch: the signals that fire
   // when a mission stalls, blocks, escalates, or a role backend fails. These are

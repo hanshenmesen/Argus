@@ -6,6 +6,13 @@ interface TranscriptTurn {
   ts: number;
   role: string;
   text: string;
+  message_id?: string;
+  mission_result?: boolean;
+  item_id?: string;
+  success?: boolean;
+  summary?: string;
+  delivery_id?: string;
+  delivery?: unknown;
 }
 
 const LOCAL_REQUEST_FIELD = 'local_request_id';
@@ -111,7 +118,13 @@ export function mergeConversationEvents(
     agent_layer: turn.role === 'operator' ? 'operator' : 'manager',
     text: turn.text,
     ts: turn.ts,
-    message_id: `transcript-${turn.ts}-${turn.role}`,
+    message_id: turn.message_id || `transcript-${turn.ts}-${turn.role}`,
+    ...(turn.mission_result === true ? { mission_result: true } : {}),
+    ...(typeof turn.item_id === 'string' ? { item_id: turn.item_id } : {}),
+    ...(typeof turn.success === 'boolean' ? { success: turn.success } : {}),
+    ...(typeof turn.summary === 'string' ? { summary: turn.summary } : {}),
+    ...(typeof turn.delivery_id === 'string' ? { delivery_id: turn.delivery_id } : {}),
+    ...(turn.delivery && typeof turn.delivery === 'object' ? { delivery: turn.delivery } : {}),
   }));
   const keepHistory = new Array(history.length).fill(true);
   for (let index = history.length - 1; index >= 0; index -= 1) {
@@ -129,7 +142,7 @@ export function mergeConversationEvents(
   ];
   const keepConfirmed = new Array(confirmed.length).fill(true);
   const claimedConfirmed = new Set<number>();
-  const preferredLocal = localEvents.filter((event) => {
+  const preferredLocal = localEvents.map((event) => {
     const messageId = String(event.message_id ?? '');
     let matchIndex = messageId
       ? confirmed.findIndex((candidate, index) => (
@@ -154,8 +167,20 @@ export function mergeConversationEvents(
       // will naturally replace it after a project switch or page reload.
       claimedConfirmed.add(matchIndex);
       keepConfirmed[matchIndex] = false;
+      const authoritative = confirmed[matchIndex];
+      return {
+        ...event,
+        ...(authoritative.mission_result === true ? { mission_result: true } : {}),
+        ...(typeof authoritative.item_id === 'string' ? { item_id: authoritative.item_id } : {}),
+        ...(typeof authoritative.success === 'boolean' ? { success: authoritative.success } : {}),
+        ...(typeof authoritative.summary === 'string' ? { summary: authoritative.summary } : {}),
+        ...(typeof authoritative.delivery_id === 'string' ? { delivery_id: authoritative.delivery_id } : {}),
+        ...(authoritative.delivery && typeof authoritative.delivery === 'object'
+          ? { delivery: authoritative.delivery }
+          : {}),
+      };
     }
-    return true;
+    return event;
   });
   return [
     ...confirmed.filter((_event, index) => keepConfirmed[index]),

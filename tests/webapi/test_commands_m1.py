@@ -5,6 +5,7 @@ Daemon start/stop are monkeypatched so no real subprocess is spawned.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from contextlib import contextmanager
@@ -24,6 +25,7 @@ from argus_skill.manager.front_door import (
 )
 from argus_skill.skills.vertical_select import persist_vertical
 from argus_skill.webapi import (
+    daemon_lifecycle,
     manager_dispatch,
     manager_state,
     project_state,
@@ -97,6 +99,10 @@ def test_post_task_appends_to_backlog(ctx) -> None:
     # went through the real Backlog store (flock CAS), not a raw write
     items = LifeMemory.open(life).backlog.all()
     assert len(items) == 1 and items[0].objective == "optimize the kernel"
+    assert items[0].manager_decision == {
+        "require_independent_review": True,
+        "routed": True,
+    }
 
 
 def test_post_task_preserves_active_continuous_campaign_governance(
@@ -176,7 +182,7 @@ def test_post_task_preserves_active_continuous_campaign_governance(
     assert response is not None
     assert response["objective"] == "verify the migrated scope artifact"
     assert commits == []
-    pipeline = json.loads((workspace / "research" / "PIPELINE_STATE.json").read_text())
+    pipeline = json.loads((workspace / ".argus" / "PIPELINE_STATE.json").read_text())
     assert pipeline["vertical"] == "math"
     assert pipeline["workflow_mode"] == "staged"
     assert pipeline["research_target_level"] == "doctoral"
@@ -215,7 +221,11 @@ def test_post_task_enqueues_only_manager_execution_handoff(ctx, monkeypatch) -> 
     assert captured["sid"] == sid
     assert captured["text"] == raw
     assert captured["root_task_id"] == item["id"]
-    assert LifeMemory.open(life).backlog.all()[0].objective == "write the MRAM paper"
+    persisted = LifeMemory.open(life).backlog.all()[0]
+    assert persisted.objective == "write the MRAM paper"
+    # Even a narrow/fake handoff that omits Division details has completed the
+    # Manager gate.  The daemon must not classify the claimed item again.
+    assert persisted.manager_decision == {"routed": True}
 
 
 def test_post_task_returns_503_instead_of_enqueuing_raw_on_handoff_failure(
@@ -697,6 +707,169 @@ def test_daemon_start_delegates(ctx, monkeypatch) -> None:
     r = client.post(f"/api/projects/{sid}/daemon/start")
     assert r.status_code == 200 and r.json()["rc"] == 0
     assert calls["life_dir"] == life.resolve() and calls["quiet"] is True
+
+
+def test_daemon_start_surfaces_clean_launcher_failure(ctx, monkeypatch) -> None:
+    root, sid, _life = ctx
+
+    def fail_spawn(_config, *, quiet=False):
+        assert quiet is True
+        raise RuntimeError("ModuleNotFoundError: No module named 'uvicorn'")
+
+    monkeypatch.setattr(server, "spawn_detached_daemon", fail_spawn)
+    client = TestClient(server.create_app(global_root=root))
+    response = client.post(f"/api/projects/{sid}/daemon/start")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rc"] == 2
+    assert body["error"] == (
+        "The background worker could not start. "
+        "Check the startup diagnostic and try again."
+    )
+    assert body["startup_diagnostic"] == (
+        "RuntimeError: ModuleNotFoundError: No module named 'uvicorn'"
+    )
+    assert "ModuleNotFoundError" not in body["error"]
+
+
+def test_daemon_start_surfaces_captured_helper_stderr(ctx, monkeypatch, caplog) -> None:
+    root, sid, _life = ctx
+    diagnostic = "Traceback: UnicodeEncodeError during Windows daemon bootstrap"
+
+    def fake_spawn(config, *, quiet=False):
+        assert quiet is True
+        config.last_spawn_error = diagnostic
+        return 1
+
+    monkeypatch.setattr(server, "spawn_detached_daemon", fake_spawn)
+    client = TestClient(server.create_app(global_root=root))
+
+    response = client.post(f"/api/projects/{sid}/daemon/start")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rc"] == 1
+    assert body["startup_diagnostic"] == diagnostic
+    assert body["error"] == (
+        "The background worker could not start. "
+        "Check the startup diagnostic and try again."
+    )
+    assert diagnostic not in body["error"]
+    assert diagnostic in caplog.text
+
+
+@pytest.mark.parametrize("resume_continuous", [False, True])
+def test_web_start_without_an_open_ended_campaign_launches_a_bounded_worker(
+    ctx,
+    monkeypatch,
+    resume_continuous: bool,
+) -> None:
+    root, sid, _life = ctx
+    spawned: dict[str, object] = {}
+
+    def fake_spawn(config, *, quiet=False):
+        spawned["open_ended"] = config.continuous_open_ended
+        spawned["quiet"] = quiet
+        return 0
+
+    monkeypatch.setattr(server, "spawn_detached_daemon", fake_spawn)
+
+    result = server.start_project_daemon(
+        sid,
+        global_root=root,
+        resume_continuous=resume_continuous,
+    )
+
+    assert result is not None and result["rc"] == 0
+    assert spawned == {"open_ended": False, "quiet": True}
+
+
+def test_daemon_start_retries_one_transient_windows_sharing_failure(
+    ctx,
+    monkeypatch,
+) -> None:
+    root, sid, _life = ctx
+    attempts = 0
+
+    def fake_spawn(config, *, quiet=False):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            config.last_spawn_error = (
+                "PermissionError: [WinError 32] The process cannot access the file"
+            )
+            return 1
+        config.last_spawn_error = ""
+        return 0
+
+    monkeypatch.setattr(server, "spawn_detached_daemon", fake_spawn)
+    monkeypatch.setattr(daemon_lifecycle, "_running_on_windows", lambda: True)
+
+    result = server.start_project_daemon(sid, global_root=root)
+
+    assert result is not None and result["rc"] == 0
+    assert result["startup_retried"] is True
+    assert "startup_diagnostic" not in result
+    assert attempts == 2
+
+
+def test_daemon_start_does_not_retry_deterministic_rc1(
+    ctx,
+    monkeypatch,
+) -> None:
+    root, sid, _life = ctx
+    attempts = 0
+
+    def fake_spawn(config, *, quiet=False):
+        nonlocal attempts
+        attempts += 1
+        config.last_spawn_error = "ModuleNotFoundError: No module named argus_skill"
+        return 1
+
+    monkeypatch.setattr(server, "spawn_detached_daemon", fake_spawn)
+    monkeypatch.setattr(daemon_lifecycle, "_running_on_windows", lambda: True)
+
+    result = server.start_project_daemon(sid, global_root=root)
+
+    assert result is not None and result["rc"] == 1
+    assert attempts == 1
+
+
+def test_daemon_start_accepts_runtime_published_after_transient_launcher_failure(
+    ctx,
+    monkeypatch,
+) -> None:
+    root, sid, _life = ctx
+    attempts = 0
+    original_status = server.read_daemon_status
+
+    def fake_spawn(config, *, quiet=False):
+        nonlocal attempts
+        attempts += 1
+        config.last_spawn_error = "OSError: [WinError 33] lock violation"
+        return 1
+
+    status_reads = 0
+
+    def fake_status(path):
+        nonlocal status_reads
+        status_reads += 1
+        status = original_status(path)
+        if status_reads < 2:
+            return status
+        return dataclasses.replace(status, alive=True, pid=4242)
+
+    monkeypatch.setattr(server, "spawn_detached_daemon", fake_spawn)
+    monkeypatch.setattr(server, "read_daemon_status", fake_status)
+    monkeypatch.setattr(daemon_lifecycle, "_running_on_windows", lambda: True)
+
+    result = server.start_project_daemon(sid, global_root=root)
+
+    assert result is not None and result["rc"] == 0
+    assert result["startup_retried"] is True
+    assert "startup_diagnostic" not in result
+    assert attempts == 1
 
 
 def test_daemon_start_resume_reenables_preserved_continuous_objective(
@@ -1251,6 +1424,34 @@ def test_daemon_upgrade_schedules_restart_when_active_mission_is_still_running(
     assert request["resume_continuous"] is True
 
 
+def test_manual_force_stop_uses_short_verified_interrupt_timeout(
+    ctx,
+    monkeypatch,
+) -> None:
+    root, sid, life = ctx
+    calls: list[tuple[object, dict]] = []
+
+    def stop_daemon(target, **kwargs):
+        calls.append((target, kwargs))
+        return 0
+
+    monkeypatch.setattr(server, "stop_daemon", stop_daemon)
+
+    result = server.stop_project_daemon(
+        sid,
+        force=True,
+        global_root=root,
+    )
+
+    assert result == {"rc": 0, "forced": True}
+    assert calls == [
+        (
+            life,
+            {"timeout": 1.0, "drain": False, "force": True},
+        )
+    ]
+
+
 def test_daemon_command_idempotency_and_revision_fencing(ctx, monkeypatch) -> None:
     root, sid, _life = ctx
     starts = []
@@ -1712,8 +1913,18 @@ def test_bearer_auth_on_posts(ctx) -> None:
         f"/api/projects/{sid}/tasks", json=body, headers={"Authorization": "Bearer secret123"}
     )
     assert ok.status_code == 200
-    # reads stay open (no auth on GET)
-    assert client.get(f"/api/projects/{sid}/snapshot").status_code == 200
+    # Reads are protected too. The line here used to read "reads stay open (no
+    # auth on GET)" directly above a note that artifact reads are protected
+    # "because they expose project files" — and the transcript, journal and
+    # snapshot expose more than the artifacts do.
+    assert client.get(f"/api/projects/{sid}/snapshot").status_code == 401
+    assert (
+        client.get(
+            f"/api/projects/{sid}/snapshot",
+            headers={"Authorization": "Bearer secret123"},
+        ).status_code
+        == 200
+    )
     # Artifact reads are deliberately protected because they expose project files.
     assert client.get(f"/api/projects/{sid}/artifacts").status_code == 401
     assert (
@@ -1755,3 +1966,41 @@ def test_ws_requires_token_when_configured(ctx) -> None:
         with tc.websocket_connect(f"/api/projects/{sid}/stream?token=secret123&replay=0") as ws:
             assert ws is not None
             ws.close()
+
+
+def test_a_configured_token_also_guards_the_reads(ctx) -> None:
+    """A LAN bind mints a token and says it protects the surface. It must.
+
+    `argus --web --web-host 0.0.0.0` prints "a token was generated for this
+    run" and the flag help promises that a non-loopback bind always requires a
+    bearer token. Every POST honoured that; the reads did not, so any host on
+    the network could fetch the project list, the journal, the events, the
+    snapshot and the full agent transcript by asking. `/api/system/doctor` was
+    guarded while `/api/projects/{sid}/doctor` beside it was not, which is what
+    an omission looks like rather than a decision.
+    """
+    root, sid, _ = ctx
+    client = TestClient(server.create_app(global_root=root, auth_token="secret123"))
+    reads = (
+        "/api/projects",
+        f"/api/projects/{sid}/snapshot",
+        f"/api/projects/{sid}/events",
+        f"/api/projects/{sid}/status",
+        f"/api/projects/{sid}/journal",
+        f"/api/projects/{sid}/transcript",
+        f"/api/projects/{sid}/doctor",
+    )
+    for path in reads:
+        assert client.get(path).status_code == 401, f"{path} served without a token"
+        assert (
+            client.get(path, headers={"Authorization": "Bearer secret123"}).status_code
+            != 401
+        ), f"{path} refused the configured token"
+
+
+def test_the_default_localhost_bind_stays_open(ctx) -> None:
+    """No token configured is the ordinary `argus --web` case; nothing changes."""
+    root, sid, _ = ctx
+    client = TestClient(server.create_app(global_root=root))
+    for path in ("/api/projects", f"/api/projects/{sid}/journal"):
+        assert client.get(path).status_code == 200

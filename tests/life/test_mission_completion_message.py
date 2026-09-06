@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from argus_skill.core.manuscript_snapshot import manuscript_snapshot
 from argus_skill.core.transcript import append_turn
 from argus_skill.life.event_log import JsonlEventSink
 from argus_skill.life.memory import LifeMemory
@@ -41,25 +42,27 @@ def test_continuous_mission_completion_publishes_once(tmp_path) -> None:
 
     transcript = [
         json.loads(line)
-        for line in (tmp_path / "transcript.jsonl").read_text().splitlines()
+        for line in (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert len(transcript) == 1
     assert transcript[0]["role"] == "argus"
-    assert "Task completed · Fix the first issue · review=done" in transcript[0]["text"]
+    assert "Task continued · Fix the first issue · review=done" in transcript[0]["text"]
     assert (
-        "Mission summary: Updated the parser and passed focused regression tests."
+        "Progress: Updated the parser and passed focused regression tests."
         in transcript[0]["text"]
     )
-    assert "Planner is selecting the next task" in transcript[0]["text"]
+    assert "Planner is selecting the next work item" in transcript[0]["text"]
     ui_events = [
         event
-        for line in (tmp_path / "events.jsonl").read_text().splitlines()
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
         if (event := json.loads(line)).get("type") == "ui.argus"
     ]
     assert len(ui_events) == 1
     assert ui_events[0]["summary"] == (
         "Updated the parser and passed focused regression tests."
     )
+    assert ui_events[0]["campaign_continues"] is True
+    assert ui_events[0]["delivery"] is None
 
 
 def test_bounded_completion_says_the_task_is_finished(tmp_path) -> None:
@@ -84,9 +87,12 @@ def test_bounded_completion_says_the_task_is_finished(tmp_path) -> None:
     })
 
     text = json.loads(
-        (tmp_path / "transcript.jsonl").read_text().splitlines()[-1]
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )["text"]
-    assert text == "Task completed · One bounded fix\nThis task is finished."
+    assert text == (
+        "Task completed · One bounded fix\n"
+        "The requested work is complete."
+    )
 
 
 def test_completion_summary_uses_the_operator_language(tmp_path) -> None:
@@ -110,8 +116,9 @@ def test_completion_summary_uses_the_operator_language(tmp_path) -> None:
     })
 
     text = json.loads(
-        (tmp_path / "transcript.jsonl").read_text().splitlines()[-1]
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )["text"]
+    assert "任务已完成" in text
     assert "本次完成: 修复了解析器并通过回归测试。" in text
     assert "Mission summary" not in text
 
@@ -138,12 +145,11 @@ def test_bounded_increment_does_not_claim_project_or_stage_completion(tmp_path) 
     })
 
     text = json.loads(
-        (tmp_path / "transcript.jsonl").read_text().splitlines()[-1]
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )["text"]
     assert text == (
         "Task completed · Write the paper draft · review=done\n"
-        "This bounded work item is finished; project and stage completion "
-        "were not certified."
+        "The requested work is complete."
     )
 
 
@@ -167,7 +173,7 @@ def test_failed_mission_explains_reason_and_next_action(tmp_path) -> None:
     })
 
     text = json.loads(
-        (tmp_path / "transcript.jsonl").read_text().splitlines()[-1]
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )["text"]
     assert text.startswith("Cannot continue yet: Run the external validator.")
     assert "Reason: Continuing requires an access credential from you." in text
@@ -197,7 +203,7 @@ def test_technical_blocker_does_not_pretend_a_human_decision_is_needed(tmp_path)
     })
 
     text = json.loads(
-        (tmp_path / "transcript.jsonl").read_text().splitlines()[-1]
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )["text"]
     assert "does not prove the idea is wrong" in text
     assert "Next: Run the isolated one-row diagnostic." in text
@@ -230,7 +236,7 @@ def test_operator_blocker_surfaces_the_exact_question_without_templates(tmp_path
     })
 
     text = json.loads(
-        (tmp_path / "transcript.jsonl").read_text().splitlines()[-1]
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )["text"]
     assert text == (
         "Verify macOS computer use\n"
@@ -243,6 +249,9 @@ def test_operator_blocker_surfaces_the_exact_question_without_templates(tmp_path
 
 
 def test_final_submission_completion_is_explicitly_certified(tmp_path) -> None:
+    manuscript = tmp_path / "paper/main.tex"
+    manuscript.parent.mkdir(parents=True)
+    manuscript.write_text("final paper\n", encoding="utf-8")
     memory = LifeMemory.open(tmp_path)
     supervisor = LifeSupervisor(
         memory=memory,
@@ -258,6 +267,8 @@ def test_final_submission_completion_is_explicitly_certified(tmp_path) -> None:
         "success": True,
         "status": "done",
         "final_submission_certified": True,
+        "execution_workdir": str(tmp_path),
+        "manuscript_snapshot": manuscript_snapshot(tmp_path),
         "outcome": {
             "review_status": "done",
             "stage_certification": "certified",
@@ -265,9 +276,60 @@ def test_final_submission_completion_is_explicitly_certified(tmp_path) -> None:
     })
 
     text = json.loads(
-        (tmp_path / "transcript.jsonl").read_text().splitlines()[-1]
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )["text"]
     assert text == (
         "Submission certified · Prepare final ICLR submission · review=done\n"
         "The final submission passed independent review."
     )
+
+
+def test_bounded_independent_review_completion_is_natural_and_footer_free(
+    tmp_path,
+) -> None:
+    memory = LifeMemory.open(tmp_path)
+    supervisor = LifeSupervisor(
+        memory=memory,
+        runner=_Runner(),
+        sink=JsonlEventSink(None, life_dir=memory.root, verbosity="full"),
+        config=LifeSupervisorConfig(continuous=False, open_ended=False),
+    )
+    append_turn(memory.root, "operator", "请调研缓存方案，并由独立 Reviewer 检查。")
+
+    supervisor._emit({
+        "type": "life.mission.completed",
+        "item_id": "task-reviewed",
+        "title": "Research cache options",
+        "success": True,
+        "status": "done",
+        "summary": (
+            "完成了缓存方案调研并形成报告。\n\n"
+            "Decision:\n"
+            "MILESTONE_STATUS=done\n"
+            "RESULT=cache research reviewed\n"
+            "NEXT_OWNER=reviewer"
+        ),
+        "independent_review_required": True,
+        "overall_complete": True,
+        "outcome": {
+            "review_status": "done",
+            "stage_certification": "deferred",
+        },
+    })
+
+    text = json.loads(
+        (tmp_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )["text"]
+    assert text.startswith("任务已完成\n")
+    assert "完成了缓存方案调研并形成报告。" in text
+    assert "独立 Reviewer 已复核本轮产出，未发现阻断问题。" in text
+    assert "实现和测试" not in text
+    for internal in (
+        "RESULT=",
+        "NEXT_OWNER",
+        "review=done",
+        "阶段结论",
+        "本计划工作项",
+        "Research cache options",
+    ):
+        assert internal not in text

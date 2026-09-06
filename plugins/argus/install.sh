@@ -13,6 +13,15 @@ case "$target" in
   *) echo "Usage: install.sh [codex|claude|all]" >&2; exit 2 ;;
 esac
 
+command -v node >/dev/null 2>&1 || {
+  echo "Node.js 22.12+ is required by the cross-platform MCP launcher." >&2
+  exit 1
+}
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)' || {
+  echo "Node.js 22.12+ is required by the cross-platform MCP launcher." >&2
+  exit 1
+}
+
 mkdir -p "$argus_home"
 if command -v uv >/dev/null 2>&1; then
   uv venv --python 3.11 "$venv"

@@ -1,10 +1,10 @@
 """Vertical selection for the auto-research loop.
 
 The loop runs ONE of several *verticals*, selected by a single ``vertical``
-field in ``research/PIPELINE_STATE.json``:
+field in ``.argus/PIPELINE_STATE.json``:
 
-* ``"research"`` — the full eight-stage research-paper pipeline
-  (research → ... → submission). This is the default and the safe fallback
+* ``"research"`` — the four-stage research-paper pipeline
+  (idea → experiment → paper → review). This is the default and the safe fallback
   whenever intent is unclear: producing a paper subsumes the optimize work,
   so over-running is never a correctness hazard, only a cost one.
 * ``"speedrun"`` — the lean numeric-optimization vertical (setup → optimize →
@@ -22,12 +22,12 @@ and ``manager/domain_author.py``):
   is FAIL-HARD: if nothing valid is resolvable it RAISES
   ``VerticalResolutionError`` rather than silently defaulting to ``"research"``.
 * the **write side** (``persist_vertical``) writes the chosen vertical into the
-  pipeline state and seeds ``current_stage`` to the vertical's first stage. It
-  validates the name (``require_vertical``) and RAISES on an unknown vertical or
-  a corrupt state file — no swallowed errors.
+  pipeline state and seeds ``current_stage`` to the requested direct start stage
+  or the vertical's first stage. It validates the name (``require_vertical``)
+  and RAISES on an unknown vertical or a corrupt state file — no swallowed errors.
 
 The resolved vertical has one authority: the Manager-persisted ``vertical`` in
-``research/PIPELINE_STATE.json`` (including a Manager-authored data domain).
+``.argus/PIPELINE_STATE.json`` (including a Manager-authored data domain).
 
 There are NO keyword classifiers and NO fallbacks: an objective is never mapped
 to a vertical by matching words, and a missing/corrupt state is never quietly
@@ -42,6 +42,13 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+
+from ..core.pipeline_state import (
+    pipeline_state_path,
+    primary_pipeline_state_path,
+    read_pipeline_state,
+    write_pipeline_state,
+)
 
 log = logging.getLogger(__name__)
 
@@ -72,85 +79,54 @@ VERTICALS: tuple[str, ...] = (
 #: expert per-stage reviewer checklists) over authoring a fresh, checklist-less
 #: data domain. Keys must stay in sync with ``VERTICALS``.
 VERTICAL_PURPOSES: dict[str, str] = {
-    "software": "software engineering: repository repairs, features, refactors, "
-    "tests, developer tooling, and ordinary implementation outside Argus itself; "
-    "not specialized hardware/runtime performance research",
-    "argus_maintenance": "maintenance and architectural improvement of the Argus "
-    "framework itself: concise reusable code, core/vertical decoupling, removal of "
-    "unjustified hardcoding/wrappers/fallbacks, independent regression and release checks",
-    "digital_circuit": "digital hardware engineering: Verilog/SystemVerilog RTL, "
-    "testbenches, assertions/formal verification, FPGA/ASIC synthesis, timing, "
-    "and reproducible sign-off evidence",
-    "digital_circuit_benchmark": "single-stage fixed-harness RTL benchmark execution "
-    "under digital_circuit: exact public interface closure, RTL, local verification, "
-    "pre-score elaboration, and immutable attempt handoff without staged overhead",
-    "chip_design": "end-to-end digital ASIC and accelerator design: workload and product "
-    "definition, microarchitecture and memory modeling, EDA/PDK/IP readiness, RTL, "
-    "independent verification, DFT, synthesis, physical implementation, STA/power/"
-    "signal-integrity sign-off, DRC/LVS, fair public-baseline comparison, and a "
-    "provenance-bound pre-tapeout release",
-    "research": "team-scale scholarly survey or original research-PAPER pipeline "
-    "(literature review → optional experiments → draft/review → optional submission); "
-    "use when the goal is substantial synthesis or a written paper, not for reading, "
-    "explaining, critiquing, or summarizing one existing paper",
+    "software": "software engineering: repository repairs, features, tests, tooling, and "
+    "ordinary implementation; not specialized hardware/runtime performance research",
+    "argus_maintenance": "Argus framework repair and architecture improvement with "
+    "independent regression and release checks",
+    "digital_circuit": "Verilog/SystemVerilog RTL, testbenches, formal verification, "
+    "FPGA/ASIC synthesis, timing, and sign-off",
+    "digital_circuit_benchmark": "single-stage fixed-harness RTL benchmark: interface, RTL, "
+    "local verification, pre-score elaboration, and attempt handoff",
+    "chip_design": "end-to-end digital ASIC/accelerator design from workload and "
+    "microarchitecture through RTL, physical implementation, and sign-off",
+    "research": "substantial original research paper: idea selection, implementation, "
+    "adaptive experiments, persuasive drafting, and terminal independent review",
     "medical": "biomedical and pharmaceutical evidence execution: target-disease "
     "mechanisms, human genetics, preclinical translation, clinical trials, safety, "
     "failed programs, competitive pipelines, and auditable non-diagnostic decision "
     "dossiers with independent review; not a generic paper pipeline",
-    "math": "mathematical conjectures, proofs, and open research problems; dynamically "
-    "choose background retrieval, examples/counterexamples, computation, natural-language "
-    "proof, and Lean formalization as appropriate; not a paper pipeline or a "
-    "metric-optimization vertical",
-    "math_synth": "math-reasoning data synthesis benchmark: maximize the measured "
-    "pass@4-minus-pass@1 gap by improving only the editable generation pipeline while "
-    "keeping the solver, verifier, metric, seeds, and evaluation runner frozen",
-    "physics": "physics tasks on a real physical system; dynamically choose theoretical "
-    "derivation, numerical simulation, data analysis, literature synthesis, or experiment "
-    "design (or an honest negative result) as appropriate, reporting bounded provenance-tracked "
-    "evidence; not a paper pipeline or a metric-optimization vertical",
-    "materials": "materials science and materials processing research across atomistic, "
-    "microstructure, continuum, CAD/CAE, and experimental scales; dynamically choose "
-    "literature/data analysis, DFT/MD/MLIP, constitutive modeling, FEM/process simulation, "
-    "or experiment design, with independent physical validation and provenance",
-    "quant": "finance factor-research REPORT — mine/evaluate equity factors "
-    "(IC/ICIR, backtest, Sharpe) into a reviewer-certified factor report; not a metric loop",
-    "speedrun": "generic single-metric optimize loop on a script/benchmark under a "
-    "wall-clock budget (setup → optimize → measure → report); no paper",
-    "kernel_engineering": "production GPU-kernel engineering in a real repository "
-    "(environment/toolchain audit → correct baseline → profile/optimize → full "
-    "validation → upstream-ready report); use for CUDA/Triton/TileLang/CUTLASS/PyTorch "
-    "library work and PRs, not fixed SOL-ExecBench competition tasks",
+    "math": "mathematical conjectures, proofs, and open problems using literature, "
+    "computation, natural-language proof, or Lean as needed",
+    "math_synth": "math-reasoning data synthesis: maximize pass@4-minus-pass@1 while "
+    "the solver, verifier, metric, seeds, and evaluator stay frozen",
+    "physics": "theory, simulation, data analysis, literature, or experiment design "
+    "for a real physical system with bounded evidence",
+    "materials": "materials science and materials processing across atomistic, "
+    "microstructure, continuum, CAD/CAE, and experimental scales",
+    "quant": "equity factor research (IC/ICIR, backtest, Sharpe) producing a "
+    "reviewer-certified report, not a generic metric loop",
+    "speedrun": "single-metric script/benchmark optimization under a wall-clock budget: "
+    "setup, optimize, measure, report; no paper",
+    "kernel_engineering": "accelerator runtime, model inference/serving, communication, "
+    "memory movement, and production CUDA/HIP/Triton/TileLang/CUTLASS/PyTorch kernel "
+    "performance work in a repository; not a fixed SOL-ExecBench competition",
     "nanochat": "minimize val_bpb on the nanochat train.py (bits-per-byte, ~300s, 1 GPU)",
     "nanogpt_speedrun": "minimize wall-clock time to reach val_loss<=3.28 on modded-nanogpt (8xH100)",
-    "kernelbench": "maximize SOL score / speedup for GPU kernels (CUDA/Triton/CUTLASS, "
-    "B200, SOL-ExecBench/KernelBench) against a correctness-checked reference",
-    "learning": "ingest operator-provided learning material and update the skill/wiki "
-    "libraries (produce a change plan: create/update/archive skills)",
-    "ale_last_exam": "complete one Agents' Last Exam long-horizon professional "
-    "workflow in a real computer sandbox; hidden-reference, artifact-first GUI+CLI delivery",
-    "fiction_writing": "creative FICTION authoring (zh/en) — write a short story or "
-    "chapter from a brief, OR continue an existing work, holding characters/world/"
-    "timeline consistent via a structured story_state; intake→plan→draft→state_update"
-    "→review→revise. NOT a research paper and NOT a 'literature review' — this "
-    "produces original narrative prose, not a survey of prior work",
-    "classical_poetry": "classical CHINESE poetry (近体诗/古体/词) — compose or "
-    "prosody-check 律诗/绝句/五言/七言; gates the poem on a reproducible machine "
-    "prosody check (押韵/平仄/粘对/孤平/三平尾 via 平水韵) plus live-reviewer 立意/炼字/"
-    "反AI. zh only; NOT modern free verse (route that to modern_poetry) and NOT prose",
-    "modern_poetry": "modern FREE VERSE / prose poems (zh or en) — compose or revise; "
-    "NO 平仄/韵 machine check (free verse is not classical). Gates only DECLARED hard "
-    "constraints (language/line-count/banned-words); imagery/lineation/tone are "
-    "live-reviewer craft. NOT classical regulated verse and NOT narrative prose",
-    "prose": "literary PROSE (抒情/叙事散文/随笔/回忆, zh or en) — compose or revise an "
-    "essay/memoir. Machine layer is thin: prose_state structure completeness + declared "
-    "hard constraints (language/paragraph-count/banned-words). Concrete observation, the "
-    "fact/memory boundary, and paragraph movement are live-reviewer. NOT verse and NOT "
-    "plot-driven fiction",
-    "literary_editor": "EDIT an existing literary text — rewrite/expand/polish/proofread/"
-    "critique. Reuses the Reviewer + revise capability (no new agent). Machine layer is "
-    "edit DISCIPLINE (critique doesn't rewrite, proofread doesn't become a rewrite, expand "
-    "adds, must-keep segments survive); edit quality and fact-fidelity are live-reviewer. "
-    "Requires a source text; NOT from-scratch authoring",
+    "kernelbench": "maximize correctness-checked SOL score/speedup for GPU kernels on "
+    "B200 SOL-ExecBench/KernelBench",
+    "learning": "ingest operator material and create, update, or archive skill/wiki knowledge",
+    "ale_last_exam": "Agents' Last Exam long-horizon professional workflow in a real "
+    "sandbox with hidden-reference, artifact-first GUI+CLI delivery",
+    "fiction_writing": "write or continue original fiction narrative prose while preserving "
+    "characters, world, and timeline; not a literature review or research task",
+    "classical_poetry": "compose or check classical Chinese 近体诗/古体/词 with reproducible "
+    "押韵/平仄 prosody and literary review",
+    "modern_poetry": "compose or revise modern free verse/prose poems without classical "
+    "prosody checks; enforce only declared hard constraints",
+    "prose": "compose or revise literary essays, memoir, or 抒情/叙事散文/随笔; not verse "
+    "or plot-driven fiction",
+    "literary_editor": "rewrite, expand, polish, proofread, or critique an existing "
+    "literary text while preserving edit scope and source facts",
 }
 
 #: The safe default vertical when intent is unclear or state is missing.
@@ -160,14 +136,11 @@ DEFAULT_VERTICAL: str = "research"
 #: Formal task routing does not consult it; Manager owns vertical classification.
 ENV_VERTICAL: str = "ARGUS_SKILL_VERTICAL"
 
-_STATE_RELPATH = ("research", "PIPELINE_STATE.json")
-
-
 class VerticalResolutionError(RuntimeError):
     """Raised by ``resolve_vertical`` when no vertical can be resolved.
 
     The Manager DECIDES and PERSISTS the vertical on the initial task; once it
-    has, ``research/PIPELINE_STATE.json`` names it and this never fires. If it
+    has, ``.argus/PIPELINE_STATE.json`` names it and this never fires. If it
     DOES fire, a read happened before the decision was persisted, or the state
     is corrupt — a real invariant violation, surfaced loudly instead of silently
     defaulting to ``research``.
@@ -281,34 +254,46 @@ def _normalize_stage(stage: object) -> str:
 
 
 def _state_path(project_root: object) -> Path:
-    return Path(str(project_root)).joinpath(*_STATE_RELPATH)
+    return pipeline_state_path(project_root)
 
 
 def _load_state_payload(project_root: object) -> dict:
     """Read Manager-owned pipeline state once with fail-visible corruption."""
-    path = _state_path(project_root)
     try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
-    try:
-        payload = json.loads(raw)
+        return read_pipeline_state(project_root)
     except json.JSONDecodeError as exc:
+        path = _state_path(project_root)
         raise VerticalResolutionError(
             f"PIPELINE_STATE.json at {path} is not valid JSON: {exc}"
         ) from exc
-    if not isinstance(payload, dict):
+    except ValueError as exc:
+        path = _state_path(project_root)
         raise VerticalResolutionError(
             f"PIPELINE_STATE.json at {path} is not a JSON object"
-        )
-    return payload
+        ) from exc
 
 
 def migrate_legacy_manager_state(
     state_root: Path | str,
     legacy_root: Path | str,
 ) -> bool:
-    """Import pre-isolation Manager state once without mutating the workspace."""
+    """Import pre-isolation Manager state once without mutating the workspace.
+
+    Raises when the source payload NAMES a vertical this installation cannot
+    resolve: importing it would seat the campaign on a vertical whose stages,
+    checklist, and completion hooks do not exist, and every later read would
+    fail somewhere less legible than here.
+
+    A payload that names NO vertical is a different situation and is imported
+    normally. The workdir copy of ``.argus/PIPELINE_STATE.json`` is not only a
+    legacy artifact — it is the live evidence root (every Manager stage call
+    passes ``evidence_root=self.execution_workdir``), so a project can hold
+    Manager-owned keys there, such as the math vertical's objective mode, before
+    the Manager has decided anything. Refusing those bricks the project: this
+    runs inside ``build_life_runner``, so raising kills the front-door runner,
+    which is reported to the operator as "could not classify … please retry" —
+    advice that can never succeed, for a project that is merely undecided.
+    """
     target_root = Path(state_root).expanduser()
     source_root = Path(legacy_root).expanduser()
     try:
@@ -316,9 +301,8 @@ def migrate_legacy_manager_state(
             return False
     except OSError:
         return False
-    target = _state_path(target_root)
     source = _state_path(source_root)
-    if target.exists() or not source.is_file():
+    if primary_pipeline_state_path(target_root).exists() or not source.is_file():
         return False
     payload = _load_state_payload(source_root)
     if not payload:
@@ -327,18 +311,30 @@ def migrate_legacy_manager_state(
     from ..verticals._data_domain import migrate_data_domains
 
     migrate_data_domains(source_root, target_root)
-    if _known_vertical(payload.get("vertical"), target_root) is None:
+    named = payload.get("vertical")
+    names_a_vertical = isinstance(named, str) and named.strip() != ""
+    if names_a_vertical and _known_vertical(named, target_root) is None:
         raise VerticalResolutionError(
-            "legacy Manager state does not name a resolvable vertical"
+            f"legacy Manager state at {source} names vertical {named!r}, which is "
+            f"neither a built-in vertical (available: "
+            f"{', '.join(available_verticals())}) nor a project data domain"
         )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + f".migrate.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, target)
-    resolve_vertical(target_root)
+    if primary_pipeline_state_path(target_root).exists():
+        return False
+    write_pipeline_state(target_root, payload)
+    if names_a_vertical:
+        from ..verticals._base import load_vertical, vertical_import_legacy_state
+
+        vertical_import_legacy_state(
+            load_vertical(_known_vertical(named, target_root), target_root),
+            source_root=source_root,
+            state_root=target_root,
+        )
+        # Warm read that proves the imported decision resolves against the new
+        # root. Skipped when undecided: `resolve_vertical` would only log its
+        # "no Manager vertical resolved" fallback warning for a project that is
+        # correctly still waiting for the Manager to choose.
+        resolve_vertical(target_root)
     return True
 
 
@@ -487,10 +483,13 @@ def persist_vertical(
     *,
     domain: str | None = None,
     research_target_level: str | None = None,
+    research_direction_mode: str | None = None,
     workflow_mode: str | None = None,
+    start_stage: str = "",
     target_venue: str | None = None,
+    allow_research_direction_change: bool = False,
 ) -> None:
-    """Persist the chosen ``vertical`` into ``research/PIPELINE_STATE.json``.
+    """Persist the chosen ``vertical`` into ``.argus/PIPELINE_STATE.json``.
 
     Validates ``vertical`` against the known built-ins + existing project data
     domains; an unknown name RAISES ``UnknownVerticalError`` (no silent coercion
@@ -501,34 +500,21 @@ def persist_vertical(
 
     STAGE AUTHORITY — the harness must NOT control ``current_stage``; only the
     reviewer agent moves it (advance via its verdict, or roll back via
-    ``stage_machine.rollback_stage``). So this function SEEDS the vertical's
-    first stage only when no stage exists yet (initialization of a fresh state
-    file); it NEVER overwrites or resets an existing stage. A stale stage left
-    by a vertical change is real progress — clobbering it to the first stage is
-    an unauthorized rollback that destroys evidence. It is left for the
+    ``stage_machine.rollback_stage``). So this function SEEDS the requested valid
+    ``start_stage`` for direct work, otherwise the vertical's first stage, only
+    when no stage exists yet; it NEVER overwrites or resets an existing stage.
+    A stale stage left by a vertical change is real progress — clobbering it to
+    the first stage is an unauthorized rollback that destroys evidence. It is left for the
     reviewer / rollback path to handle, and the read-side ``current_stage()``
     already falls back to the vertical's first stage at read time without
     mutating the file.
     """
+    from .stage_machine import migrate_legacy_research_stage, normalize_stage_for_project
+
+    migrate_legacy_research_stage(project_root)
     legacy_direct = str(vertical or "").strip().lower() == "direct"
     vert = require_vertical(vertical, project_root)
-    path = _state_path(project_root)
-
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        payload: dict = {}
-    else:
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise VerticalResolutionError(
-                f"PIPELINE_STATE.json at {path} is not valid JSON: {exc}"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise VerticalResolutionError(
-                f"PIPELINE_STATE.json at {path} is not a JSON object"
-            )
+    payload = _load_state_payload(project_root)
 
     payload["vertical"] = vert
     if domain is not None:
@@ -571,8 +557,26 @@ def persist_vertical(
             raise ValueError(
                 f"invalid research target level: {research_target_level!r}"
             )
+        previous_target = normalize_research_target_level(
+            payload.get("research_target_level")
+        )
         payload["research_target_level"] = normalized_target
-        payload["research_target_set_at"] = time.time()
+        # STAMP ONLY ON A REAL CHANGE, for the same reason the stage below is
+        # seed-only. This timestamp exists so that raising the bar — say
+        # exploratory to publishable — retires certifications earned against
+        # the old bar: ``_research_project_done_issue`` walks the journal
+        # newest-first and stops at the first mission older than it. Stamping
+        # it on every re-persist made that gate unsatisfiable, because callers
+        # routinely re-affirm the level they just read. Every certification was
+        # older than the next re-stamp, so the Planner was told
+        # ``missing_<level>_reviewer_certification`` no matter what it did.
+        # Run 8 (s-fed750c2) solved the problem and proved it in Lean in
+        # mission 1, then spent missions 2, 3 and 4 certifying it, each one
+        # independently reviewed ``done`` and each one rejected.
+        if normalized_target != previous_target or not payload.get(
+            "research_target_set_at"
+        ):
+            payload["research_target_set_at"] = time.time()
     else:
         from ..verticals._base import load_vertical, vertical_research_target_levels
 
@@ -581,20 +585,58 @@ def persist_vertical(
         ):
             payload.pop("research_target_level", None)
             payload.pop("research_target_set_at", None)
+    if research_direction_mode is not None:
+        from ..core.research_contract import normalize_research_direction_mode
+
+        if vert != "research":
+            raise ValueError("research_direction_mode requires vertical='research'")
+        normalized_direction = normalize_research_direction_mode(
+            research_direction_mode
+        )
+        if normalized_direction is None:
+            raise ValueError(
+                f"invalid research direction mode: {research_direction_mode!r}"
+            )
+        previous_direction = normalize_research_direction_mode(
+            payload.get("research_direction_mode")
+        )
+        if (
+            previous_direction
+            and normalized_direction != previous_direction
+            and not allow_research_direction_change
+        ):
+            raise ValueError(
+                "research direction mode cannot change without a new "
+                "operator-authorized intent"
+            )
+        payload["research_direction_mode"] = normalized_direction
+    elif vert != "research":
+        payload.pop("research_direction_mode", None)
 
     # SEED-ONLY, NEVER RESET. Stage authority belongs to the reviewer agent
     # (see docstring). Write an initial stage only when none exists yet — leave
     # any existing stage, even one not in this vertical's order, untouched.
     if not _normalize_stage(payload.get("current_stage")):
-        first_stage = _vertical_first_stage(vert, project_root)
-        if first_stage:
-            payload["current_stage"] = first_stage
+        initial_stage = (
+            normalize_stage_for_project(
+                project_root, start_stage, vertical=vert, require_known=True,
+            )
+            if payload.get("workflow_mode") == "direct" and start_stage else ""
+        )
+        initial_stage = initial_stage or _vertical_first_stage(vert, project_root)
+        if initial_stage:
+            payload["current_stage"] = initial_stage
+    if vert == "research":
+        payload.setdefault("selected_idea", None)
+        payload.setdefault("current_verdict", "in_progress")
+        payload.setdefault("research_intent_generation", 1)
+        payload.setdefault("legacy_selection_consumed", False)
+        payload.setdefault(
+            "next_action",
+            f"Continue the current {payload.get('current_stage') or 'idea'} stage.",
+        )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    tmp_path = path.with_name(path.name + ".tmp")
-    tmp_path.write_text(rendered, encoding="utf-8")
-    os.replace(tmp_path, path)
+    write_pipeline_state(project_root, payload)
 
 
 # --- new-intent vs. reclassification triage --------------------------------
@@ -620,11 +662,8 @@ def _vertical_completion_record(
         return None
 
     try:
-        raw = _state_path(project_root).read_text(encoding="utf-8")
-        payload = json.loads(raw)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
+        payload = _load_state_payload(project_root)
+    except VerticalResolutionError:
         return None
 
     current = _normalize_stage(payload.get("current_stage"))
@@ -706,6 +745,130 @@ def vertical_reached_own_terminal_stage(project_root: object, vertical: str) -> 
     return _vertical_completion_record(project_root, vertical) is not None
 
 
+def vertical_completion_certificate_status(
+    project_root: object,
+    vertical: str,
+) -> dict[str, Any]:
+    """Whether terminal ``done`` matches the contract, and if not, what differs.
+
+    Returns ``{"ok": True}`` or a rejection carrying the stage that actually
+    holds the record plus both fingerprints. The bool wrapper below is the
+    predicate everything decides on; this is what the rejection gets to *say*.
+    Fails closed on every error, as the predicate always has.
+
+    Two things this deliberately does NOT prove, stated here because four
+    docstrings in this tree once implied otherwise. The fingerprint is a hash of
+    the live checklist contract — framework source, no project evidence, no
+    goal, no actor, no secret — so anyone able to import
+    ``completion_contract_fingerprint`` can compute the expected value. It
+    detects a checklist that *moved* since certification; it does not
+    authenticate who certified. And ``_vertical_completion_record``'s structural
+    audit checks that an early completion is internally consistent, not that it
+    was ever legitimate.
+
+    Which is how testbed run 13 read ``{"ok": True}`` with two of math's three
+    stages ``skipped`` and the review never done. So early completion is checked
+    against the project's workflow mode here as well as at the write side:
+    ``direct`` mode is the one arrangement under which stopping before the final
+    stage is a real outcome rather than an abandoned pipeline. Run 13 was
+    ``staged``.
+    """
+    completion = _vertical_completion_record(project_root, vertical)
+    if completion is None:
+        return {"ok": False, "reason": "no certified completion record"}
+    completed_stage, record = completion
+    detail: dict[str, Any] = {"ok": False, "stage": completed_stage}
+    source = str(record.get("completion_contract_source") or "").strip()
+    if source:
+        detail["source"] = source
+    try:
+        from ..verticals._base import (
+            load_vertical,
+            vertical_checklist_stage_order,
+            vertical_completion_contract_version,
+        )
+
+        module = load_vertical(vertical, project_root=project_root)
+        completion_contract_version = vertical_completion_contract_version(module)
+        stage_order = [
+            _normalize_stage(stage)
+            for stage in vertical_checklist_stage_order(module)
+        ]
+    except Exception:  # noqa: BLE001 — strict completion fails closed
+        return {**detail, "reason": "completion contract version unreadable"}
+    if stage_order and completed_stage != stage_order[-1]:
+        try:
+            mode = resolve_workflow_mode(project_root)
+        except Exception:  # noqa: BLE001 — an unreadable mode fails closed
+            mode = ""
+        if mode != "direct":
+            skipped = ", ".join(stage_order[stage_order.index(completed_stage) + 1:]) \
+                if completed_stage in stage_order else "later stages"
+            return {
+                **detail,
+                "reason": (
+                    f"completion is recorded at {completed_stage!r}, not the "
+                    f"final stage {stage_order[-1]!r}, and workflow mode "
+                    f"{mode or 'unknown'!r} does not permit stopping early. "
+                    f"Skipped without certification: {skipped}"
+                ),
+                "workflow_mode": mode,
+                "final_stage": stage_order[-1],
+            }
+    manuscript_root = str(record.get("manuscript_project_root") or "").strip()
+    manuscript_binding = record.get("manuscript_snapshot")
+    if str(vertical or "").strip().casefold() == "research":
+        binding_root = Path(manuscript_root or str(project_root))
+        if (
+            (binding_root / "paper/main.tex").is_file()
+            and not isinstance(manuscript_binding, dict)
+        ):
+            return {
+                **detail,
+                "reason": "unbound (certification did not record the manuscript version)",
+                "freshness_status": "unbound",
+            }
+    if completion_contract_version <= 0:
+        return {"ok": True}
+    try:
+        from .stage_machine import completion_contract_fingerprint
+
+        expected = completion_contract_fingerprint(
+            Path(str(project_root)),
+            completed_stage,
+            version=completion_contract_version,
+        )
+    except Exception:  # noqa: BLE001 — versioned completion fails closed
+        return {**detail, "reason": "completion contract could not be recomputed"}
+    detail["expected"] = expected
+    detail["version"] = completion_contract_version
+    try:
+        persisted_version = int(record.get("completion_contract_version") or 0)
+    except (TypeError, ValueError):
+        return {**detail, "reason": "persisted contract version is not a number"}
+    persisted = str(record.get("completion_contract_sha256") or "")
+    detail["persisted"] = persisted
+    detail["persisted_version"] = persisted_version
+    if persisted_version != completion_contract_version:
+        return {**detail, "reason": "contract version moved since certification"}
+    if persisted != expected:
+        return {**detail, "reason": "certified checklist differs from the live one"}
+    if isinstance(manuscript_binding, dict) and manuscript_root:
+        try:
+            from ..core.manuscript_snapshot import manuscript_review_status
+
+            freshness = manuscript_review_status(record, manuscript_root)
+        except Exception:  # noqa: BLE001 - unreadable paper identity fails closed
+            return {**detail, "reason": "certified manuscript identity unreadable"}
+        if freshness.get("status") != "current":
+            return {
+                **detail,
+                "reason": str(freshness.get("message") or "certified manuscript is stale"),
+                "freshness_status": freshness.get("status"),
+            }
+    return {"ok": True}
+
+
 def vertical_has_current_completion_certificate(
     project_root: object,
     vertical: str,
@@ -716,39 +879,8 @@ def vertical_has_current_completion_certificate(
     decisions use this stricter predicate so a versioned checklist change forces
     one fresh Reviewer/Manager certification.
     """
-    completion = _vertical_completion_record(project_root, vertical)
-    if completion is None:
-        return False
-    completed_stage, record = completion
-    try:
-        from ..verticals._base import (
-            load_vertical,
-            vertical_completion_contract_version,
-        )
-
-        module = load_vertical(vertical, project_root=project_root)
-        completion_contract_version = vertical_completion_contract_version(module)
-    except Exception:  # noqa: BLE001 — strict completion fails closed
-        return False
-    if completion_contract_version <= 0:
-        return True
-    try:
-        from .stage_machine import completion_contract_fingerprint
-
-        expected = completion_contract_fingerprint(
-            Path(str(project_root)),
-            completed_stage,
-            version=completion_contract_version,
-        )
-    except Exception:  # noqa: BLE001 — versioned completion fails closed
-        return False
-    try:
-        persisted_version = int(record.get("completion_contract_version") or 0)
-    except (TypeError, ValueError):
-        return False
     return bool(
-        persisted_version == completion_contract_version
-        and str(record.get("completion_contract_sha256") or "") == expected
+        vertical_completion_certificate_status(project_root, vertical).get("ok")
     )
 
 
@@ -820,7 +952,7 @@ def reset_stage_for_new_intent(
         return False
 
     try:
-        if force_replacement:
+        if force_replacement or new_vertical == "research":
             from .stage_machine import reset_stage_for_replacement_intent
 
             reset_stage_for_replacement_intent(
@@ -830,6 +962,12 @@ def reset_stage_for_new_intent(
                     "operator replaced the standing Manager objective; resetting "
                     f"the superseded {old_vertical!r} pipeline to the first stage "
                     f"of {new_vertical!r} instead of preserving incompatible progress."
+                    if force_replacement
+                    else (
+                        f"prior vertical {old_vertical!r} was complete and a new "
+                        f"operator intent selected {new_vertical!r}; start its first "
+                        "stage without recording a research rollback."
+                    )
                 ),
                 reset_by="manager",
                 evidence_root=evidence_root,
@@ -858,6 +996,33 @@ def reset_stage_for_new_intent(
             old_vertical, new_vertical, exc_info=True,
         )
         return False
+    if new_vertical == "research":
+        payload = _load_state_payload(project_root)
+        try:
+            generation = max(
+                1,
+                int(payload.get("research_intent_generation") or 1),
+            )
+        except (TypeError, ValueError):
+            generation = 1
+        payload["research_intent_generation"] = generation + 1
+        # A replacement intent is never an initial migration. Permanently
+        # consume the legacy-import opportunity before the fresh portfolio is
+        # formed, even if no earlier runtime reached library preparation.
+        payload["legacy_selection_consumed"] = True
+        payload.pop("idea_portfolio", None)
+        payload["selected_idea"] = None
+        payload["current_verdict"] = "in_progress"
+        payload["next_action"] = f"Continue the current {new_order[0]} stage."
+        write_pipeline_state(project_root, payload)
+        handoff_root = Path(evidence_root or project_root)
+        try:
+            (handoff_root / "HANDOFF.md").unlink(missing_ok=True)
+        except OSError:
+            log.debug(
+                "reset_stage_for_new_intent: could not clear stale HANDOFF.md",
+                exc_info=True,
+            )
     return True
 
 

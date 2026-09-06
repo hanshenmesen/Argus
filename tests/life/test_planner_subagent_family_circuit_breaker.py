@@ -157,6 +157,44 @@ def _flat_verdict_kv(*tasks: tuple[str, str, str]) -> str:
     return "\n".join(lines)
 
 
+def test_planner_structured_stage_request_advances_before_enqueue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_root = tmp_path / "project"
+    pipeline = project_root / ".argus" / "PIPELINE_STATE.json"
+    pipeline.parent.mkdir(parents=True)
+    pipeline.write_text(
+        json.dumps({"vertical": "research", "current_stage": "idea"}),
+        encoding="utf-8",
+    )
+    (project_root / "HANDOFF.md").write_text(
+        "# HANDOFF — IDEA\n\nThe idea is selected and ready to implement.",
+        encoding="utf-8",
+    )
+    supervisor = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        "\n".join(
+            [
+                "PROJECT_DONE=false",
+                "REASON=run the real benchmark next",
+                "ADVANCE_TO_STAGE=experiment",
+                "TASK_KEY=experiment",
+                "TASK_TITLE=Run decisive experiment",
+                "TASK_OBJECTIVE=Execute the real public benchmark.",
+            ]
+        ),
+        project_worktree=project_root,
+    )
+    supervisor.config.project_state_dir = project_root
+
+    assert supervisor._plan_next_work() is True
+    assert json.loads(pipeline.read_text())["current_stage"] == "experiment"
+    item = supervisor.memory.backlog.all()[0]
+    assert "stage:experiment" in item.tags
+
+
 def test_missing_parent_context_ref_is_dropped_without_rejecting_batch(
     tmp_path,
     monkeypatch,
@@ -345,7 +383,7 @@ def test_dedup_uses_canonical_scope_and_acceptance_metadata(
             "TASK_ACCEPTANCE_CHECK=validator exits zero",
             "TASK_SCOPE=final_submission",
             "TASK_STAGE_CLOSING=false",
-            "TASK_REQUIRE_INDEPENDENT_REVIEW=false",
+            "TASK_REQUIRE_INDEPENDENT_REVIEW=true",
             "TASK_SKIP_STAGE_TRANSITION=false",
         ]
     )
@@ -387,7 +425,7 @@ def test_duplicate_prerequisite_key_maps_to_existing_backlog_item(
             "TASK_ACCEPTANCE_CHECK=input bundle exists",
             "TASK_SCOPE=bounded",
             "TASK_STAGE_CLOSING=false",
-            "TASK_REQUIRE_INDEPENDENT_REVIEW=false",
+            "TASK_REQUIRE_INDEPENDENT_REVIEW=true",
             "TASK_SKIP_STAGE_TRANSITION=false",
             "TASK_KEY=child",
             "TASK_DEPS=parent",
@@ -397,7 +435,7 @@ def test_duplicate_prerequisite_key_maps_to_existing_backlog_item(
             "TASK_ACCEPTANCE_CHECK=analysis report exists",
             "TASK_SCOPE=bounded",
             "TASK_STAGE_CLOSING=false",
-            "TASK_REQUIRE_INDEPENDENT_REVIEW=false",
+            "TASK_REQUIRE_INDEPENDENT_REVIEW=true",
             "TASK_SKIP_STAGE_TRANSITION=false",
         ]
     )
@@ -407,7 +445,7 @@ def test_duplicate_prerequisite_key_maps_to_existing_backlog_item(
         verdict,
         project_worktree=project_root,
     )
-    supervisor.memory.backlog.add(
+    parent = supervisor.memory.backlog.add(
         BacklogItem.new(
             title="Prepare inputs",
             objective="Prepare the validated input bundle.",
@@ -421,7 +459,7 @@ def test_duplicate_prerequisite_key_maps_to_existing_backlog_item(
     items = supervisor.memory.backlog.all()
     child = next(item for item in items if item.title == "Run child analysis")
     assert result is True
-    assert child.deps == []
+    assert child.deps == [parent.id]
 
 
 def test_recent_no_progress_failure_still_quarantines_expanded_task_signature(

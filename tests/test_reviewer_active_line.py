@@ -23,15 +23,39 @@ def test_reviewer_is_not_given_checkpoint_bookkeeping():
     p = _prompt()
     assert "/tmp/project/CHECKPOINT.md" not in p
     assert "CHECKPOINT_RECOMMENDED" not in p
-    assert "Do not inspect or edit checkpoint/context-packet/handoff bookkeeping" in p
+    assert "Do not inspect or edit checkpoint or context bookkeeping" in p
 
 
 def test_reviewer_never_acts_as_checkpoint_editor():
     p = _prompt()
-    assert "strictly read-only" in p
-    assert "Put the next Engineer instruction only in NEXT_ACTION" in p
-    assert "only in proportion to unresolved uncertainty" in p
+    assert "You do not change the work under review" in p
+    assert "Put the next Engineer instruction only in next_action" in p
+    assert "Inspect claim-critical uncertainty with proportional tools" in p
+    assert (
+        "Never reward virtue's form in negative results, hedging, limitation lists, "
+        "or repeat runs—only anchored, decision-changing content; positive and "
+        "negative claims share one evidence standard."
+    ) in p
     assert "six total read/search tool calls" not in p
+
+
+def test_the_no_mutation_rule_says_what_it_covers_and_what_it_does_not():
+    """It used to read "You are strictly read-only", which was not true.
+
+    Verticals hand the Reviewer commands that write: math's review skill tells
+    it to file `math_state judge` and `citation_check attribute`, and those
+    records are the independent-review evidence channel — the one thing only a
+    Reviewer can supply. A model holding both instructions has to pick one, and
+    the read-only sentence is the categorical one, so the channel starves
+    silently and the gate that waits on it never sees a check that was never
+    filed. The rule is about the *work under review*, so it now says that.
+    """
+    p = _prompt()
+
+    for forbidden in ("not its sources", "not its artifacts", "not its build"):
+        assert forbidden in p, "the prohibition still has to enumerate its scope"
+    assert "Recording your own verdict through a command your vertical gives you" in p
+    assert "strictly read-only" not in p
 
 
 def test_checkpoint_state_is_not_copied_into_the_prompt():
@@ -44,12 +68,12 @@ def test_reviewer_final_handoff_requires_explicit_progress_fields():
     p = _prompt()
 
     for field in (
-        "FORWARD_PROGRESS=true|false",
-        "PLAN_SIGNAL=continue|reconsider",
-        "PLAN_CHALLENGE=<invalidated plan assumption, or none>",
-        "PLAN_ALTERNATIVE=<better technical route, or none>",
-        "AUTHORITY_IMPACT=technical|manager_contract|operator",
-        "OPERATOR_OPTIONS=<id :: true|false :: label :: description; ...|none>",
+        "FORWARD_PROGRESS=true",
+        "PLAN_SIGNAL=continue",
+        "`plan_challenge`",
+        "`plan_alternative`",
+        "`authority_impact`",
+        "`OPERATOR_OPTIONS=",
     ):
         assert field in p
     assert "Return only STATUS, REASON, NEXT_ACTION and OPERATOR_QUESTION" not in p
