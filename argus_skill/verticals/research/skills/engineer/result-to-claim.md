@@ -19,6 +19,7 @@ Decide:
 
 If the paper-entry bar is not met, keep improving the method in Experiment.
 Do not reopen Idea selection or turn failed attempts into a negative-result
-paper. When the bar is met, rewrite `HANDOFF.md` with the positive thesis,
+paper; a negative or boundary thesis reaches Paper only when its evidence is as
+complete as a positive one would need. When the bar is met, rewrite `HANDOFF.md` with the positive thesis,
 decisive comparisons, essential contrary evidence, and direct sources Paper
 needs.

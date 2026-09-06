@@ -41,10 +41,13 @@ do not become the narrative.
    thesis. Keep complete method and result matrices in Methods, tables, or the
    Appendix while prose selects and interprets the entries that change the
    current inference. Selection changes emphasis, never scientific coverage.
-6. Preserve the drafting contract: a five-sentence abstract with at least 170
-   words, exact headline numbers where they establish the claim, and a numerical
-   takeaway in every figure and table caption. Repetition is allowed when it
-   serves a different section role; repeated matrix recitation is not.
+6. Write to the standard of a strong accepted paper at the selected venue. There
+   is no house quota for abstract length, number density, or caption format: the
+   claim decides how long, how numerical, and how hedged each passage is, and the
+   venue's accepted papers show the norm. Headline numbers go where they
+   establish the claim; a caption tells the reader what to see. Repetition is
+   allowed when it serves a different section role; repeated matrix recitation
+   is not.
 7. Resolve citations against primary sources and keep claims consistent with
    the executed code and raw results.
 8. Produce editable figure sources, publication-size exports, and a readable

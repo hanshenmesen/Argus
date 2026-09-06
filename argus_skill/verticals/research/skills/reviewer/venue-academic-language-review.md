@@ -18,9 +18,17 @@ artifact.
   why the result matters.
 - Make the title, abstract, introduction, contributions, results, and conclusion
   express one consistent thesis.
-- Preserve the five-sentence, at-least-170-word abstract contract, exact
-  headline evidence in the major reader-facing locations, and numerical
-  takeaways in figure and table captions.
+- Judge the writing as a reviewer at the selected venue would: would this be
+  accepted, and what would a careful reader object to? Enforce no abstract
+  length, sentence count, number density, or caption format; a longer or
+  shorter abstract, more or fewer numbers, and repeated headline figures are
+  fine when they serve the argument at that venue.
+- Object when a claim outruns its evidence, when a number's meaning is unclear
+  from its context, when hedging or limitation lists stand in for a clear
+  statement, or when internal workflow vocabulary (bounded, certified, gate,
+  artifact, mission, round, handoff, validator, audit) appears. Do not ask for
+  more hedging than the evidence requires, and do not ask for a number where a
+  plain statement is clearer.
 - Check whether headline, mechanism, disambiguating-control, scope-changing,
   and completeness evidence are visibly prioritized rather than reported as one
   flat experiment inventory.

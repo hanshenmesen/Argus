@@ -36,15 +36,28 @@ def _paper_stage() -> str:
     return " ".join(item.statement.lower() for item in STAGE_CHECKLISTS["paper"])
 
 
-def test_drafting_keeps_existing_density_requirements() -> None:
+def test_drafting_lets_the_venue_and_claim_decide_the_form() -> None:
     drafting = _research_skill("engineer/venue-paper-drafting.md")
     playbook = _research_skill("research-paper-playbook.md")
 
     for text in (drafting, playbook):
-        assert "five-sentence abstract" in text
-        assert "at least 170 words" in text
-        assert "numerical takeaway" in text
-        assert "exact headline" in text
+        assert "strong accepted paper at the selected venue" in text
+        assert "no house quota" in text
+        assert "170" not in text
+        assert "five-sentence" not in text
+    assert "hedge a sentence only when the evidence for that sentence" in drafting
+    assert "workflow words (bounded, certified, gate" in drafting
+    assert "legitimate paper when its evidence is as complete" in drafting
+
+
+def test_no_research_prompt_or_skill_carries_a_writing_quota() -> None:
+    root = Path(argus_skill.__file__).parent / "verticals" / "research"
+    offenders = []
+    for path in list(root.rglob("*.py")) + list(root.rglob("*.md")):
+        text = path.read_text(encoding="utf-8").lower()
+        if "five-sentence" in text or "170-word" in text or "at least 170" in text:
+            offenders.append(path.relative_to(root).as_posix())
+    assert offenders == []
 
 
 def test_drafting_selects_and_packages_without_dropping_coverage() -> None:
@@ -66,14 +79,14 @@ def test_drafting_selects_and_packages_without_dropping_coverage() -> None:
 def test_paper_stage_allows_role_bearing_repetition_not_matrix_recital() -> None:
     paper = _paper_stage()
 
-    assert "five-sentence" in paper
-    assert "at-least-170-word" in paper
+    assert "no house quota" in paper
+    assert "170" not in paper
     assert "same headline number may recur" in paper
     assert "mechanical repetition cap" in paper
     assert "full result matrix" in paper
 
 
-def test_paper_engineer_prompt_carries_packaging_contract() -> None:
+def test_paper_engineer_prompt_carries_the_writing_standard() -> None:
     prompt = render_role_prompt_fragment(
         role="engineer",
         operation="mission",
@@ -82,15 +95,16 @@ def test_paper_engineer_prompt_carries_packaging_contract() -> None:
         project_root=None,
     ).lower()
 
-    assert "paper evidence selection and packaging" in prompt
-    assert "five-sentence abstract of at least 170 words" in prompt
-    assert "numerical takeaway" in prompt
-    assert "same exact headline number may recur" in prompt
-    assert "universal repetition cap" in prompt
+    assert "paper writing standard" in prompt
+    assert "no house quota" in prompt
+    assert "let the claim decide the form" in prompt
+    assert "170" not in prompt
+    assert "a headline number may recur" in prompt
+    assert "method-by-dataset-by-metric" in prompt
     assert "evidence-chain language" in prompt
 
 
-def test_integrated_reviewer_judges_roles_not_raw_repetition_count() -> None:
+def test_integrated_reviewer_judges_as_a_venue_reviewer() -> None:
     prompt = render_role_prompt_fragment(
         role="reviewer",
         operation="evaluate",
@@ -99,10 +113,11 @@ def test_integrated_reviewer_judges_roles_not_raw_repetition_count() -> None:
         project_root=None,
     ).lower()
 
-    assert "at-least-170-word abstract" in prompt
-    assert "numerical-caption requirements" in prompt
-    assert "allow exact headline numbers to recur" in prompt
-    assert "not to repetition by a mechanical count" in prompt
+    assert "as a reviewer at the selected venue would" in prompt
+    assert "do not enforce an abstract length" in prompt
+    assert "170" not in prompt
+    assert "headline figure that recurs" in prompt
+    assert "do not ask for more hedging than the evidence requires" in prompt
 
 
 def test_operation_prompts_enforce_narrative_and_cold_read_input_boundaries(

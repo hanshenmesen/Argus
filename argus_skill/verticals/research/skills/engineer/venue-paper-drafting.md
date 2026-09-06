@@ -11,12 +11,19 @@ venue's current official author kit.
 
 ## Select and package the evidence
 
-Keep the existing paper-facing requirements: write a five-sentence abstract of
-at least 170 words, use exact headline numbers in the major reader-facing
-locations where they establish the claim, and give every figure and table
-caption a numerical takeaway. Keep the complete method, baseline, control,
-adverse-result, uncertainty, and scope coverage in the paper. These requirements
-make the paper substantive; do not weaken them to make the draft feel lighter.
+The standard is a strong accepted paper at the selected venue, the kind the
+exemplar skill has you read. There is no house quota for sentences, words,
+numbers, or caption format; the claim decides the form. The abstract is as long
+and as numerical as the venue's norm and the claim require: a large speedup is
+stated as a speedup, a narrow margin with its uncertainty, a mechanism finding
+perhaps with no number at all. In prose, give a number the precision the
+comparison needs (usually two or three significant digits) and keep full
+precision in tables; a paragraph that has become a list of numbers has stopped
+arguing. Say plainly what the evidence establishes, state each limit once where
+it matters, and hedge a sentence only when the evidence for that sentence is
+uncertain. Keep the complete method, baseline, control, adverse-result,
+uncertainty, and scope coverage in the paper; selection changes where evidence
+lives, never whether it is there.
 
 Before drafting prose, assign the complete evidence to five roles:
 
@@ -51,19 +58,25 @@ method-by-dataset-by-metric recital into every location.
   resource conditions.
 - Include every intended claim-bearing experiment, figure, table, and citation.
 - Keep internal paths, role names, workflow language, and development history
-  out of the manuscript.
-- Do not write a negative-result paper or experiment chronology.
+  out of the manuscript. Evidence-role words (headline, mechanism, control,
+  scope, completeness) and workflow words (bounded, certified, gate, artifact,
+  mission, round, handoff, validator, audit) never appear in the paper.
+- Do not write an experiment chronology, and do not present unfinished
+  development as a finding. A clear thesis that the method helps only under
+  identified conditions, or that an expected effect does not hold, is a
+  legitimate paper when its evidence is as complete as a positive result would
+  need.
 
 Every figure and table must carry a scientific claim. Figure 1 should explain
 the method or central mechanism. Table 1 should normally present the main
 quantitative result. For a method pipeline, open `research-svg-pipeline.md` and
 draw the current code and paper as a compact, horizontal, staggered SVG with
 Times New Roman; include its vector PDF export. Use readable publication-scale typography and conventional
-axes, units, captions, and uncertainty. Package a caption as the question the
-figure answers, the necessary comparison conditions, the decisive exact number,
-and what that number establishes. The visual carries the complete matrix; the
-caption identifies its reader-facing structure rather than reading every cell
-aloud.
+axes, units, captions, and uncertainty. A caption tells the reader what to see:
+the question the figure answers, the comparison conditions that matter, and the
+decisive number when the number is the point or the pattern when the pattern is
+the point. The visual carries the complete matrix; the caption identifies its
+reader-facing structure rather than reading every cell aloud.
 
 Maintain only `paper/main.tex`, its direct included sources, bibliography,
 figures, tables, rendered paper, and project-root `HANDOFF.md`. Compile under

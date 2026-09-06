@@ -33,8 +33,8 @@ claim-critical references without recursively inspecting history.
 2. Run `narrative_edit` as a fresh-context Engineer operation. Start from the
    existing manuscript and current findings. Repair only a located obstacle to
    reader understanding or the argument, preserving clear content, structure,
-   wording, exact facts, complete coverage, the five-sentence/170-word abstract,
-   and numerical captions. Prefer a missing explanation or local sentence
+   wording, exact facts, complete coverage, and the abstract's claims and
+   evidence. Prefer a missing explanation or local sentence
    adjustment; explain why local repair is insufficient before widening scope.
    If no concrete problem needs repair, return without changing the manuscript.
    Compile if manuscript inputs changed or the PDF is missing or stale; reuse

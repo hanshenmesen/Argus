@@ -226,3 +226,23 @@ runtime checkout 的 rev(现为 `600c013af166`;若你先部署了新代码则为
   待该提交作者修复)。
 - 历史全记录:`docs/handoff-2026-09-04-capability-tests.md`(第一至十六节,
   含全部提交 hash、部署记录、评审发现与红/绿验证)。
+
+## 2026-09-06 · 论文写作规则改为"按会场标准、由论点定形式"
+
+原来的写作契约（五句、≥170 词摘要；每个标题数字精确到底；每个 caption 必须带数字；
+证据角色词汇）散落在 prompt_policy.py、stages.py 和四份 skill 里，产出的论文变成
+数字墙加审计报告口吻（write-01 里 71 个 ≥4 位小数、FuseHead 摘要约 15 个数字）。
+现在改为一个共用标准 `paper_writing_standard()` / `paper_reviewer_standard()`：
+
+- 标准是所选会场的优秀录用论文（exemplar skill 读到的那种），不设句数、词数、
+  数字密度、caption 格式配额；论点决定形式，正文数字取比较所需精度，全精度进表格。
+- 每个限制只说一次，只在证据不确定的句子里 hedge；证据角色词和流程词
+  （bounded/certified/gate/artifact/mission/round/handoff/validator/audit）不得出现在稿件里。
+- 条件性或否定性论点只要证据完备就是合法论文；不允许的是把未完成的开发包装成发现。
+- Reviewer 以会场审稿人身份判断"会不会被录用、读者会反对什么"，不执行任何配额，
+  不要求超出证据的 hedge，也不在平实陈述更清楚的地方要求数字。
+
+测试：tests/skills/test_paper_narrative_packaging.py 改为断言新标准，并加了
+"research 任何 prompt/skill 不得再出现写作配额"的守护测试。
+`test_research_protocol_quality.py::test_review_combines_parallel_scientific_visual_and_language_passes`
+在本改动之前（775f8b8cc）已经失败，与本次无关。

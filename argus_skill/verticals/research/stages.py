@@ -144,7 +144,8 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             statement=(
                 "Treat method, experiment, evaluator, and evidence defects as repair work "
                 "inside Experiment. Keep the selected idea and current stage; never request "
-                "a rollback or convert unfinished development into a negative-result paper."
+                "a rollback or convert unfinished development into a negative-result paper; a "
+                "negative or boundary thesis earns Paper only with complete evidence for it."
             ),
             evidence_hint="repaired work products and the next decisive comparison",
         ),
@@ -175,19 +176,21 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "completeness role: keep complete matrices in Methods, tables, or the "
                 "Appendix while prose interprets the comparisons that change the current "
                 "inference. Do not organize it as an experiment chronology or ship a "
-                "development shortfall as a negative-result report."
+                "development shortfall as a finding; a negative or boundary thesis is a "
+                "paper only when its evidence is as complete as a positive one would need."
             ),
             evidence_hint="paper/main.tex",
         ),
         ChecklistItem(
             id="paper.presentation",
             statement=(
-                "Preserve the five-sentence, at-least-170-word abstract contract, exact "
-                "headline numbers in the major reader-facing locations where they establish "
-                "the claim, and a numerical takeaway in every figure and table caption. "
-                "The same headline number may recur for a different section role; do not "
-                "apply a mechanical repetition cap or recite the same full result matrix "
-                "in every location."
+                "Write to the standard of a strong accepted paper at the selected venue, "
+                "with no house quota for abstract length, number density, or caption "
+                "format: the claim decides how long, how numerical, and how hedged each "
+                "passage is. Headline evidence appears where it establishes the claim, "
+                "a caption tells the reader what to see, and the same headline number may "
+                "recur for a different section role; do not apply a mechanical repetition "
+                "cap or recite the same full result matrix in every location."
             ),
             evidence_hint="paper/main.tex and its rendered figures and tables",
         ),
@@ -297,8 +300,9 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "The cold reader sees only the rendered PDF and judges centrality, progression, "
                 "evidence hierarchy, inference after exact numbers, academic prose, timing, and "
                 "visual narrative. "
-                "It does not penalize scientific density, complete controls, five-sentence/170-word "
-                "abstracts, numerical captions, or repeated headline numbers by themselves."
+                "It judges as a venue reviewer would and enforces no abstract length, number "
+                "density, or caption format; scientific density, complete controls, and "
+                "repeated headline numbers are not defects by themselves."
             ),
             evidence_hint="an isolated workspace containing only paper/main.pdf",
         ),

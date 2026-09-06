@@ -164,12 +164,9 @@ def academic_paper_review_block() -> str:
         "inside the verdict's `REASON=` value as "
         "`Scientific: ... | Visual: ... | Language: ...`; do not leave them only in prose "
         "before the verdict. Do not edit files or change stage state. Never reopen "
-        "selection or move backward. In the language assessment, preserve the existing "
-        "five-sentence, at-least-170-word abstract and numerical-caption requirements. "
-        "Judge whether evidence is prioritized as headline, mechanism, disambiguating "
-        "control, scope-changing, or completeness evidence. Allow exact headline numbers "
-        "to recur for different section roles; object to flat matrix recital and internal "
-        "audit language, not to repetition by a mechanical count. For each required "
+        "selection or move backward. "
+        + paper_reviewer_standard()
+        + " For each required "
         "narrative repair, identify its location, the concrete obstacle to understanding "
         "or inference, and the smallest repair goal. Calling prose report-like, "
         "unacademic, or less fluent is insufficient by itself. Close resolved findings; "
@@ -177,22 +174,66 @@ def academic_paper_review_block() -> str:
     )
 
 
+def paper_writing_standard() -> str:
+    """The one writing standard every paper-facing prompt shares.
+
+    It deliberately fixes no quota. The selected venue's strong accepted papers
+    are the reference, and the claim decides how long, how numerical, and how
+    hedged each passage should be.
+    """
+    return (
+        "The standard is a strong accepted paper at the selected venue, the kind the "
+        "exemplar skill has you read; there is no house quota for sentences, words, "
+        "numbers, or caption format. Let the claim decide the form. The abstract is as "
+        "long and as numerical as the venue's norm and the claim require: a large "
+        "speedup is stated as a speedup, a narrow margin is stated with its "
+        "uncertainty, and a mechanism finding may need no number at all. In prose, "
+        "give a number the precision the comparison needs, usually two or three "
+        "significant digits, and keep full precision in tables; a paragraph that has "
+        "become a list of numbers has stopped arguing. A caption tells the reader what "
+        "to see: a number when the number is the point, a pattern when the pattern is "
+        "the point. Say plainly what the evidence establishes, state each limit once "
+        "where it matters, and hedge a sentence only when the evidence for that "
+        "sentence is uncertain. Think in evidence roles (headline, mechanism, control, "
+        "scope, completeness) while deciding what goes where, but those words, and "
+        "every workflow word such as bounded, certified, gate, artifact, mission, "
+        "round, handoff, validator, or audit, never appear in the manuscript. A clear "
+        "thesis that a method helps only under identified conditions, or that an "
+        "expected effect does not hold, is a legitimate paper when its evidence is as "
+        "complete as a positive result would need; what is not allowed is presenting "
+        "unfinished development as a finding."
+    )
+
+
+def paper_reviewer_standard() -> str:
+    """How the Reviewer applies the writing standard: as a venue reviewer, not a checker."""
+    return (
+        "Judge the writing as a reviewer at the selected venue would: would this be "
+        "accepted, and what would a careful reader object to? Do not enforce an "
+        "abstract length, sentence count, number density, or caption format; a longer "
+        "or shorter abstract, more or fewer numbers, and a headline figure that recurs "
+        "across sections are all fine when they serve the argument at that venue. "
+        "Object when a claim outruns its evidence, when a reader cannot recover the "
+        "central finding, when a number's meaning is unclear from its context, when "
+        "prose recites a result matrix instead of arguing, when hedging or limitation "
+        "lists stand in for a clear statement, or when internal workflow vocabulary "
+        "appears. Do not ask for more hedging than the evidence requires, and do not "
+        "ask for a number where a plain statement is clearer."
+    )
+
+
 def _paper_narrative_packaging_block() -> str:
     return (
-        "## Paper evidence selection and packaging\n"
-        "Keep the complete scientific evidence and the existing drafting contract: a "
-        "five-sentence abstract of at least 170 words, exact headline numbers where they "
-        "establish the claim, and a numerical takeaway in every figure and table caption. "
-        "Do not make the paper lighter by weakening those requirements. Before prose, "
-        "classify evidence as headline, mechanism, disambiguating control, scope-changing, "
-        "or completeness evidence. Keep complete definitions and matrices in Methods, "
-        "tables, or the Appendix; use prose to select the comparisons that change the "
-        "current inference and explain why. The same exact headline number may recur in "
-        "the abstract, introduction, results, caption, and conclusion when it serves each "
-        "location's distinct role. Do not apply a universal repetition cap or copy a flat "
-        "method-by-dataset-by-metric recital across sections. Translate gate, validator, "
-        "artifact-status, and evidence-chain language into the scientific question, exact "
-        "result, alternative explanation resolved, and resulting inference."
+        "## Paper writing standard\n"
+        + paper_writing_standard()
+        + " Keep the complete scientific evidence: complete definitions and matrices "
+        "live in Methods, tables, or the Appendix, and prose selects the comparisons "
+        "that change the current inference and explains why. A headline number may "
+        "recur in the abstract, introduction, results, caption, and conclusion when it "
+        "does each location's job; do not copy a flat method-by-dataset-by-metric "
+        "recital across sections. Translate any gate, validator, artifact-status, or "
+        "evidence-chain language into the scientific question, the result, the "
+        "alternative explanation resolved, and the resulting inference."
     )
 
 
@@ -232,8 +273,9 @@ def _narrative_editor_block() -> str:
         "what the evidence establishes using only supported inferences; keep other "
         "evidence in its existing carrier. "
         "You may propose moving unique content in your final handoff, but you may not "
-        "unilaterally remove it or change its scientific meaning. Keep the five-sentence, "
-        "at-least-170-word abstract and numerical-caption requirements. Compile when "
+        "unilaterally remove it or change its scientific meaning. Keep the abstract's "
+        "claims and evidence; its length and shape follow the venue and the claim, not a "
+        "quota. Compile when "
         "manuscript inputs changed or the rendered PDF is missing or stale; reuse a "
         "current PDF when no input changed."
     )
@@ -307,9 +349,10 @@ def _reviewer_fragment(
             "completeness evidence have visible hierarchy; whether the scientific meaning "
             "of key comparisons is clear from the passage and necessary context; and "
             "whether figures and numerical captions "
-            "answer a scientific question rather than resemble a dashboard. Dense "
-            "science, a long abstract, repeated headline numbers, and complete controls "
-            "are not defects by themselves. Do not demand another explanation after "
+            "answer a scientific question rather than resemble a dashboard. "
+            + paper_reviewer_standard()
+            + " Dense science and complete controls are not defects by themselves. "
+            "Do not demand another explanation after "
             "each number when the context already supplies it. For each required repair, "
             "return a PDF location, a concrete obstacle to understanding or inference, "
             "and the smallest repair goal. A report-like tone or a preference for "
@@ -323,8 +366,8 @@ def _reviewer_fragment(
             "assignment. Judge scientific meaning and coverage, not sentence identity. "
             "Verify headline evidence, exact values and directions, claims and scope, "
             "complete methods/baselines/controls/result matrices, adverse or null "
-            "findings, uncertainty, reproduction detail, the five-sentence and "
-            "170-word abstract contract, and numerical captions. A move from prose to "
+            "findings, uncertainty, reproduction detail, the abstract's claims and "
+            "evidence, and what each caption tells the reader. A move from prose to "
             "a clear table, Methods, Appendix, caption, or cross-reference is not loss. "
             "Any veto must name the exact lost reasoning step or its missing carrier. "
             "Do not edit either snapshot."
@@ -389,6 +432,8 @@ def render_role_prompt_fragment(
 
 __all__ = [
     "academic_paper_review_block",
+    "paper_reviewer_standard",
+    "paper_writing_standard",
     "active_research_context",
     "active_context_paths",
     "local_hardware_block",
