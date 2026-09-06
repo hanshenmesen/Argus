@@ -30,6 +30,10 @@ def reduce_manager_event(
             "id": item_id,
             "title": objective[:180],
             "objective": objective,
+            "summary": "",
+            "final_output": "",
+            "started_at": None,
+            "completed_at": None,
             "status": "grounding",
         })
         _set_role(view, "manager", "active", "Grounding project", ts)
@@ -57,6 +61,10 @@ def reduce_manager_event(
             "id": item_id,
             "title": objective[:180],
             "objective": objective,
+            "summary": "",
+            "final_output": "",
+            "started_at": None,
+            "completed_at": None,
             "status": "framed",
         })
         routing = dict(view.get("routing") or {})

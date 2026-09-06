@@ -1204,6 +1204,7 @@ class MissionExecutionSettlementMixin:
             ),
         )
         mission_summary = " ".join(raw_mission_summary.split())[:1200]
+        final_output = str(getattr(outcome, "final_output", "") or "").strip()
         # A completed mission needs one durable, operator-facing receipt rather
         # than three loosely related hints (event, chat text, and sidebar).
         # Resolve targets only from final Reviewer evidence, the accepted
@@ -1301,6 +1302,7 @@ class MissionExecutionSettlementMixin:
             "success": success,
             "status": status,
             "summary": mission_summary,
+            "final_output": final_output,
             "execution_workdir": str(state.execution_workdir),
             "delivery_candidates": [
                 str(candidate)

@@ -65,7 +65,10 @@ describe('renderEvent', () => {
       kind: 'agent_message',
       text: (
         'I need the operator to choose the report format.\n'
+        + 'Decision:\n'
         + 'MILESTONE_STATUS=continue\n'
+        + 'NEXT_OWNER=operator\n'
+        + 'ROLE_DECISION=ask\n'
         + 'OPERATOR_QUESTION=Which format?\n'
         + 'OPERATOR_OPTIONS=markdown :: false :: Markdown :: Human-readable report'
       ),
@@ -460,8 +463,6 @@ describe('semantic renderer shadow comparison', () => {
     const oldRendererBugs: Record<string, Partial<ReturnType<typeof semanticProjection>>> = {
       // The old web renderer leaks recognized credentials; the semantic core redacts them.
       'engineer.progress.secret-redaction': { text: 'using token <REDACTED:github-token>' },
-      // Python follow already strips NEXT_OWNER; the old web renderer strips only the other handoff fields.
-      'engineer.progress.handoff-fields': { text: 'Artifact complete.' },
       // A failed command was incorrectly dim in web even though TUI marks it as an error.
       'engineer.progress.failed-command': { tone: 'err', visibility: 'alert' },
       // The old label says duplicate even when policy deferred an unnecessary review purchase.

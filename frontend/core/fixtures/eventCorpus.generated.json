@@ -553,6 +553,7 @@
         "delivery_id": "delivery id",
         "elapsed_seconds": 1.25,
         "execution_workdir": "execution workdir",
+        "final_output": "final output",
         "item_id": "task-1",
         "known_cost_usd": 1.25,
         "objective": "Implement the shared semantic event renderer",

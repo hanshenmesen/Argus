@@ -47,6 +47,7 @@ def empty_mission_view() -> dict[str, Any]:
             "title": "",
             "objective": "",
             "summary": "",
+            "final_output": "",
             "status": "idle",
             "started_at": None,
             "completed_at": None,
@@ -170,6 +171,22 @@ def _read_unlocked(root: Path) -> dict[str, Any]:
             skill.pop("content_truncated", None)
     mission = payload.setdefault("mission", {})
     mission.setdefault("summary", "")
+    if "final_output" not in mission:
+        mission["final_output"] = ""
+        if mission.get("completed_at") is not None and mission.get("id"):
+            from ._snapshot import _bootstrap_view
+
+            recovered = _bootstrap_view(root)["mission"]
+            if (
+                recovered["id"] == mission["id"]
+                and recovered["started_at"] is not None
+                and recovered["completed_at"] == mission["completed_at"]
+                and (
+                    mission.get("started_at") is None
+                    or mission["started_at"] == recovered["started_at"]
+                )
+            ):
+                mission["final_output"] = recovered["final_output"]
     mission.setdefault("campaign_started_at", None)
     mission.setdefault("campaign_elapsed_seconds", 0.0)
     for role in payload.setdefault("roles", []):
