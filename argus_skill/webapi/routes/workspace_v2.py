@@ -13,7 +13,6 @@ import itertools
 import json
 import mimetypes
 import os
-import selectors
 import stat
 import subprocess
 import threading
@@ -552,49 +551,31 @@ def _git(root: Path, *args: str, max_bytes: int = 2 * 1024 * 1024) -> str:
         *args,
     ]
     process: subprocess.Popen[bytes] | None = None
-    selector = selectors.DefaultSelector()
     payload = bytearray()
     truncated = False
     try:
         process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=safe_env)
         assert process.stdout is not None
-        os.set_blocking(process.stdout.fileno(), False)
-        selector.register(process.stdout, selectors.EVENT_READ)
-        while True:
-            for key, _mask in selector.select(timeout=.1):
-                try:
-                    chunk = os.read(key.fileobj.fileno(), min(64 * 1024, max_bytes + 1 - len(payload)))
-                except BlockingIOError:
-                    chunk = b""
-                if chunk:
-                    payload.extend(chunk)
-                    if len(payload) > max_bytes:
-                        truncated = True
-                        process.kill()
-                        break
-            if truncated:
+        # Bounded pipe reads work on Windows too, without selectors or reader threads.
+        while len(payload) <= max_bytes:
+            chunk = process.stdout.read(min(64 * 1024, max_bytes + 1 - len(payload)))
+            if not chunk:
                 break
-            if process.poll() is not None:
-                while len(payload) <= max_bytes:
-                    try:
-                        chunk = os.read(process.stdout.fileno(), min(64 * 1024, max_bytes + 1 - len(payload)))
-                    except BlockingIOError:
-                        break
-                    if not chunk:
-                        break
-                    payload.extend(chunk)
-                truncated = len(payload) > max_bytes
-                break
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=.5)
+            payload.extend(chunk)
+        truncated = len(payload) > max_bytes
+        if truncated:
+            process.kill()
     except (OSError, subprocess.SubprocessError):
         if process is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError):
                 process.kill()
         return ""
     finally:
-        selector.close()
-    if process.returncode not in {0, -9} and not truncated:
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            process.wait()
+    if process.returncode != 0 and not truncated:
         return ""
     text = bytes(payload[:max_bytes]).decode("utf-8", errors="replace")
     return text + ("\n… output truncated\n" if truncated else "")
