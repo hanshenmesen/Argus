@@ -24,6 +24,16 @@
 > （除已知预存失败）。**FuseHead 当前跑在恢复 checkout `6cd6cf547`，共享
 > runtime 在 `600c013af`，都在这四个提交之前**；下次重启前把对应 checkout
 > `git checkout --detach` 到 `9e39270ba` 或更新。
+> **续（同一会话，稍后）三项再修，同样已推 main、未部署：** `c6d3691f7` "Model
+> … is not available" 从永久配置错误改为供应商冷却暂停（09-05 17:36 一次两分钟的
+> Copilot 故障连续吞掉 8 个排队 mission）；`b93422a14` 研究纵向的终审以 Reviewer
+> 的 done 为准，不再用 `research_result` 枚举（`finite_verification`、novelty
+> `unverified`）机器复判并重排队——write-01 因此跑了 75 次终审任务、45 次重排、
+> 零认证，FuseHead 的 33 轮空转同源；数学纵向保留枚举检查；`30435976a` daemon
+> 启动时把和解后的 campaign 生命周期（open_ended）同步给 mission runner——此前
+> runner 拿的是启动默认值 True，导致有界的 idea-01 无法在 idea 阶段完成，被推进到
+> Paper 后同一 mission 重跑 144 次。部署时请一并 `git checkout --detach 30435976a`
+> 或更新。
 > 另外两点更正/未处理：本文"今日花费约 $1,148"实为 cost-control.jsonl
 > 自 08-28 起的累计（09-05 当天约 $111，FuseHead 当天 $7.9）；FuseHead 的
 > `selected_idea` 与工作区 `.argus/PIPELINE_STATE.json`（停在 09-03 的
