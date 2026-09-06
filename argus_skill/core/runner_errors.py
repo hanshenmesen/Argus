@@ -15,6 +15,11 @@ _PRE_PROVIDER_REFUSALS = (
     "copilot wrapper: real copilot cli binary not found",
     "no authentication information found",
     "token refresh failed: 401",
+    # Copilot startup entitlement checks can exit zero without starting a model
+    # turn. Callers must still require absent usage before treating these free.
+    "access denied by policy settings",
+    "subscription does not include this feature",
+    "required policies have not been enabled",
 )
 
 

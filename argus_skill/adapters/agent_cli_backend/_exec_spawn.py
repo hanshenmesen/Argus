@@ -288,6 +288,7 @@ def spawn_and_finish(ctx: "_ExecContext", cli_options: Any) -> RunnerResult:
     pre_provider_refusal = bool(
         result_has_pre_provider_refusal(cli_result)
         and translated.total_nano_aiu is None
+        and translated.cost_usd is None
         and not translated.model_usage
         and not translated.premium_requests_present
         and not any((

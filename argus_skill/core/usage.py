@@ -218,6 +218,7 @@ def build_usage_record(
     missing_resume_target = (
         is_pre_provider_refusal_error(error)
         and total_nano_aiu is None
+        and provider_cost_usd is None
         and not normalized_model_usage
         and not usage.observed
         and not (premium_requests or 0.0)
