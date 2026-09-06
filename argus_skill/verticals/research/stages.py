@@ -15,7 +15,7 @@ from typing import Any
 from ...core.vertical_contract import IterationAssessment
 from ...skills.stage_machine import ChecklistItem
 from . import library_preparation
-from .prompt_policy import render_role_prompt_fragment
+from .prompt_policy import render_role_prompt_context, render_role_prompt_fragment
 from .review_purchase import review_purchase_policy
 
 log = logging.getLogger(__name__)
@@ -639,6 +639,7 @@ __all__ = [
     "import_legacy_state",
     "search_altitude_context",
     "render_role_prompt_fragment",
+    "render_role_prompt_context",
     "review_purchase_policy",
     "stage_completion_issues",
     "iteration_assessment",

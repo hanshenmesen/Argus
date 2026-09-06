@@ -24,7 +24,9 @@ argus doctor --advisor none --verify
 Argus does not import Jacobian into its own process. It starts the published
 `jacobian-mcp` executable as a restricted stdio sidecar, forwards only process
 essentials, and preserves the operation id, request, typed output, protocol
-version, and structured errors.
+version, and structured errors. This is process/dependency isolation, not an
+operating-system sandbox; the executable retains the operator's filesystem
+permissions.
 
 Install Jacobian in its own environment according to its installation
 instructions, then expose the absolute path of that environment's executable:

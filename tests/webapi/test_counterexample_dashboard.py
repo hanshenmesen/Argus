@@ -95,6 +95,18 @@ def test_dashboard_caps_csv_reads_before_parsing_remaining_rows(tmp_path, monkey
     assert build_counterexample_dashboard(tmp_path)["total"] == 1
 
 
+def test_dashboard_preserves_non_symlink_evidence_requirement(tmp_path) -> None:
+    _write_csv(tmp_path / "inputs" / "priority_pool.csv", ["ID"], [{"ID": "1"}])
+    (tmp_path / "report.md").write_text("ordinary workspace file")
+    evidence = tmp_path / "evidence" / "1"
+    evidence.mkdir(parents=True)
+    (evidence / "README.md").symlink_to(tmp_path / "report.md")
+
+    candidate = build_counterexample_dashboard(tmp_path)["candidates"][0]
+    assert candidate["status"] == "queued"
+    assert candidate["evidence_path"] == ""
+
+
 def test_dashboard_bounds_empty_directory_traversal(tmp_path, monkeypatch) -> None:
     root = tmp_path / "parallel" / "1"
     root.mkdir(parents=True)

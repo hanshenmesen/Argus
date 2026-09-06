@@ -9,7 +9,7 @@ vi.mock('../research-workbench/useWorkbenchText', () => ({
   useWorkbenchText: () => ({ text: (_zh: string, en: string) => en }),
 }));
 
-function page(missionStatus: string, candidateStatus = 'queued') {
+function page(missionStatus: string, candidateStatus = 'queued'): WorkspacePageProps {
   const mission = emptyMissionView();
   mission.mission.title = 'Investigate 10';
   mission.mission.status = missionStatus;
@@ -30,12 +30,37 @@ function page(missionStatus: string, candidateStatus = 'queued') {
     updated_at: Date.now(),
   }));
   return {
-    snapshot: { mission_view: mission, backlog: [] },
+    sid: 'lab',
+    project: {
+      id: 'lab', label: 'Lab', objective: '', last_active: 0,
+      daemon_alive: false, daemon_pid: null, uptime_seconds: null,
+    },
+    snapshot: {
+      session: { id: 'lab', display_name: 'Lab', objective: '', last_active: 0, cwd: '' },
+      daemon: {
+        alive: false, pid: null, uptime_seconds: null, backend: null,
+        global_daily_cap_usd: null,
+      },
+      roles: [],
+      mission_view: mission,
+      backlog: [],
+      recent_events: [],
+    },
     counterexamples: {
       schema_version: 1, generated_at: Date.now(), total: 2, counts: {}, candidates,
     },
+    events: [],
+    transcript: [],
+    artifacts: [],
+    journal: [],
     connected: true,
-  } as WorkspacePageProps;
+    snapshotUpdatedAt: 0,
+    refresh: () => undefined,
+    controls: {
+      start: async () => undefined, stop: async () => undefined, busy: false, error: '',
+    },
+    navigate: () => undefined,
+  };
 }
 
 describe('CounterexamplePage live projection', () => {

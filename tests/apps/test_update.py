@@ -170,9 +170,9 @@ def test_inspect_source_checkout_compares_matching_published_branch_without_muta
     assert not any(command[:2] == ("git", "pull") for command in calls)
 
 
-@pytest.mark.parametrize("diverged", [False, True])
+@pytest.mark.parametrize("scenario", ["update", "diverged", "install-failure"])
 def test_source_updater_real_git_smoke_follows_branch_and_refuses_divergence(
-    tmp_path: Path, monkeypatch, diverged: bool,
+    tmp_path: Path, monkeypatch, scenario: str,
 ) -> None:
     def git(root, *args):
         return subprocess.run(
@@ -188,7 +188,7 @@ def test_source_updater_real_git_smoke_follows_branch_and_refuses_divergence(
     git(upstream, "commit", "-m", "initial")
     checkout = tmp_path / "checkout"
     git(tmp_path, "clone", str(upstream), str(checkout))
-    if diverged:
+    if scenario == "diverged":
         (checkout / "local.txt").write_text("local change")
         git(checkout, "add", "local.txt")
         git(checkout, "commit", "-m", "local")
@@ -205,14 +205,23 @@ def test_source_updater_real_git_smoke_follows_branch_and_refuses_divergence(
     def runner(command, cwd, timeout):
         if command[0] == "test-python":
             installs.append(tuple(command))
+            if scenario == "install-failure":
+                return subprocess.CompletedProcess(command, 1, "", "installation failed")
             return subprocess.CompletedProcess(command, 0, "", "")
         return subprocess.run(command, cwd=cwd, timeout=timeout, text=True, capture_output=True)
 
-    if diverged:
+    if scenario == "diverged":
         with pytest.raises(UpdateError, match="fast-forward"):
             update_source_checkout(checkout, runner=runner, python_executable="test-python")
         assert git(checkout, "rev-parse", "HEAD") == before
         assert installs == []
+    elif scenario == "install-failure":
+        with pytest.raises(UpdateError, match="installation failed") as caught:
+            update_source_checkout(checkout, runner=runner, python_executable="test-python")
+        assert caught.value.result is not None
+        assert caught.value.result.after_revision == published
+        assert caught.value.result.changed is True
+        assert git(checkout, "rev-parse", "HEAD") == published
     else:
         result = update_source_checkout(checkout, runner=runner, python_executable="test-python")
         assert result.after_revision == published

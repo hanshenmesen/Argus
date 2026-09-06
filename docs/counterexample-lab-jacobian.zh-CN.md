@@ -21,7 +21,8 @@ argus doctor --advisor none --verify
 
 Argus 不会把 Jacobian import 到自身进程，而是把已发布的 `jacobian-mcp` 可执行文件
 作为受限 stdio sidecar 启动，只传递必要的进程环境，并保留 operation id、请求、
-类型化输出、协议版本和结构化错误。
+类型化输出、协议版本和结构化错误。这是进程与依赖隔离，不是操作系统沙箱；
+该程序仍拥有操作者的文件系统权限。
 
 按照 Jacobian 自身的安装说明在独立环境中安装，再配置该环境内可执行文件的绝对路径：
 

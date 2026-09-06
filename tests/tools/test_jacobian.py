@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -176,3 +178,16 @@ def test_stdio_sidecar_smoke_preserves_contract_and_isolates_credentials(
     with pytest.raises(jacobian.JacobianMcpError) as caught:
         jacobian.run_operation("unknown.operation", {}, executable=binary)
     assert "unsupported operation" in str(caught.value.payload["content"])
+
+    monkeypatch.setenv(jacobian.JACOBIAN_MCP_BIN_ENV, str(binary))
+    payload = tmp_path / "payload.json"
+    payload.write_text('{"left": "84", "right": "30"}', encoding="utf-8")
+    completed = subprocess.run(
+        [
+            sys.executable, "-m", "argus_skill.tools.jacobian", "run",
+            "--operation", "integer.compute.gcd", "--payload-file", str(payload),
+        ],
+        check=True, capture_output=True, text=True, timeout=30,
+    )
+    output = json.loads(completed.stdout)
+    assert output["result"] == {"output": {"gcd": "6"}, "credential_forwarded": False}

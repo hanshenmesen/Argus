@@ -129,7 +129,11 @@ def build_counterexample_dashboard(workspace: Path | str) -> dict[str, Any]:
         accepted_row = accepted.get(item_id)
         rejected_row = rejected.get(item_id)
         evidence = safe_artifact_path(root, f"evidence/{item_id}/README.md")
-        evidence_exists = evidence is not None and evidence[1].is_file()
+        evidence_exists = (
+            evidence is not None
+            and evidence[1].is_file()
+            and not (root / "evidence" / item_id / "README.md").is_symlink()
+        )
         parallel_files, parallel_updated_at = _parallel_state(root, item_id)
         status = claim_status.get(item_id, "queued")
         if parallel_files:

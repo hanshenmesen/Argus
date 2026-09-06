@@ -583,6 +583,20 @@ def _reviewer_fragment(
     )
 
 
+def render_role_prompt_context(
+    *,
+    role: str,
+    operation: str,
+    stage: str,
+    scope: str,
+    project_root: Path | None,
+) -> str:
+    """Keep changing research evidence in the round delta, not the static policy."""
+    if role == "reviewer" and operation == "evaluate":
+        return active_research_context(stage, project_root)
+    return ""
+
+
 def render_role_prompt_fragment(
     *,
     role: str,
@@ -632,5 +646,6 @@ __all__ = [
     "local_hardware_block",
     "local_model_inventory_block",
     "render_role_prompt_fragment",
+    "render_role_prompt_context",
     "STAGE_PLAYBOOK_PATHS",
 ]

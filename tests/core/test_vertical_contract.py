@@ -32,6 +32,7 @@ def test_minimal_non_research_vertical_implements_only_documented_contract() -> 
     assert contract.mission_kind == "custom"
     assert contract.ground_before_handoff is False
     assert contract.banner("engineer") == ""
+    assert contract.role_prompt_context is None
     assert contract.evidence_schema is None
     assert contract.review_purchase(
         project_root=Path("."),
@@ -122,6 +123,19 @@ def test_non_callable_completion_validator_fails_visibly() -> None:
                 CHECKLIST_ITEMS={"verify": (_item("verify.output"),)},
                 completion_gate="none",
                 stage_completion_issues=[],
+            ),
+        )
+
+
+def test_non_callable_role_prompt_context_fails_visibly() -> None:
+    with pytest.raises(VerticalContractError, match="non-callable role prompt context"):
+        vertical_contract(
+            "broken",
+            SimpleNamespace(
+                CHECKLIST_STAGE_ORDER=("verify",),
+                CHECKLIST_ITEMS={"verify": (_item("verify.output"),)},
+                completion_gate="none",
+                render_role_prompt_context=[],
             ),
         )
 
