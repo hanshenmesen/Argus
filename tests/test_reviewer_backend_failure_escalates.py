@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from argus_skill.core.models import ReviewDecision, RunnerResult
 from argus_skill.engineer.runner import (
     EngineerConfig,
@@ -118,9 +120,13 @@ def test_invalid_named_footer_is_not_credited_as_evidence() -> None:
     assert decision.backend_unavailable is True
 
 
-def test_unavailable_engineer_model_blocks_once_with_actionable_error(
+def test_unavailable_engineer_model_pauses_for_provider_cooldown(
     tmp_path: Path,
 ) -> None:
+    """A model the CLI rejects is treated as a provider outage: the mission
+    pauses for cooldown (so the daemon retries it later instead of marking
+    the whole backlog blocked), the Reviewer never runs, and the operator
+    alert still fires."""
     events: list[dict] = []
 
     class _UnavailableModelEngineer:
@@ -157,12 +163,65 @@ def test_unavailable_engineer_model_blocks_once_with_actionable_error(
         on_event=events.append,
     )
 
-    assert status == "blocked"
+    assert status == "paused_provider_cooldown"
     assert engineer_runner.calls == 1
     assert len(rounds) == 1
+    assert rounds[0].stop_kind == "provider_cooldown"
     assert "model is unavailable" in reason.lower()
     alerts = [event for event in events if event.get("type") == "round.model_configuration_error"]
     assert len(alerts) == 1 and alerts[0]["operator_alert"] is True
+
+
+@pytest.mark.parametrize(
+    "fatal_error",
+    [
+        'Error: 421 "Misdirected Request"\nError: Failed to load models (Request ID: 1)',
+        "Error: Access denied by policy settings (Request ID: 2)",
+    ],
+)
+def test_provider_startup_refusal_pauses_instead_of_consuming_missions(
+    tmp_path: Path,
+    fatal_error: str,
+) -> None:
+    """A CLI that cannot reach any model (no catalog, policy denial) is a
+    provider outage. On 2026-09-06 such an outage ran every queued mission
+    through two failing rounds and settled it as error; the mission must pause
+    for cooldown instead so the backlog survives until access returns."""
+    events: list[dict] = []
+
+    class _RefusedEngineer:
+        calls = 0
+
+        def run_exec(self, **_kwargs):
+            self.calls += 1
+            return RunnerResult(exit_code=1, agent_messages=[], fatal_error=fatal_error)
+
+    class _ReviewerMustNotRun:
+        def evaluate(self, **_kwargs):  # pragma: no cover - contract assertion
+            raise AssertionError("Reviewer must not run when the provider refused")
+
+    engineer_runner = _RefusedEngineer()
+    engine = SupervisedEngineer(
+        engineer_runner=engineer_runner,
+        reviewer=_ReviewerMustNotRun(),
+        engineer_config=EngineerConfig(model="gpt-5.6-sol"),
+        reviewer_config=ReviewerConfig(model="gpt-5.6-sol"),
+    )
+    status, rounds, _message, _reason, _tid = engine.run(
+        objective="prove a theorem",
+        engineer_prompt_builder=lambda _next, _static=True: "prove it",
+        supervised_config=SupervisedConfig(
+            max_rounds=10,
+            backend_failure_backoff_seconds=0,
+            background_subagent_advisory=False,
+        ),
+        workdir=tmp_path,
+        on_event=events.append,
+    )
+
+    assert status == "paused_provider_cooldown"
+    assert engineer_runner.calls == 1
+    assert rounds[0].stop_kind == "provider_cooldown"
 
 
 # --------------------------------------------------------------------------- #

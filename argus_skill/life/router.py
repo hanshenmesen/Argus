@@ -87,6 +87,61 @@ def _answer_text(result: Any) -> str:
     return str(message or "")
 
 
+def _classifier_failure_detail(result: Any) -> str:
+    """Return bounded, redacted runner evidence for a failed front-door call.
+
+    A bare ``classifier backend failed`` hid actionable process failures such
+    as an npm ``codex.cmd`` wrapper whose GUI-host PATH did not contain Node.
+    Keep the fail-closed routing behavior, but retain enough local stderr for
+    an operator to repair the configured runner without exposing credentials.
+    """
+    exit_code = getattr(result, "exit_code", "unknown")
+    fragments: list[str] = []
+    fatal = str(getattr(result, "fatal_error", "") or "").strip()
+    if fatal:
+        fragments.append(fatal)
+    raw_stderr = getattr(result, "stderr_lines", None) or []
+    if isinstance(raw_stderr, (str, bytes)):
+        raw_stderr = [raw_stderr]
+    try:
+        stderr = "\n".join(
+            str(line, errors="replace") if isinstance(line, bytes) else str(line)
+            for line in raw_stderr
+            if str(line).strip()
+        ).strip()
+    except TypeError:
+        stderr = str(raw_stderr or "").strip()
+    if stderr and not fatal:
+        # ``fatal_error`` is the runner's authoritative summary and retains the
+        # remote contract verbatim. Raw stderr is a bounded fallback for launch
+        # failures (for example an npm wrapper that cannot find Node).
+        fragments.append(stderr)
+    detail = " | ".join(fragments)
+    if detail:
+        try:
+            from ..core.secret_guard import known_secret_values, redact_secrets_text
+            from ..tools.capability_vault import read_auth_json_key
+
+            # Provider stderr can echo a raw Codex API key without an
+            # `api_key=` label.  Read it only to redact the exact value before
+            # this text reaches the cockpit; never render or persist it here.
+            auth_key = read_auth_json_key()
+            detail = redact_secrets_text(
+                detail,
+                known_values=(*known_secret_values(), auth_key),
+            )
+        except Exception:  # noqa: BLE001 — diagnostics must never alter routing
+            pass
+        detail = " ".join(detail.split())[:480]
+    if fatal and detail:
+        return detail
+    return (
+        f"classifier backend failed (exit {exit_code}): {detail}"
+        if detail
+        else f"classifier backend failed (exit {exit_code})"
+    )
+
+
 def _front_door_fields(result: Any) -> dict[str, str]:
     """Read the front-door fields, preferring the structured decision.
 
@@ -343,7 +398,7 @@ def classify_front_door(
         return None, None, "complex"
     if int(getattr(result, "exit_code", 0) or 0) != 0:
         if callable(failure_sink):
-            failure_sink("classifier backend failed")
+            failure_sink(_classifier_failure_detail(result))
         return None, None, "complex"
     fields = _front_door_fields(result)
     intent = _parse_config_decision(fields["config"])
@@ -432,16 +487,14 @@ def classify_front_door(
         and reply.upper() != "NONE"
         and len(reply) > 0
     )
-    if reply_eligible and len(reply) > 1600:
-        _routing_diagnostic(
-            f"reply exceeded 1600 chars; not delivered (length={len(reply)})",
-            failure_sink,
-        )
-    elif reply_eligible:
+    if reply_eligible:
         try:
             reply_sink(reply)
-        except Exception:  # noqa: BLE001 - optional fast reply only
-            pass
+        except Exception as exc:  # noqa: BLE001 - optional fast reply only
+            _routing_diagnostic(
+                f"reply sink failed ({type(exc).__name__}: {exc})",
+                failure_sink,
+            )
     lifetime: LifetimeIntent | None = None
     lifetime_parts = fields["lifetime"].split(maxsplit=1)
     lifetime_token = (
@@ -493,17 +546,14 @@ def classify_front_door(
         and steering
         and steering_token not in {"NONE", "N/A", "NA", "NULL"}
     )
-    if steering_eligible and len(steering) > 1600:
-        _routing_diagnostic(
-            "steer_directive exceeded 1600 chars; not delivered "
-            f"(length={len(steering)})",
-            failure_sink,
-        )
-    elif steering_eligible:
+    if steering_eligible:
         try:
             steering_sink(steering)
-        except Exception:  # noqa: BLE001 - advisory metadata never owns routing
-            pass
+        except Exception as exc:  # noqa: BLE001 - advisory metadata never owns routing
+            _routing_diagnostic(
+                f"steering sink failed ({type(exc).__name__}: {exc})",
+                failure_sink,
+            )
     question_policy = fields["operator_question_policy"].strip().lower()
     if (
         callable(operator_question_policy_sink)

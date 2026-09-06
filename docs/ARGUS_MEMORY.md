@@ -17,7 +17,7 @@ Execution memory  — what happened
 
 **Curated memory** is knowledge selected for reuse: Wiki pages hold declarative project knowledge, Skills hold procedures, and failure-experience capsules preserve verified lessons from unsuccessful missions (`wiki/store.py`, `skills/layered.py`, `life/failure_experience.py`). Its scope may be project, vertical, or shared profile.
 
-**Operator memory** stores directives, preferences, capabilities, and revocations in OperatorContext (`core/operator_context.py`). Records can have mission, project, or global scope, but the current store is project-local; `global` does not automatically propagate across projects.
+**Operator memory** stores directives, preferences, capabilities, and revocations in OperatorContext (`core/operator_context.py`). Each store writes under the root supplied by its caller, which may be a project state directory or the shared global root. Mission/project/global labels control projection and precedence; they do not copy records between stores. Mission preludes using `MemoryBundle.root` read the shared global-root store (`life/memory.py`, `life/supervisor/_mission_execution_runtime.py`), so operator memory is not necessarily project-local.
 
 ## How Memory Is Produced
 
@@ -32,4 +32,4 @@ execution
 While roles work, Argus records observable events. At execution boundaries, it compresses current state into the frontier, checkpoint, handoffs, and role capsules. After settlement, stable facts can enter the Wiki, reusable procedures can enter Skills, and verified failures can become failure experience. Later roles retrieve each layer according to project, mission, role, and authority.
 
 
-This description reflects `lbx154/Argus` at commit `ae2daa1fbc2c918b4e7126151fe55eb68fd0cb98`.
+The original layout reference is `lbx154/Argus` commit `ae2daa1fbc2c918b4e7126151fe55eb68fd0cb98`; the OperatorContext storage-root description was checked against main on 2026-09-06.

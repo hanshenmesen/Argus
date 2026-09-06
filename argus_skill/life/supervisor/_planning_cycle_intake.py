@@ -34,6 +34,31 @@ _REVISION_TERMINAL_STATUSES = {"done", "failed", "aborted", "skipped", "supersed
 class PlanningCycleIntakeMixin:
     """Gate checks + preflight short-circuits run before planner invocation."""
 
+    def _emit_bounded_project_completion(self, reason: str) -> bool | str:
+        """Record bounded completion, then deliver the Manager project report."""
+        delivered = self._emit_planner_verdict(
+            status=PlannerVerdictStatus.COMPLETED,
+            completion_kind="project_completed",
+            resume_outcome=False,
+            terminal_signature=self._open_ended_terminal_idle_signature(),
+            cycle=self._planning_cycles,
+            project_done=True,
+            reason=reason,
+            task_count=0,
+            enqueued_tasks=0,
+            skipped_duplicate_tasks=0,
+            enqueued_titles=[],
+            skipped_duplicate_titles=[],
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+        )
+        if not delivered:
+            return PLAN_RETRY
+        self._emit_status(f"planner: project done — {reason}")
+        return False
+
     def _enqueue_bounded_manager_direct(
         self,
         state: _PlanCycleState,
@@ -132,6 +157,7 @@ class PlanningCycleIntakeMixin:
         from ...core.external_completion_gate import external_completion_gate_issue
         from ...skills.vertical_select import (
             resolve_vertical,
+            resolve_workflow_mode,
             vertical_has_current_completion_certificate,
         )
 
@@ -140,12 +166,17 @@ class PlanningCycleIntakeMixin:
             return ""
         if external_completion_gate_issue(artifact_root):
             return ""
-        if _research_project_done_issue(
-            artifact_root,
-            self.memory.journal.all(),
+        if (
+            resolve_workflow_mode(artifact_root) != "direct"
+            and _research_project_done_issue(
+                artifact_root,
+                self.memory.journal.all(),
+                current_signature=self._final_submission_signature(),
+                evidence_root=self._project_workdir(),
+            )
         ):
             return ""
-        return f"bounded {vertical} vertical reached terminal stage"
+        return f"bounded {vertical} vertical has a current completion certificate"
 
     def _pc_intake_gate(self, state: _PlanCycleState) -> Any | None:
         """Drain operator input and reject/idle before touching the planner.
@@ -161,6 +192,7 @@ class PlanningCycleIntakeMixin:
             if revision_request is None
             else []
         )
+        state.had_operator_messages = bool(transient_messages)
         # Draining appends fresh messages to the durable ledger. Re-render after
         # the drain so this same planning turn sees the complete standing block
         # as well as the legacy one-shot operator note below.
@@ -187,7 +219,11 @@ class PlanningCycleIntakeMixin:
                 recorded_signature = str(
                     feedback.get("evidence_signature") or ""
                 )
-                current_signature = self._manager_feedback_evidence_signature()
+                # Filtered-task feedback is judged against the backlog's own
+                # state; everything else against the project evidence tree.
+                current_signature = self._manager_feedback_signature_for(
+                    str(feedback.get("diagnostic") or "")
+                )
                 if (
                     recorded_signature
                     and current_signature
@@ -232,18 +268,9 @@ class PlanningCycleIntakeMixin:
                 # resolves. Exactly one such item is live on this host.
                 #
                 # With nothing to replace, the honest degradation is an ordinary
-                # planning cycle. The Planner still sees the Reviewer's reason
-                # through the revision note; it simply cannot supersede a plan
-                # that never existed.
-                self._emit({
-                    "type": EventType.LIFE_PLAN_REVISION_REJECTED,
-                    "reason": (
-                        "unversioned backlog item has no plan to replace; "
-                        "planning fresh work instead"
-                    ),
-                    "expected_plan_id": "",
-                    "expected_plan_version": state.expected_plan_version,
-                })
+                # planning cycle. There is no revision rejection to record:
+                # version zero is valid for this legacy/direct item, but not for
+                # the versioned plan-revision event family.
                 state.revision_request = None
                 revision_request = None
         if revision_request is not None:
@@ -394,6 +421,36 @@ class PlanningCycleIntakeMixin:
             return terminal_idle
 
         if revision_request is None:
+            if not state.had_operator_messages:
+                active = self.memory.backlog.active()
+                parked = [item for item in active if item.status == "paused_external_work"]
+                pending = [item for item in active if item.status == "pending"]
+                if parked and pending:
+                    in_flight = {
+                        item.id for item in active
+                        if item.status in {"running", "paused_external_work"}
+                    }
+                    blocked = set(in_flight)
+                    while dependents := {
+                        item.id for item in pending
+                        if item.id not in blocked and blocked.intersection(item.deps)
+                    }:
+                        blocked.update(dependents)
+                    if all(item.id in blocked for item in pending):
+                        from ...planner import PlannerVerdict
+
+                        # The existing mission external_wait records own the wake:
+                        # run() resumes each parked mission when its job settles.
+                        # Pending descendants are already planned work, so another
+                        # Planner turn cannot make them ready.
+                        return self._record_planner_waiting(PlannerVerdict(
+                            project_done=False,
+                            waiting=True,
+                            reason=(
+                                "Pending work depends on in-flight missions: "
+                                + ", ".join(sorted(in_flight))
+                            ),
+                        ))
             event_wait_outcome = self._planner_event_wait_outcome()
             if event_wait_outcome:
                 return event_wait_outcome
@@ -443,7 +500,7 @@ class PlanningCycleIntakeMixin:
             return PLAN_ERROR
 
         # Only skip the planner on an operator-only external blocker when the
-        # full EMNLP gate is active. A ``--bounded`` mission
+        # final certification requirement is active. A ``--bounded`` mission
         # (``final_certification_gate=False``) does not require the external benchmark
         # targets, so it must fall through to the planner and reach its own
         # ``project_done`` instead of waiting forever on artifacts it never
@@ -476,28 +533,7 @@ class PlanningCycleIntakeMixin:
 
         reason = "" if revision_request is not None else self._bounded_completion_reason()
         if reason:
-            delivered = self._emit_planner_verdict(
-                status=PlannerVerdictStatus.COMPLETED,
-                completion_kind="project_completed",
-                resume_outcome=False,
-                terminal_signature=self._open_ended_terminal_idle_signature(),
-                cycle=self._planning_cycles,
-                project_done=True,
-                reason=reason,
-                task_count=0,
-                enqueued_tasks=0,
-                skipped_duplicate_tasks=0,
-                enqueued_titles=[],
-                skipped_duplicate_titles=[],
-                input_tokens=0,
-                cached_input_tokens=0,
-                output_tokens=0,
-                cost_usd=0.0,
-            )
-            if not delivered:
-                return PLAN_RETRY
-            self._emit_status(f"planner: project done — {reason}")
-            return False
+            return self._emit_bounded_project_completion(reason)
         direct = self._enqueue_bounded_manager_direct(state)
         if direct is not None:
             return direct

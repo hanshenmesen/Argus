@@ -124,14 +124,23 @@ def fatal_error_looks_like_backend_failure(fatal_error: str | None) -> bool:
 
 
 def fatal_error_looks_like_model_configuration(fatal_error: str | None) -> bool:
-    """True for an explicit CLI diagnostic rejecting the selected model."""
+    """True when the CLI refused the model or could not reach any model.
+
+    Covers the explicit "model X is not available" diagnostic as well as the
+    startup refusals that precede it when the provider session itself is
+    unusable (no model catalog, policy denial). All of them pause the mission
+    for a provider cooldown rather than failing it.
+    """
     if not fatal_error:
         return False
+    from ..core.runner_errors import is_provider_access_startup_error
+
     low = str(fatal_error).strip().casefold()
     return (
         ("--model" in low and "not available" in low)
         or "unknown model" in low
         or "unsupported model" in low
+        or is_provider_access_startup_error(fatal_error)
     )
 
 
@@ -310,13 +319,15 @@ def model_configuration_review_decision(
             "Configured model is unavailable; Engineer and Reviewer were not "
             f"run. error={error_text}"
         ),
-        next_action="Select a model supported by the configured CLI, then retry.",
-        operator_question=(
-            "The configured model is unavailable. Choose a valid model in "
-            "/config, then tell me to retry this task."
+        next_action=(
+            "The daemon retries this mission after a provider cooldown. If the "
+            "model name is wrong rather than the provider being down, select a "
+            "model supported by the configured CLI."
         ),
         backend_unavailable=True,
-        backend_stop_kind="permanent_error",
+        backend_fatal_error=error_text,
+        backend_exit_code=exit_code,
+        backend_stop_kind="provider_cooldown",
     )
 
 
@@ -380,6 +391,7 @@ def operator_abort_review_decision(
     *,
     fatal_error: str | None,
     exit_code: int,
+    engineer_aborted_before_review: bool = False,
 ) -> ReviewDecision:
     return ReviewDecision(
         status="blocked",
@@ -388,6 +400,7 @@ def operator_abort_review_decision(
         # shutdown. Keep it structural so the distinction survives being read
         # apart from the round record that also carries ``stop_kind``.
         backend_stop_kind="operator_abort",
+        engineer_aborted_before_review=engineer_aborted_before_review,
         reason="The operator requested this mission be aborted.",
         next_action=(
             "This item was intentionally aborted, not a crash — the daemon "

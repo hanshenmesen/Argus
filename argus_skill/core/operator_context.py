@@ -304,6 +304,25 @@ def _current_mission_id(root: Path) -> str:
     return ""
 
 
+def _standing_directive_key(
+    record: DirectiveRecord,
+) -> tuple[str, Scope, tuple[str, ...], bool] | None:
+    """Identify identical standing instructions without merging independent work."""
+    if record.lifetime != "standing":
+        return None
+    roles = (
+        ("all",)
+        if record.applies_to_roles == "all"
+        else tuple(sorted(record.applies_to_roles))
+    )
+    return (
+        record.text,
+        record.scope,
+        roles,
+        record.source.endswith(".standing_sounding"),
+    )
+
+
 class OperatorContextStore:
     def __init__(self, life_dir: Path | str) -> None:
         self.root = Path(life_dir)
@@ -343,6 +362,17 @@ class OperatorContextStore:
                 payload = asdict(record)
                 payload["revision"] = current + 1
                 written = _record_from_dict(payload)
+                previous = records[-1] if records else None
+                if isinstance(written, DirectiveRecord) and isinstance(previous, DirectiveRecord):
+                    key = _standing_directive_key(written)
+                    if (
+                        key is not None
+                        and key == _standing_directive_key(previous)
+                        and written.source == previous.source
+                    ):
+                        # Only an immediate retry is idempotent. A reassertion
+                        # after another update retains its new revision/order.
+                        return previous
                 self._append_lines([written])
                 records.append(written)
                 cache = _read_cache(self.root)
@@ -449,11 +479,22 @@ class OperatorContextStore:
                     records[-1].revision if records else 0
                 ):
                     self._refresh_cache(records, cache=cache, bounded_missions=bounded)
-                directives = sorted(
+                ordered_directives = sorted(
                     (record for record in visible if isinstance(record, DirectiveRecord)),
                     key=lambda record: (_SCOPE_ORDER[record.scope], record.revision),
                     reverse=True,
                 )
+                directives: list[DirectiveRecord] = []
+                seen_standing: set[tuple[str, Scope, tuple[str, ...], bool]] = set()
+                for directive in ordered_directives:
+                    key = _standing_directive_key(directive)
+                    if key is not None:
+                        if key in seen_standing:
+                            continue
+                        seen_standing.add(key)
+                    # Retain the latest active revision in the prompt while
+                    # leaving every historical row and tombstone in the ledger.
+                    directives.append(directive)
                 preferences_by_kind: dict[str, PreferenceRecord] = {}
                 for record in sorted(
                     (record for record in visible if isinstance(record, PreferenceRecord)),

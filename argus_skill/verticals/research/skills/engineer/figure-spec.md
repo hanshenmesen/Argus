@@ -56,8 +56,7 @@ The schema:
 ```json
 {
   "title": "Argus Research Factory Architecture",
-  "width": 800,
-  "height": 500,
+  "canvas": {"width": 800, "height": 500},
   "style": {
     "font_family": "Arial",
     "font_size": 14,
@@ -65,11 +64,11 @@ The schema:
   },
   "nodes": [
     {"id": "planner", "label": "Planner", "x": 100, "y": 200,
-     "shape": "rounded", "color": 0},
+     "shape": "rounded", "fill": "#DBEAFE", "stroke": "#2563EB"},
     {"id": "engineer", "label": "Engineer", "x": 350, "y": 100,
-     "shape": "rounded", "color": 1},
+     "shape": "rounded", "fill": "#D1FAE5", "stroke": "#10B981"},
     {"id": "reviewer", "label": "Reviewer", "x": 350, "y": 300,
-     "shape": "rounded", "color": 2}
+     "shape": "rounded", "fill": "#FFEDD5", "stroke": "#EA580C"}
   ],
   "edges": [
     {"from": "planner", "to": "engineer", "label": "task"},
@@ -79,14 +78,14 @@ The schema:
   ],
   "groups": [
     {"id": "harness", "label": "Harness (dumb pipes)",
-     "nodes": ["planner"], "color": "#F3F4F6"}
+     "node_ids": ["planner"], "fill": "#F3F4F6", "stroke": "#9CA3AF"}
   ]
 }
 ```
 
 Allowed: `shape ∈ {rect, rounded, circle, diamond, ellipse}`,
-`style ∈ {solid, dashed, dotted}`,
-`color` is either a palette index or a `#RRGGBB` hex.
+`style ∈ {solid, dashed, dotted}`. Nodes and groups use explicit `fill` and
+`stroke` colors.
 
 ### Step 3 — render and validate
 
@@ -109,28 +108,13 @@ Open the SVG. Check:
 If any of these fail, edit the spec (NOT the SVG — the SVG is the
 output, the spec is the source of truth) and re-render.
 
-### Step 5 — optional reviewer audit
+### Final review ownership
 
-For the paper's main architecture figure, hand the rendered SVG + the
-spec JSON to a reviewer agent (gpt-5.5 via `reviewer` route) with the
-prompt:
-
-```
-Review this architecture figure. Spec attached as JSON; rendered SVG
-attached. Check:
-1. Does the figure clearly communicate the data flow described in
-   `paper/sec/method.tex`?
-2. Are any boxes labeled in a way the body text doesn't define?
-3. Is anything load-bearing in the figure absent from the spec
-   (i.e. drawn in spec.json but unused in main.tex)?
-4. Greyscale legibility?
-Return a list of concrete spec edits; reviewer rules on whether to
-gate on each.
-```
-
-Note: the reviewer rules on whether the figure is publication-ready,
-not the harness. This skill produces deterministic output; the
-quality call lives with the agent.
+Do not launch a separate Reviewer from Paper. The checks above are ordinary
+engineering validation needed to produce a complete compilable draft. During
+Review, the assigned read-only visual pass inspects the rendered SVG at final
+paper size together with the spec and manuscript, and the integrated Reviewer
+decides whether the repaired paper is publication-ready.
 
 ## Design patterns
 
@@ -144,8 +128,11 @@ Common spec shapes that work well — copy then adapt:
 - **Audit cascade** — vertical stack of nodes, each with a "verdict"
   edge to a side column
 
-The renderer handles arrow placement, label positioning, and
-group-box rendering automatically; the spec only declares topology.
+The renderer clips edge endpoints to source and target boundaries, positions
+labels, and renders groups. It does not obstacle-route around unrelated nodes.
+Use FigureSpec only when each declared straight/curved edge has clear space;
+otherwise reposition nodes or choose Graphviz, Draw.io, browser SVG, or PPT
+Master. Always inspect the final render for connector penetration and overlap.
 
 ## Anti-patterns
 
@@ -163,7 +150,6 @@ group-box rendering automatically; the spec only declares topology.
 - Renders to `paper/figures/<name>.svg`
 - Spec lives at `paper/figures/<name>.spec.json` so future re-renders
   are reproducible and visible in `git diff`
-- Optionally register the spec/renderer in `FIGURE_PROVENANCE.json` for handoff.
 - Add the SVG to LaTeX with `\includegraphics{figures/<name>.svg}`
   (most modern TeX engines handle SVG directly; for older toolchains,
   convert to PDF with `inkscape --export-type=pdf`)

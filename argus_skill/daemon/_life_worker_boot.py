@@ -93,8 +93,14 @@ class LifeWorkerBootMixin:
         self._rf_manager_divide_on_boot(rf_state)
         self._rf_build_supervisor(rf_state)
         self._rf_start_services(rf_state)
+        bounded_handoff_failure = bool(
+            rf_state.handoff_failure and not rf_state.cfg.continuous_open_ended
+        )
+        if bounded_handoff_failure:
+            self._stop.set()
         self._rf_main_loop(rf_state)
-        return self._rf_shutdown(rf_state)
+        shutdown_result = self._rf_shutdown(rf_state)
+        return 2 if bounded_handoff_failure else shutdown_result
 
     def _rf_bootstrap_environment(self) -> None:
         """Set up process env vars (PATH/PYTHONPATH/CUDA/git-config) before
@@ -366,14 +372,18 @@ class LifeWorkerBootMixin:
                         enabled=False,
                         objective=objective,
                     )
-                return False, "", current.open_ended
+                return False, "", requested_open_ended
             if not self._operator_stop_requested:
                 self._adopted_continuous_generation = current.generation if enabled else None
             # A disabled record keeps its objective on disk so the operator can
             # inspect or explicitly re-arm it later. It must not seed the live
-            # supervisor, or a paused/completed handoff can be treated as the
-            # next continuous objective during daemon resume.
-            return enabled, (objective if enabled else ""), current.open_ended
+            # supervisor or override this process's launch lifetime. Otherwise
+            # a completed campaign can keep a later bounded worker resident.
+            return (
+                enabled,
+                objective if enabled else "",
+                current.open_ended if enabled else requested_open_ended,
+            )
 
         rf_state.continuous_provider = _continuous_provider
 
@@ -390,6 +400,14 @@ class LifeWorkerBootMixin:
             # role-clean execution handoff.
             rf_state.init_continuous = True
             rf_state.init_objective = rf_state.cfg.continuous_objective or rf_state.init_objective
+
+        # The runner was built before this reconciliation, with the launch
+        # default (open-ended unless --bounded). The Manager stage hook reads
+        # that namespace on every mission, so a bounded campaign whose runner
+        # still says open-ended can never complete early: it is advanced stage
+        # by stage into a manuscript it was never asked to write. idea-01
+        # (s-0b1c7fa1) re-ran one ideation mission 144 times in Paper that way.
+        self._rf_sync_runner_campaign_lifetime(rf_state)
 
         # ``resume_continuous`` adopts a campaign only when its objective and
         # vertical match a durable Manager handoff identity. This avoids a fresh
@@ -410,6 +428,17 @@ class LifeWorkerBootMixin:
                 "daemon boot: adopting persisted Manager handoff for continuous generation %d",
                 rf_state.init_source_state.generation,
             )
+
+    @staticmethod
+    def _rf_sync_runner_campaign_lifetime(rf_state: _RunForeverState) -> None:
+        """Give the mission runner the reconciled campaign lifetime."""
+        args = getattr(rf_state.runner, "_args", None)
+        if args is None:
+            return
+        args.open_ended = bool(rf_state.cfg.continuous_open_ended)
+        objective = str(rf_state.init_objective or "").strip()
+        if objective:
+            args.continuous_objective = objective
 
     def _rf_manager_divide_on_boot(self, rf_state: _RunForeverState) -> None:
         """Reset the Manager's codex session, then classify + persist the
@@ -630,8 +659,14 @@ class LifeWorkerBootMixin:
                                 "type": "life.manager.intent.failed",
                                 "agent_layer": "manager",
                                 "intent_id": intent_id,
+                                "item_id": intent_id,
                                 "source": "daemon_boot",
+                                "objective": source_objective,
                                 "error": "failed to persist Manager execution handoff",
+                                "phase": "contract",
+                                "cause": "failed to persist Manager execution handoff",
+                                "contract_field": "continuous_config",
+                                "attempts": 1,
                                 "text": "manager daemon objective handoff was not persisted",
                             }
                         )
@@ -676,14 +711,31 @@ class LifeWorkerBootMixin:
                 rf_state.cfg.continuous_objective = rf_state.init_objective
                 log.error("daemon Manager handoff failed; objective not dispatched: %s", exc)
                 rf_state.handoff_failure = f"{type(exc).__name__}: {exc}"
+                phase = str(getattr(exc, "phase", "") or "unknown")
                 rf_state.sink.append(
                     {
                         "type": "life.manager.intent.failed",
                         "agent_layer": "manager",
                         "intent_id": intent_id,
+                        "item_id": intent_id,
                         "source": "daemon_boot",
                         "objective": source_objective,
                         "error": f"{type(exc).__name__}: {exc}",
+                        "phase": phase,
+                        "cause": str(getattr(exc, "cause", "") or str(exc)),
+                        "contract_field": str(
+                            getattr(exc, "contract_field", "") or ""
+                        ),
+                        "attempts": max(
+                            1,
+                            int(getattr(exc, "attempts", 1) or 1),
+                        ),
+                        "model_reply_snippet": str(
+                            getattr(exc, "model_reply_snippet", "") or ""
+                        )[:300],
+                        "backend_error": str(
+                            getattr(exc, "backend_error", "") or ""
+                        ),
                         "text": "manager daemon objective handoff failed",
                     }
                 )

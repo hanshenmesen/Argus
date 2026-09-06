@@ -517,6 +517,16 @@
         "parent_branch_id": {"type": ["string", "null"]}
       }
     },
+    "life.planner.dependency_dropped": {
+      "version": 1,
+      "required": ["title", "dependency_keys"],
+      "properties": {
+        "item_id": {"type": "string"},
+        "title": {"type": "string"},
+        "dependency_keys": {"type": "array", "items": {"type": "string"}},
+        "text": {"type": "string"}
+      }
+    },
     "life.planner.task_skipped": {
       "version": 1,
       "required": ["reason"],
@@ -552,7 +562,7 @@
         "item_id": {"type": ["string", "null"]},
         "objective": {"type": "string"},
         "error": {"type": "string", "minLength": 1},
-        "phase": {"type": "string", "enum": ["backend", "parse", "contract", "timeout"]},
+        "phase": {"type": "string", "enum": ["backend", "parse", "contract", "timeout", "unknown"]},
         "cause": {"type": "string", "minLength": 1},
         "contract_field": {"type": "string"},
         "attempts": {"type": "integer", "minimum": 1},

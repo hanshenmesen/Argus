@@ -56,8 +56,7 @@ from argus_skill.verticals._data_domain import write_data_domain
 from argus_skill.verticals.speedrun.stages import role_banner as speedrun_role_banner
 
 RESEARCH_STAGES: tuple[str, ...] = (
-    "research", "plan", "benchmark", "run",
-    "analysis", "draft", "review", "submission",
+    "idea", "experiment", "paper", "review",
 )
 SPEEDRUN_STAGES: tuple[str, ...] = ("setup", "optimize", "measure", "report")
 
@@ -209,7 +208,7 @@ def test_persist_vertical_never_resets_existing_stage(tmp_path: Path) -> None:
 
     payload = json.loads((root / ".argus" / "PIPELINE_STATE.json").read_text())
     assert payload["vertical"] == "speedrun"
-    assert payload["current_stage"] == "run"  # preserved, NOT reset to "setup"
+    assert payload["current_stage"] == "experiment"
 
 
 def _finished_custom_domain(
@@ -257,7 +256,7 @@ def test_reset_stage_for_new_intent_preserves_inprogress_reclassification(
     assert applied is False
     payload = json.loads((root / ".argus" / "PIPELINE_STATE.json").read_text())
     assert payload["vertical"] == "speedrun"
-    assert payload["current_stage"] == "run"  # preserved, untouched
+    assert payload["current_stage"] == "experiment"
 
 
 def test_force_replacement_resets_inprogress_pipeline_immediately(
@@ -283,9 +282,9 @@ def test_force_replacement_resets_inprogress_pipeline_immediately(
 
     assert applied is True
     payload = json.loads(state_path.read_text())
-    assert payload["current_stage"] == "research"
-    assert payload["stages"]["research"]["status"] == "in_progress"
-    assert payload["stages"]["plan"]["status"] == "pending"
+    assert payload["current_stage"] == "idea"
+    assert payload["stages"]["idea"]["status"] == "in_progress"
+    assert payload["stages"]["experiment"]["status"] == "pending"
     assert payload["stages"]["review"]["status"] == "pending"
     assert payload["stage_history"][-1]["direction"] == "reset"
 
@@ -325,11 +324,11 @@ def test_reset_stage_for_new_intent_resets_stale_stage_from_finished_prior_verti
     """The exact bug this regression closes: an OLD custom vertical
     (``ops_continuity_runbook``) whose own LAST stage is ``"done"`` happens to
     share its stage NAME ("review") with a stage in a brand-new intent's
-    assigned vertical ("research"'s 8-stage order also has "review"). Before
+    assigned vertical ("research"'s five-stage order also has "review"). Before
     the fix, ``current_stage()`` would silently accept the stale "review" as
     real progress on the new project (a false stage advance with zero
     underlying evidence). After the fix, resolving the new intent must reset
-    ``current_stage`` to the NEW vertical's FIRST stage ("research"), not
+    ``current_stage`` to the NEW vertical's FIRST stage ("idea"), not
     inherit the stale name.
     """
     root = _finished_custom_domain(
@@ -344,7 +343,7 @@ def test_reset_stage_for_new_intent_resets_stale_stage_from_finished_prior_verti
 
     old_vertical = "ops_continuity_runbook"
     new_vertical = "research"  # brand-new, operator-issued intent's vertical
-    assert new_vertical == RESEARCH_STAGES[0]  # sanity: "research" is stage[0]
+    assert RESEARCH_STAGES[0] == "idea"
     assert "review" in RESEARCH_STAGES  # sanity: the exact name collision
 
     # This is what Manager.divide()/commit_domain() do: persist the NEW
@@ -358,18 +357,17 @@ def test_reset_stage_for_new_intent_resets_stale_stage_from_finished_prior_verti
     )
 
     assert applied is True
-    assert current_stage(root) == "research"  # new vertical's FIRST stage
+    assert current_stage(root) == "idea"
 
     payload = json.loads((root / ".argus" / "PIPELINE_STATE.json").read_text())
     assert payload["vertical"] == "research"
-    assert payload["current_stage"] == "research"
+    assert payload["current_stage"] == "idea"
     # Downstream stages downgraded so the planner does not skip back over
     # them; the fully-inherited-but-unrelated "done" statuses from the OLD
     # vertical's stages are no longer read as this project's progress.
     assert payload["stages"]["review"]["status"] == "pending"
-    # Audit trail present (same primitive rollback_stage always uses).
-    assert payload["rollback_history"][-1]["rolled_back_by"] == "manager"
-    assert payload["rollback_history"][-1]["to_stage"] == "research"
+    assert payload["stage_history"][-1]["direction"] == "reset"
+    assert "rollback_history" not in payload
 
 
 def test_reset_stage_for_new_intent_reopens_finished_same_vertical(
@@ -408,7 +406,40 @@ def test_persist_vertical_seeds_first_stage_only_when_missing(tmp_path: Path) ->
     persist_vertical(tmp_path, "research")
 
     payload = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
-    assert payload["current_stage"] == "research"  # research vertical's first stage
+    assert payload["current_stage"] == "idea"
+
+
+@pytest.mark.parametrize(
+    ("workflow_mode", "start_stage", "expected"),
+    [
+        ("direct", "paper", "paper"),
+        ("direct", " DrAfT ", "paper"),
+        ("direct", "not_a_stage", "idea"),
+        ("direct", "", "idea"),
+        ("staged", "paper", "idea"),
+    ],
+)
+def test_persist_vertical_seeds_requested_direct_stage(
+    tmp_path: Path, workflow_mode: str, start_stage: str, expected: str,
+) -> None:
+    persist_vertical(
+        tmp_path, "research", workflow_mode=workflow_mode, start_stage=start_stage,
+    )
+
+    payload = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
+    assert payload["current_stage"] == expected
+
+
+@pytest.mark.parametrize("existing_stage", ["experiment", "off_order"])
+def test_persist_start_stage_never_resets_existing_research_stage(
+    tmp_path: Path, existing_stage: str,
+) -> None:
+    root = _project(tmp_path, "research", current=existing_stage)
+
+    persist_vertical(root, "research", workflow_mode="direct", start_stage="paper")
+
+    payload = json.loads((root / ".argus" / "PIPELINE_STATE.json").read_text())
+    assert payload["current_stage"] == existing_stage
 
 
 def test_kernelbench_research_checklist_is_not_paper_literature_gate(tmp_path: Path) -> None:
@@ -422,28 +453,42 @@ def test_kernelbench_research_checklist_is_not_paper_literature_gate(tmp_path: P
     assert "at least 10 recent high-quality papers" not in text
 
 
-def test_kernelbench_reviewer_skill_paths_exist() -> None:
-    # The checklist hands these paths to the reviewer as workspace-relative
-    # `argus_builtin_skills/<role>/<name>.md` references, so the contract that
-    # matters is what the kernelbench context actually seeds — cross-vertical
-    # builtins plus the vertical's own skills plus whatever it inherits — not
-    # any single source directory.
-    from argus_skill.skills.builtins import iter_context_skill_texts
-    from argus_skill.verticals.kernelbench.stages import REVIEWER_CHECKLISTS
+def test_kernelbench_stage_completion_requires_scored_kernel_and_report(
+    tmp_path: Path,
+) -> None:
+    from argus_skill.verticals.kernelbench.stages import stage_completion_issues
 
-    seeded = {name for name, _text in iter_context_skill_texts("kernelbench", None)}
-    missing = [
-        f"{stage}: {skill_path}"
-        for stage, (skill_path, _instructions, _files) in REVIEWER_CHECKLISTS.items()
-        if skill_path not in seeded
-    ]
-    assert missing == []
+    assert "correct=true" in " ".join(stage_completion_issues("measure", tmp_path))
+
+    result = tmp_path / "attempts" / "a1" / "result.csv"
+    result.parent.mkdir(parents=True)
+    result.write_text("correct,sol_pct\ntrue,72.5\n", encoding="utf-8")
+    assert stage_completion_issues("measure", tmp_path) == ()
+
+    assert stage_completion_issues("report", tmp_path)
+    (tmp_path / "RESULTS.md").write_text("# Results\n", encoding="utf-8")
+    assert stage_completion_issues("report", tmp_path) == ()
+
+
+def test_speedrun_stage_completion_requires_scored_run_and_report(tmp_path: Path) -> None:
+    from argus_skill.verticals.speedrun.stages import stage_completion_issues
+
+    assert "results.csv" in " ".join(stage_completion_issues("measure", tmp_path))
+
+    result = tmp_path / "attempts" / "a1" / "results.csv"
+    result.parent.mkdir(parents=True)
+    result.write_text("score\n0.5\n", encoding="utf-8")
+    assert stage_completion_issues("measure", tmp_path) == ()
+
+    assert stage_completion_issues("report", tmp_path)
+    (tmp_path / "RESULTS.md").write_text("# Results\n", encoding="utf-8")
+    assert stage_completion_issues("report", tmp_path) == ()
 
 
 # --- format_full_pipeline_checklist is vertical-aware ----------------------
 
 
-def test_full_pipeline_defaults_to_research_eight_stages(tmp_path: Path) -> None:
+def test_full_pipeline_defaults_to_research_four_stages(tmp_path: Path) -> None:
     root = _project(tmp_path, "research")
     text = format_full_pipeline_checklist(role="reviewer", project_root=root)
     for stage in RESEARCH_STAGES:
@@ -480,7 +525,10 @@ def test_speedrun_reviewer_banner_is_innovation_coach() -> None:
 # the same 8 stage ids with finance semantics. These tests pin that it routes,
 # loads, certifies on the full-report gate, and ships its skill files.
 
-QUANT_STAGES: tuple[str, ...] = RESEARCH_STAGES  # same ids, finance semantics
+QUANT_STAGES: tuple[str, ...] = (
+    "research", "plan", "benchmark", "run",
+    "analysis", "draft", "review", "submission",
+)
 
 
 def test_quant_vertical_loads_and_exposes_contract() -> None:

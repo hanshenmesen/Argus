@@ -27,6 +27,9 @@ from argus_skill.roles.prompts.engineer import (
 )
 from argus_skill.roles.prompts.manager import (
     FRONT_DOOR,
+    build_front_door_prompt,
+    build_pending_question_prompt,
+    build_stage_decision_prompt,
     build_vertical_decision_prompt,
     stage_decision_request,
 )
@@ -43,7 +46,6 @@ from argus_skill.roles.prompts.reviewer import (
     render_reviewer_prompt,
 )
 from argus_skill.skills.stage_machine import (
-    format_full_pipeline_checklist,
     format_stage_checklist,
 )
 from argus_skill.skills.vertical_select import persist_vertical
@@ -128,6 +130,76 @@ def _cache_probe_prompts(root, cycle: int, *, reverse_catalog: bool = False):
     }
 
 
+def test_structured_role_fields_are_explicitly_operator_facing(tmp_path) -> None:
+    front = build_front_door_prompt("Explain the current status")
+    pending = build_pending_question_prompt(
+        SimpleNamespace(
+            pending_question="Which dataset should we use?",
+            id="task-1",
+            title="Choose a dataset",
+            objective="Select the benchmark data",
+        ),
+        "Use ImageNet",
+    )
+    stage = build_stage_decision_prompt(
+        current_stage="run",
+        next_stage="review",
+        earlier_stages=("plan",),
+        checklist_md="checks passed",
+        review=SimpleNamespace(status="done", reason="Evidence is current."),
+    )
+    continuous = build_continuous_prompt(
+        continuous_objective="Choose the next milestone",
+        journal_tail="",
+        planning_cycle=0,
+        project_root=tmp_path,
+        state_root=tmp_path,
+    )
+    bounded = build_bounded_dag_prompt("Plan this repair", project_root=tmp_path)
+    engineer = build_mission_prompt(
+        task="Repair the parser",
+        skill_text="",
+        next_action=None,
+        project_root=tmp_path,
+    )
+    continuation = build_mission_prompt(
+        task="Repair the parser",
+        skill_text="",
+        next_action="Handle empty input",
+        include_static=False,
+        project_root=tmp_path,
+    )
+    owner = SimpleNamespace(skill_store=None, mission=None, _last_prompt_block_stats={})
+    reviewer, _delta = render_reviewer_prompt(
+        owner,
+        objective="Repair the parser",
+        operator_messages=[],
+        planner_review_instruction="",
+        round_index=1,
+        session_id=None,
+        main_summary="Empty input is covered.",
+        main_error=None,
+        working_dir=tmp_path,
+        vertical_state_root=tmp_path,
+        preselected_skill_block="",
+    )
+
+    assert "complete human-facing answer" in front
+    assert "never expose route, control, lifetime, or role-protocol labels" in front
+    assert "operator's language and plain language" in pending
+    assert "one operator-language sentence stating the decisive evidence" in stage
+    for planner_prompt in (continuous, bounded):
+        assert "REASON and PLAN_REASON are operator-facing" in planner_prompt
+        assert "Do not emit" in planner_prompt
+        assert "field names or status tokens in their values" in planner_prompt
+    for engineer_prompt in (engineer, continuation):
+        assert "one or two operator-facing sentences in the operator's language" in engineer_prompt
+        assert "what changed, the decisive check, and any remaining blocker" in engineer_prompt
+        assert "do not repeat footer or status fields" in engineer_prompt
+    assert "REASON, NEXT_ACTION, and OPERATOR_QUESTION are human-facing" in reviewer
+    assert "Avoid enum and template names" in reviewer
+
+
 def test_role_prompts_are_byte_identical_for_identical_state(tmp_path) -> None:
     persist_vertical(tmp_path, "software")
     append_directive(tmp_path, "Preserve every required fact.", expected_revision=0)
@@ -136,6 +208,36 @@ def test_role_prompts_are_byte_identical_for_identical_state(tmp_path) -> None:
     second = _cache_probe_prompts(tmp_path, 1, reverse_catalog=True)
 
     assert first == second
+
+
+def test_optimization_policy_reaches_planner_and_engineer_prompts(tmp_path) -> None:
+    persist_vertical(tmp_path, "software")
+    continuous = build_continuous_prompt(
+        continuous_objective="Optimize inference.",
+        journal_tail="",
+        planning_cycle=0,
+        project_root=tmp_path,
+        state_root=tmp_path,
+    )
+    bounded = build_bounded_dag_prompt("Optimize inference.", project_root=tmp_path)
+    engineer_context = resolve_role_prompt(mission_request(tmp_path))
+    engineer = build_mission_prompt(
+        task="Optimize inference.",
+        skill_text="",
+        next_action=None,
+        role_banner=engineer_context.role_banner,
+    )
+    required = (
+        "performance or capability baseline",
+        "like-for-like before/after",
+        "deletion is only a means",
+        "solely for testability",
+    )
+
+    assert all(
+        all(phrase in prompt for phrase in required)
+        for prompt in (continuous, bounded, engineer)
+    )
 
 
 def test_consecutive_role_cycles_keep_a_large_common_prefix(tmp_path) -> None:
@@ -208,10 +310,11 @@ def test_kernel_parallel_planning_policy_is_vertical_scoped(tmp_path) -> None:
     assert "vertical:kernel_engineering:banner:planner" in kernel.fragment_ids
 
 
-def test_reviewer_auto_selects_full_pipeline_for_final_submission(
+def test_research_final_review_uses_only_review_stage_checklist(
     tmp_path,
 ) -> None:
     persist_vertical(tmp_path, "research")
+    _set_stage(tmp_path, "review")
 
     context = resolve_role_prompt(
         evaluate_request(tmp_path, scope="final-submission")
@@ -219,30 +322,65 @@ def test_reviewer_auto_selects_full_pipeline_for_final_submission(
 
     assert context.scope == "final_submission"
     assert context.paper_mission is True
-    assert "## Near-complete paper review" in context.role_banner
-    assert "## Final paper review" in context.role_banner
-    assert "The FIRST question of any paper review" in context.role_banner
-    assert "Spot-check the trace yourself" in context.role_banner
-    assert "two or three load-bearing anchors" in context.role_banner
-    assert "incorrect, not 'needs polish'" in context.role_banner
-    assert "integrity is demonstrated by anchors and artifacts" in context.role_banner
-    assert context.stage_checklist == format_full_pipeline_checklist(
+    assert "## Integrated final paper review" in context.role_banner
+    assert "Scientific:" in context.role_banner
+    assert "Visual:" in context.role_banner
+    assert "Language:" in context.role_banner
+    assert "inspect every rendered page" in context.role_banner
+    assert "Do not load HANDOFF.md" in context.role_banner
+    assert "`research-review-playbook.md`" in context.role_banner
+    assert "Do not edit files or change stage state" in context.role_banner
+    assert "single workflow playbook" in context.role_banner
+    assert context.stage_checklist == format_stage_checklist(
+        "review",
         role="reviewer",
         project_root=tmp_path,
+        scope="final_submission",
     )
-    assert "vertical:research:checklist:reviewer:full_pipeline" in (
+    assert "vertical:research:checklist:reviewer:stage:review" in (
+        context.fragment_ids
+    )
+    assert "vertical:research:checklist:reviewer:full_pipeline" not in (
         context.fragment_ids
     )
 
 
-def test_research_planner_receives_dynamic_paper_policy(tmp_path) -> None:
+def test_reviewer_auto_uses_bounded_review_stage_checklist(
+    tmp_path,
+) -> None:
+    persist_vertical(tmp_path, "research")
+    _set_stage(tmp_path, "submission")
+
+    context = resolve_role_prompt(evaluate_request(tmp_path, scope="bounded"))
+
+    assert context.scope == "bounded"
+    assert context.stage == "review"
+    assert "Full pipeline checklist" not in context.stage_checklist
+    assert context.stage_checklist == format_stage_checklist(
+        "review",
+        role="reviewer",
+        project_root=tmp_path,
+        scope="bounded",
+    )
+    assert "vertical:research:checklist:reviewer:stage:review" in (
+        context.fragment_ids
+    )
+    assert "vertical:research:checklist:reviewer:full_pipeline" not in (
+        context.fragment_ids
+    )
+
+
+def test_research_planner_receives_the_stage_playbook(tmp_path) -> None:
     persist_vertical(tmp_path, "research")
     _set_stage(tmp_path, "run")
 
     context = resolve_role_prompt(continuous_request(tmp_path))
 
-    assert "## Parallel paper-drafting track" in context.role_banner
-    assert "paper/RESULT_PLACEHOLDERS.md" in context.role_banner
+    assert "## Authoritative stage playbook" in context.role_banner
+    assert "`research-experiment-playbook.md`" in context.role_banner
+    assert "## Planner responsibility" in context.role_banner
+    assert "leave stage transitions to Manager" in context.role_banner
+    assert "paper/RESULT_PLACEHOLDERS.md" not in context.role_banner
     assert "vertical:research:prompt:planner:continuous" in context.fragment_ids
 
 
@@ -265,8 +403,8 @@ def test_research_planner_prompt_keeps_proportional_stage_checklist(tmp_path) ->
         state_root=tmp_path,
     )
 
-    assert "research.literature" in prompt
-    assert "research.literature" in resume_prompt
+    assert "idea.portfolio" in prompt
+    assert "idea.portfolio" in resume_prompt
 
 
 def test_planner_surfaces_reviewed_facts_path_without_injecting_body(

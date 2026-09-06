@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Any
 
 from ._life_worker_boot import _RunForeverState
 from ._life_worker_identity import _effective_runner_backend, _worker_vault_preflight_routes
@@ -27,9 +29,85 @@ from .state import (
 
 log = logging.getLogger(__name__)
 
+_RUNNING_STALL_ERROR = "executor exited without completing the task"
+_RUNNING_STALL_POLL_SECONDS = 1.0
+
 
 class LifeWorkerRunMixin:
     """``run_forever``'s post-boot phases: main loop and shutdown."""
+
+    def _fail_stalled_running_items(self, rf_state: _RunForeverState) -> list[str]:
+        """Fail durable running claims whose executor thread is no longer alive."""
+        from ..core.event_catalog import EventType
+        from ..life.mission_outcome import mission_outcome_class
+        from ..life.role_activity import role_activity
+
+        if self._supervisor_execution_active.is_set():
+            return []
+
+        now = time.time()
+        activities = role_activity(rf_state.runtime_root, now=now)
+        if any(activity.active for activity in activities.values()):
+            return []
+
+        executor_threads = self._supervisor_execution_threads
+        failed: list[str] = []
+        for item in rf_state.mem.backlog.active():
+            if item.status != "running" or item.started_ts is None:
+                continue
+            owner = str(getattr(item, "running_owner", "") or "") or "primary"
+            executor_thread = executor_threads.get(owner)
+            if executor_thread is None or executor_thread.is_alive():
+                continue
+            if rf_state.mem.backlog.mark_failed(
+                item.id,
+                error=_RUNNING_STALL_ERROR,
+            ) is None:
+                continue
+            failed.append(item.id)
+            rf_state.sink.handle_event({
+                "type": EventType.LIFE_MISSION_COMPLETED,
+                "item_id": item.id,
+                "title": item.title,
+                "objective": item.objective,
+                "success": False,
+                "status": "failed",
+                "summary": _RUNNING_STALL_ERROR,
+                "failure_reason": _RUNNING_STALL_ERROR,
+                "outcome_class": mission_outcome_class("failed", False),
+                "rounds": 0,
+                "elapsed_seconds": max(0.0, now - float(item.started_ts)),
+            })
+            log.error("daemon: failed stalled running item %s", item.id)
+        return failed
+
+    def _run_supervisor_pass(self, supervisor: Any) -> dict:
+        worker_id = str(
+            getattr(getattr(supervisor, "config", None), "worker_id", "primary")
+            or "primary"
+        )
+        self._supervisor_execution_threads[worker_id] = threading.current_thread()
+        return supervisor.run()
+
+    def _start_running_stall_watcher(self, rf_state: _RunForeverState) -> None:
+        def _watch() -> None:
+            while not self._running_stall_stop.wait(_RUNNING_STALL_POLL_SECONDS):
+                try:
+                    self._fail_stalled_running_items(rf_state)
+                except Exception:  # noqa: BLE001 - watchdog failure must not stop work
+                    log.exception("daemon: stalled-running watchdog failed")
+
+        self._running_stall_thread = threading.Thread(
+            target=_watch,
+            name="argus-running-stall",
+            daemon=True,
+        )
+        self._running_stall_thread.start()
+
+    def _stop_running_stall_watcher(self) -> None:
+        self._running_stall_stop.set()
+        if self._running_stall_thread is not None:
+            self._running_stall_thread.join(timeout=2.0)
 
     def _deployment_handoff_gate(self) -> str:
         from ..core.runtime_identity import source_root
@@ -55,7 +133,10 @@ class LifeWorkerRunMixin:
 
     def _rf_vault_preflight(self, rf_state: _RunForeverState) -> int | None:
         """Validate backend/auth before constructing providers or mutating state."""
-        from ..core.runtime_identity import release_match_preflight_error
+        from ..core.runtime_identity import (
+            release_match_preflight_error,
+            source_root_preflight_error,
+        )
 
         release_error = release_match_preflight_error()
         if release_error:
@@ -75,6 +156,13 @@ class LifeWorkerRunMixin:
             read_persisted_knobs()
         except KnobStoreCorruptError as exc:
             log.error("daemon refused before Manager/provider/state mutation: %s", exc)
+            return 2
+
+        # After the knob-store gate above: the configured root may live in
+        # that same file, and a corrupt store must keep its own diagnosis.
+        source_error = source_root_preflight_error()
+        if source_error:
+            log.error("daemon refused mismatched source root: %s", source_error)
             return 2
 
         from ..core.backend_readiness import (
@@ -183,16 +271,11 @@ class LifeWorkerRunMixin:
         if self._curator is not None:
             self._curator.start()
 
-        self._foreground_wait_guard = None
-        if rf_state.cfg.project_workdir:
-            from .foreground_waits import ForegroundWaitGuard
-
-            self._foreground_wait_guard = ForegroundWaitGuard(
-                project_workdir=Path(rf_state.cfg.project_workdir),
-                stop_event=self._stop,
-                on_event=rf_state.sink.handle_event,
-            )
-            self._foreground_wait_guard.start()
+        # Protect a resumed running claim before the main loop reaches its first
+        # supervisor call. The loop clears this guard as soon as that call
+        # returns, which is the only point where executor-loss detection is safe.
+        self._supervisor_execution_active.set()
+        self._start_running_stall_watcher(rf_state)
 
     def _rf_main_loop(self, rf_state: _RunForeverState) -> None:
         """Drain the backlog until stop is requested, sleeping wakeably."""
@@ -202,6 +285,7 @@ class LifeWorkerRunMixin:
                 if self._deployment_handoff_gate():
                     break
                 summary: dict = {}
+                self._supervisor_execution_active.set()
                 try:
                     from ..manager._session_ops import manager_pipeline_yield_requested
 
@@ -223,14 +307,17 @@ class LifeWorkerRunMixin:
                                 "suggested_sleep": rf_state.cfg.poll_interval,
                             }
                         elif len(supervisors) == 1:
-                            summary = rf_state.sup.run()
+                            summary = self._run_supervisor_pass(rf_state.sup)
                         else:
                             with ThreadPoolExecutor(
                                 max_workers=len(supervisors),
                                 thread_name_prefix="argus-mission",
                             ) as executor:
                                 futures = [
-                                    executor.submit(supervisor.run)
+                                    executor.submit(
+                                        self._run_supervisor_pass,
+                                        supervisor,
+                                    )
                                     for supervisor in supervisors
                                 ]
                                 summary = futures[0].result()
@@ -252,16 +339,23 @@ class LifeWorkerRunMixin:
                                 )
                             ):
                                 self._adopted_continuous_generation = None
-                    # A bounded campaign owns exactly one terminal objective.
-                    # The supervisor has already persisted project_done and the
-                    # so another drain pass can only re-open a
-                    # completed project and waste tokens. Open-ended daemons keep
-                    # their resident behavior unchanged.
+                    # A bounded worker owns one finite queue. Plain bounded DAGs
+                    # finish with ``backlog_empty``; finite staged campaigns end
+                    # with ``project_done``. Both must release the process slot.
+                    # A standing campaign that was enabled while this worker was
+                    # alive remains resident even if the launch itself was bounded.
+                    terminal_bounded_stop = summary.get("stopped_by") in {
+                        "backlog_empty",
+                        "project_done",
+                    }
+                    standing = read_continuous_state(rf_state.runtime_root)
+                    standing_enabled = standing.enabled and standing.open_ended
                     if (
-                        summary.get("stopped_by") == "project_done"
+                        terminal_bounded_stop
                         and not rf_state.cfg.continuous_open_ended
+                        and not standing_enabled
                     ):
-                        log.info("daemon: bounded project completed; exiting cleanly")
+                        log.info("daemon: bounded work completed; exiting cleanly")
                         break
                     # Idle auto-exit: the supervisor judged the project idle past
                     # the cap. Exit the loop so the process shuts down cleanly
@@ -277,6 +371,8 @@ class LifeWorkerRunMixin:
                         log.info("daemon: drain pass interrupted by stop request")
                         break
                     log.exception("daemon: drain pass raised; sleeping and retrying")
+                finally:
+                    self._supervisor_execution_active.clear()
                 log.info(
                     "daemon: drain pass stopped_by=%s suggested_sleep=%s",
                     summary.get("stopped_by") or "",
@@ -304,13 +400,7 @@ class LifeWorkerRunMixin:
                     rf_state.runtime_root,
                 )
         finally:
-            foreground_wait_guard = getattr(
-                self,
-                "_foreground_wait_guard",
-                None,
-            )
-            if foreground_wait_guard is not None:
-                foreground_wait_guard.stop()
+            self._stop_running_stall_watcher()
             if self._curator is not None:
                 self._curator.stop()
             if self._control_started_at_iso:

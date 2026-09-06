@@ -1,12 +1,12 @@
-"""Project-local DATA domains — a Manager-authored vertical stored as JSON.
+"""Project-local DATA domains — a Manager-routed vertical stored as JSON.
 
 The on-disk Python verticals (``argus_skill.verticals.<name>.stages``) are the
 factory-shipped pipelines. When the Manager meets a task that matches NO existing
-vertical, it AUTHORS a new domain (a name + an ordered Stage list) and stores it
-as project-local DATA first — under ``<project_root>/research/DOMAINS/`` — rather
-than writing a Python module at runtime. This module is the loader + IO + the
-duck-typed shim that lets such a data domain flow through the SAME resolver path
-the Python verticals use.
+vertical, it names a new domain and the runtime stores it with the canonical
+candidate lifecycle under ``<project_root>/research/DOMAINS/`` rather than writing
+a Python module at runtime. This module is the loader + IO + the duck-typed shim
+that lets such a data domain flow through the SAME resolver path the Python
+verticals use.
 
 ``DataDomain`` exposes the exact attribute surface the optional-hook accessors in
 :mod:`argus_skill.verticals._base` read via ``getattr``
@@ -51,6 +51,9 @@ _NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 #: A fresh data domain does not demand the paper submission gate.
 DEFAULT_COMPLETION_GATE = "none"
+
+#: Runtime-owned lifecycle for every freshly authored candidate domain.
+CANDIDATE_DOMAIN_STAGES = ("execute", "validate")
 
 
 def is_valid_domain_name(name: object) -> bool:
@@ -479,10 +482,10 @@ def revise_data_domain_stages(
         for stage in stages
         if str(stage or "").strip()
     ))
-    if not (2 <= len(revised) <= 10) or any(
+    if len(revised) < 2 or any(
         not is_valid_domain_name(stage) for stage in revised
     ):
-        raise ValueError("a revised data domain needs 2-10 valid stage slugs")
+        raise ValueError("a revised data domain needs at least 2 valid stage slugs")
     if revised == list(current.STAGE_ORDER):
         return path
 
@@ -607,6 +610,7 @@ def mark_promoted(project_root: object, name: str) -> None:
 
 
 __all__ = [
+    "CANDIDATE_DOMAIN_STAGES",
     "DataDomain",
     "DEFAULT_COMPLETION_GATE",
     "LEARNED_DOMAINS_RELDIR",

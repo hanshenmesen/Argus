@@ -1,5 +1,6 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import { useGsapMotion } from '../lib/motion';
+import { useI18n } from '../i18n';
 
 /**
  * A centered modal over a plain scrim — the container for the command palette,
@@ -13,6 +14,9 @@ export function Modal({
   label,
   width = 'max-w-2xl',
   align = 'center',
+  viewport = false,
+  showClose = true,
+  style,
 }: {
   open: boolean;
   onClose: () => void;
@@ -20,7 +24,11 @@ export function Modal({
   label: string;
   width?: string;
   align?: 'center' | 'top';
+  viewport?: boolean;
+  showClose?: boolean;
+  style?: CSSProperties;
 }) {
+  const { t } = useI18n();
   const dialogRef = useRef<HTMLDivElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
@@ -35,17 +43,17 @@ export function Modal({
       .fromTo(
         backdropRef.current,
         { autoAlpha: 0 },
-        { autoAlpha: 1, duration: 0.18, ease: 'power1.out' },
+        { autoAlpha: 1, duration: 0.14, ease: 'power1.out' },
         0,
       )
       .fromTo(
         dialogRef.current,
-        { autoAlpha: 0, y: align === 'top' ? -10 : 12, scale: 0.985 },
+        { autoAlpha: 0, y: align === 'top' ? -6 : 8, scale: 0.992 },
         {
           autoAlpha: 1,
           y: 0,
           scale: 1,
-          duration: 0.28,
+          duration: 0.2,
           ease: 'power3.out',
           clearProps: 'transform,opacity,visibility',
         },
@@ -98,19 +106,36 @@ export function Modal({
   if (!open) return null;
   return (
     <div
-      className={`fixed inset-0 z-50 flex ${align === 'top' ? 'items-start pt-4 sm:pt-16' : 'items-center'} justify-center p-4`}
-      onMouseDown={onClose}
+      className={`fixed inset-0 z-50 flex ${align === 'top' ? 'items-start pt-3 sm:pt-14' : 'items-center'} justify-center ${viewport ? 'p-0' : 'p-3 sm:p-4'}`}
+      onPointerDown={onClose}
     >
-      <div ref={backdropRef} className="absolute inset-0 bg-[rgb(4_11_24_/_0.58)] backdrop-blur-md" />
+      <div ref={backdropRef} className="modal-scrim absolute inset-0" />
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={label}
         tabIndex={-1}
-        className={`brand-modal glass-panel glass-panel--raised relative z-10 w-full ${width} max-h-[calc(100dvh-2rem)] overflow-x-hidden overflow-y-auto rounded-xl border shadow-glow scroll-thin sm:max-h-[88dvh]`}
-        onMouseDown={(e) => e.stopPropagation()}
+        style={style}
+        className={`brand-modal glass-panel glass-panel--raised relative z-10 w-full overscroll-contain ${width} scroll-thin ${viewport
+          ? 'flex h-[100dvh] max-h-[100dvh] flex-col overflow-hidden rounded-none'
+          : 'max-h-[calc(100dvh-1.5rem)] overflow-x-hidden overflow-y-auto rounded-2xl sm:max-h-[88dvh]'
+        }`}
+        onPointerDown={(e) => e.stopPropagation()}
       >
+        {!viewport && showClose ? (
+          <button
+            type="button"
+            data-modal-close
+            onClick={onClose}
+            aria-label={t('common.close')}
+            className="modal-close"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="m4 4 8 8m0-8-8 8" />
+            </svg>
+          </button>
+        ) : null}
         {children}
       </div>
     </div>
@@ -119,9 +144,9 @@ export function Modal({
 
 export function ModalHeader({ title, sub }: { title: string; sub?: string }) {
   return (
-    <div className="border-b border-line px-5 py-3">
-      <h2 className="text-sm font-semibold text-ink">{title}</h2>
-      {sub && <p className="mt-0.5 text-xs text-ink-faint">{sub}</p>}
+    <div className="px-6 pb-3 pr-14 pt-5">
+      <h2 className="text-base font-semibold tracking-[-0.01em] text-ink">{title}</h2>
+      {sub && <p className="mt-1 text-sm text-ink-faint">{sub}</p>}
     </div>
   );
 }

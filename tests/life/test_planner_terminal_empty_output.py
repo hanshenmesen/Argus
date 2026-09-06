@@ -323,6 +323,51 @@ def _make_supervisor(
     return supervisor, backend, sink
 
 
+def test_review_purchase_hook_releases_stage_blocker_before_deferring(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from argus_skill.core.vertical_contract import PlannerReviewPurchaseDecision
+    from argus_skill.life.supervisor._planning_cycle_helpers import _PlanCycleState
+    from argus_skill.planner import PlannerVerdict, TaskSpec
+    from argus_skill.verticals import _base
+
+    supervisor, _backend, sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+    )
+    monkeypatch.setenv("ARGUS_SKILL_FORCE_STAGE_CLOSING", "1")
+    monkeypatch.setattr(
+        _base,
+        "load_vertical_contract",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            planner_task_issues=lambda *_args: (),
+            review_purchase=lambda **_kwargs: PlannerReviewPurchaseDecision(
+                defer_reason="current review exists",
+                release_stage_closing_blocker=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_stage_closing_reproposal_blocker",
+        lambda _task: (SimpleNamespace(), "needs repair", 1.0),
+    )
+    state = _PlanCycleState(None)
+    state.verdict = PlannerVerdict(
+        project_done=False,
+        reason="review already purchased",
+        new_tasks=[TaskSpec(title="Final paper review", objective="Review the paper.")],
+    )
+
+    supervisor._pc_build_dedupe_index(state)
+    supervisor._pc_build_pending_items(state)
+
+    assert state.pending_items == []
+    assert sink.events[-1]["skip_category"] == "paper_review_purchase_deferred"
+
+
 def test_bounded_completed_campaign_stops_before_planner_cycle(
     tmp_path: Path,
     monkeypatch,
@@ -335,10 +380,8 @@ def test_bounded_completed_campaign_stops_before_planner_cycle(
     supervisor.config.open_ended = False
     monkeypatch.setattr(
         supervisor,
-        "_plan_next_work",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("completed bounded campaign must not enter Planner")
-        ),
+        "_manager_publish_project_report",
+        lambda _reason: "reported",
     )
 
     result = supervisor.run()
@@ -349,6 +392,80 @@ def test_bounded_completed_campaign_stops_before_planner_cycle(
         event.get("type") == EventType.LIFE_PLANNER_START
         for event in sink.events
     )
+
+
+def test_direct_research_can_complete_its_bounded_deliverable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    supervisor, backend, _sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+    )
+    supervisor.config.open_ended = False
+    project = Path(supervisor.config.artifact_root)
+    from argus_skill.skills import stage_machine
+    from argus_skill.skills.vertical_select import persist_vertical
+
+    persist_vertical(
+        project,
+        "research",
+        research_target_level="exploratory",
+        workflow_mode="direct",
+    )
+    monkeypatch.setattr(
+        stage_machine,
+        "_ensure_stage_completion",
+        lambda *_args, **_kwargs: None,
+    )
+    stage_machine.complete_final_stage(
+        project,
+        reason="The reviewed direct objective is complete.",
+        allow_early_completion=True,
+    )
+    state = json.loads(
+        (project / ".argus" / "PIPELINE_STATE.json").read_text(encoding="utf-8")
+    )
+    assert state["stages"]["idea"]["status"] == "done"
+    assert backend.planner_calls == 0
+
+
+def test_bounded_staged_research_still_requires_submission_journal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    supervisor, _backend, _sink = _make_supervisor(
+        tmp_path,
+        monkeypatch,
+        terminal_stage_done=False,
+    )
+    supervisor.config.open_ended = False
+    project = Path(supervisor.config.artifact_root)
+    from argus_skill.skills import stage_machine
+    from argus_skill.skills.vertical_select import persist_vertical
+
+    persist_vertical(
+        project,
+        "research",
+        research_target_level="exploratory",
+        workflow_mode="staged",
+    )
+    state_path = project / ".argus" / "PIPELINE_STATE.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["current_stage"] = "submission"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(
+        stage_machine,
+        "_ensure_stage_completion",
+        lambda *_args, **_kwargs: None,
+    )
+    stage_machine.complete_final_stage(
+        project,
+        reason="The staged final stage is complete.",
+    )
+
+    assert supervisor._bounded_completion_reason() == ""
 
 
 def test_standing_campaign_is_not_stopped_by_bounded_completion_certificate(
@@ -1298,5 +1415,6 @@ def test_unversioned_item_replan_degrades_to_planning_not_a_dead_end(
         for event in sink.events
         if event.get("type") == "life.plan.revision.rejected"
     ]
-    assert rejected, "the degradation must stay on the record"
-    assert "planning fresh work instead" in rejected[0]["reason"]
+    assert rejected == [], (
+        "an unversioned item has no versioned plan revision to reject"
+    )

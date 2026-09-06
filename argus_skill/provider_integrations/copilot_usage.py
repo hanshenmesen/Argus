@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..core.paths import global_root
+from ..agent_cli.copilot_home import argus_copilot_home
 
 # Copilot records cost in nano-AI units. 1e9 nano-AIU = 1 AI credit and
 # 1 AI credit = $0.01, therefore one USD is 1e11 nano-AIU.
@@ -22,6 +22,7 @@ class CopilotUsageCursor:
     max_id: int
     db_signature: tuple[int, int] | None
     wal_signature: tuple[int, int] | None
+    fallback: CopilotUsageCursor | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,8 @@ class CopilotCallUsage:
 
     @property
     def total_nano_aiu(self) -> int | None:
+        if any(row.total_nano_aiu is None for row in self.rows):
+            return None
         return _sum_optional(row.total_nano_aiu for row in self.rows)
 
     @property
@@ -112,8 +115,8 @@ def copilot_usage_db_candidates() -> list[Path]:
         candidates.append(Path(configured).expanduser() / "session-store.db")
     candidates.extend(
         [
+            argus_copilot_home() / "session-store.db",
             Path.home() / ".copilot" / "session-store.db",
-            global_root() / "copilot-home" / "session-store.db",
         ]
     )
     out: list[Path] = []
@@ -127,38 +130,57 @@ def copilot_usage_db_candidates() -> list[Path]:
 
 
 def capture_copilot_usage_cursor() -> CopilotUsageCursor | None:
-    candidates = copilot_usage_db_candidates()
+    # Child execution relocates Copilot using a copy of os.environ. Looking at
+    # the parent environment and picking the first existing DB can instead
+    # capture the operator's unrelated personal store. Use the intended child
+    # home even before its DB is created; accounting itself remains read-only.
     configured = os.environ.get("COPILOT_HOME", "").strip()
-    if configured and candidates:
-        path = candidates[0]
-        max_id = _max_usage_id(path) if path.is_file() else 0
-        return CopilotUsageCursor(
-            db_path=path,
-            max_id=max_id or 0,
-            db_signature=_signature(path),
-            wal_signature=_signature(path.with_name(path.name + "-wal")),
-        )
-    for path in candidates:
-        if not path.is_file():
-            continue
-        max_id = _max_usage_id(path)
-        if max_id is None:
-            continue
-        return CopilotUsageCursor(
-            db_path=path,
-            max_id=max_id,
-            db_signature=_signature(path),
-            wal_signature=_signature(path.with_name(path.name + "-wal")),
-        )
-    if not candidates:
-        return None
-    path = candidates[0]
+    home = Path(configured).expanduser() if configured else argus_copilot_home()
+    path = home / "session-store.db"
+    # If child-home preparation fails, the CLI falls back to its personal home.
+    # Capture that baseline separately and only read new rows for this session.
+    personal = Path.home() / ".copilot" / "session-store.db"
+    fallback = _capture_cursor(personal) if not configured and path != personal else None
+    return _capture_cursor(path, fallback=fallback)
+
+
+def _capture_cursor(
+    path: Path, *, fallback: CopilotUsageCursor | None = None
+) -> CopilotUsageCursor:
     return CopilotUsageCursor(
         db_path=path,
-        max_id=0,
+        max_id=(_max_usage_id(path) or 0) if path.is_file() else 0,
         db_signature=_signature(path),
         wal_signature=_signature(path.with_name(path.name + "-wal")),
+        fallback=fallback,
     )
+
+
+def copilot_store_supports_token_billing(path: Path | None) -> bool:
+    """Expect token telemetry unless a readable store proves it is legacy."""
+    if path is None:
+        return False
+    if not path.is_file():
+        return True
+    try:
+        with _connect(path) as conn:
+            columns = conn.execute("PRAGMA table_info(assistant_usage_events)").fetchall()
+        return not columns or any(row[1] == "total_nano_aiu" for row in columns)
+    except (OSError, sqlite3.Error):
+        # Busy/corrupt stores do not establish a legacy billing contract.
+        return True
+
+
+def copilot_usage_store_signature() -> list[dict[str, Any]]:
+    """Read-only invalidation key, including uncheckpointed SQLite writes."""
+    return [
+        {
+            "path": str(path),
+            "db": list(_signature(path) or ()),
+            "wal": list(_signature(path.with_name(path.name + "-wal")) or ()),
+        }
+        for path in copilot_usage_db_candidates()
+    ]
 
 
 def read_copilot_usage_since(
@@ -174,6 +196,12 @@ def read_copilot_usage_since(
     last_ids: tuple[int, ...] = ()
     while True:
         rows = _usage_rows(cursor.db_path, min_id=cursor.max_id, session_id=session_id)
+        if not rows and cursor.fallback is not None:
+            rows = _usage_rows(
+                cursor.fallback.db_path,
+                min_id=cursor.fallback.max_id,
+                session_id=session_id,
+            )
         ids = tuple(row.row_id for row in rows)
         if rows and ids == last_ids:
             stable_reads += 1
@@ -324,7 +352,9 @@ __all__ = [
     "CopilotUsageCursor",
     "NANO_AIU_PER_USD",
     "capture_copilot_usage_cursor",
+    "copilot_store_supports_token_billing",
     "copilot_usage_db_candidates",
+    "copilot_usage_store_signature",
     "find_copilot_usage_near",
     "read_copilot_usage_since",
 ]

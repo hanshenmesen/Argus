@@ -163,8 +163,8 @@ def test_status_projects_latest_persisted_mission_outcome(
 
     assert rc == 0
     assert (
-        "outcome  : execution=completed · review=done · "
-        "stage=not_certified"
+        "result   : Work completed · Review passed · "
+        "Stage remains open"
     ) in out
 
 
@@ -473,6 +473,9 @@ def test_status_names_the_question_it_is_waiting_on(
 
     out = capsys.readouterr().out
     assert "waiting on you" in out
+    question_line = next(line for line in out.splitlines() if "NVIDIA GPU" in line)
+    assert "benchmark the GPU:" in question_line
+    assert "[" not in question_line
     assert "NVIDIA GPU" in out
     assert "--notify" in out, "an operator told they are needed must be told how to reply"
 
@@ -485,6 +488,46 @@ def test_status_says_nothing_about_questions_when_there_are_none(
     _cmd_status(Namespace(life_dir=None))
 
     assert "waiting on you" not in capsys.readouterr().out
+
+
+def test_status_confirms_notify_messages_were_injected(
+    project_with_history: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--status must confirm a drained --notify message, not stay silent.
+
+    The drains emit ``life.inbox.drained`` into events.jsonl. The old
+    renderer filtered ``journal.tail()`` for a ``kind == "inbox.injected"``
+    the journal projection never produces, so it always returned [].
+    """
+    life_root, repo = project_with_history
+    bundle = MemoryBundle.for_cwd(repo, global_root=life_root)
+    with (bundle.project.root / "events.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "life.inbox.drained",
+            "ts": time.time(),
+            "count": 1,
+            "messages": ["focus on the flaky test first"],
+        }) + "\n")
+
+    rc = _cmd_status(Namespace(life_dir=str(life_root)))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "inbox (last injections):" in out
+    assert "focus on the flaky test first" in out
+
+
+def test_status_inbox_section_is_silent_without_injections(
+    project_with_history: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    life_root, _repo = project_with_history
+
+    rc = _cmd_status(Namespace(life_dir=str(life_root)))
+
+    assert rc == 0
+    assert "inbox (last injections):" not in capsys.readouterr().out
 
 
 def test_status_shows_latest_self_result_without_research_lifecycle(

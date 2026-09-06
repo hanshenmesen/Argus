@@ -1,42 +1,66 @@
-"""Durable evidence-based idea portfolios for broad paper research."""
+"""Durable source-only idea portfolios stored entirely under ``.argus``."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import threading
-import time
-import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
+from ...core.file_lock import exclusive_file_lock
+from ...core.pipeline_state import read_pipeline_state, write_pipeline_state
 from ...core.research_contract import (
     resolve_research_direction_mode,
     resolve_research_target_level,
 )
-from ...team import formation, pool, registry, task_board
+from ...team import formation, pool, roster, task_board
 
-TEAM_ID = "research-idea-pipeline-v6"
-# An operating default, not a breadth quota or selection threshold. Callers may
-# size the portfolio differently when the problem structure warrants it.
+TEAM_ID = "research-idea-pipeline-v8"
 DEFAULT_PORTFOLIO_SIZE = 12
-SELECTION_POLICY = "evidence_judgment_v3"
+SELECTION_POLICY = "fixed_twelve_source_only_v6"
+SELECTION_TEAM_SUFFIX = "selection"
 _REVIEW_SCHEMA_VERSION = 2
-_SELECTION_SCHEMA_VERSION = 2
+_SELECTION_SCHEMA_VERSION = 3
 TEAM_ROOT = Path(".argus") / "teams"
-_STATE_PATH = Path("research") / "IDEA_PORTFOLIO.json"
-_SELECTION_PATH = Path("research") / "IDEA_SELECTION.json"
+_STATE_LOCK_PATH = Path(".argus") / "IDEA_PORTFOLIO.lock"
+_HANDOFF_PATH = Path("HANDOFF.md")
+_LEGACY_STATE_PATH = Path("research") / "IDEA_PORTFOLIO.json"
+_LEGACY_SELECTION_PATH = Path("research") / "IDEA_SELECTION.json"
 _REVIEW_VERDICTS = frozenset({"qualified", "rejected"})
 _TEAM_TASK_ENV = "ARGUS_SKILL_TEAM_TASK_ID"
 _NO_NESTED_TEAM = (
     "This task is already one worker in the parent idea portfolio. Do not create, "
     "ensure, launch, or delegate another Team or idea portfolio."
 )
+
+
 def portfolio_required(project_root: Path) -> bool:
+    from ...skills.vertical_select import resolve_workflow_mode
+
     target = resolve_research_target_level(project_root)
     direction = resolve_research_direction_mode(project_root)
-    return target in {"publishable", "doctoral"} and direction != "locked"
+    return (
+        resolve_workflow_mode(project_root) != "direct"
+        and target in {"publishable", "doctoral"}
+        and direction != "locked"
+    )
+
+
+def _team_id(generation: int) -> str:
+    return f"{TEAM_ID}-g{max(1, generation)}"
+
+
+def _artifact_root(team_id: str) -> str:
+    return f".argus/teams/{team_id}/artifacts"
+
+
+def _selection_team_id(team_id: str) -> str:
+    return f"{team_id}-{SELECTION_TEAM_SUFFIX}"
+
+
+def _selection_artifact_root(team_id: str) -> str:
+    return f".argus/teams/{_selection_team_id(team_id)}/artifacts"
 
 
 def _route_task(
@@ -50,25 +74,22 @@ def _route_task(
         "task_id": task_id,
         "title": f"Investigate ideation route {route_id}",
         "objective": (
-            "Choose a mechanism family genuinely distinct from the candidates already "
-            "visible and important to the Manager's broad paper direction. Explain "
-            "which key uncertainty it covers and why another route would not answer it. "
-            f"Create `{output}` early and develop the strongest credible case for "
-            "important, nontrivial new knowledge in whatever form the question supports, "
-            "such as theory, measurement, a dataset, a method, a negative result, or a "
-            "boundary condition. Do not prefer a route "
-            "because it needs no training, has the shortest evidence path, is cheapest, "
-            "or fits one local GPU. Feasibility is a staged resource plan, not the "
-            "scientific ranking objective. "
-            "Record the mechanism, primary-source trail, closest work, non-obvious gap, "
-            "strongest kill argument, resource needs, and any useful probe evidence. "
-            "Search the current frontier and relevant foundations deeply enough to make "
-            "the novelty claim credible; preserve primary URLs and search boundaries. "
-            f"{_NO_NESTED_TEAM}"
+            "Choose a mechanism family genuinely distinct from the other routes and "
+            "important to the broad research direction. Develop the strongest "
+            "source-grounded case for a nontrivial contribution. Record the mechanism, "
+            "primary-source trail, closest work, non-obvious gap, the strongest "
+            "argument against the idea, resource needs, and future decisive "
+            "experiment. Size the resource needs and the decisive experiment to the "
+            "compute this machine actually has (described in your role context) — "
+            "propose ideas whose experiments can genuinely run here, at a scale that "
+            "would convince a reviewer, not toy demonstrations. Selection is "
+            "source-only: inspect papers, documentation, and official source, but do "
+            "not execute candidate code or run probe experiments. Create "
+            f"`{output}`. {_NO_NESTED_TEAM}"
         ),
         "acceptance_check": (
-            f"`{output}` makes an evidence-grounded case for a distinct mechanism family "
-            "and exposes its strongest uncertainty or kill argument."
+            f"`{output}` makes a source-grounded case for a distinct mechanism and "
+            "states its strongest uncertainty."
         ),
         "role": "idea-route",
         "owns_paths": [output],
@@ -89,25 +110,15 @@ def _review_task(
         "title": f"Independently review candidate {route_id}",
         "objective": (
             f"Act as a fresh research reviewer for `{route_output}`. Verify the nearest "
-            "claim-critical prior art and attack the mechanism, attribution, and evidence "
-            "plan. Judge whether the route could produce important, credible, nontrivial "
-            "new knowledge; theory, measurements, datasets, methods, negative results, "
-            "and boundary conditions are all eligible. Reject clear duplication, a "
-            "trivial wrapper, an incoherent mechanism, or evidence that cannot support "
-            "the claimed contribution. "
-            "Do not award credit for no-training convenience, shortest evidence path, "
-            "cheapness, or single-GPU fit; record resource gaps as requirements instead "
-            "of using them to select a scientifically weaker route. Create one compact "
-            "JSON review at "
-            f"`{output}` with schema_version={_REVIEW_SCHEMA_VERSION}, route_id, "
-            "verdict (`qualified` or `rejected`), a natural-language summary of the "
-            "contribution and evidence, and fatal_concerns (array). Include probe "
-            "evidence when it changes the judgment. "
+            "claim-critical prior art and attack the mechanism, attribution, and future "
+            "evidence plan. Do not reward convenience or request an experiment during "
+            f"selection. Write `{output}` with schema_version="
+            f"{_REVIEW_SCHEMA_VERSION}, route_id, verdict (`qualified` or `rejected`), "
+            "summary, and fatal_concerns (array). "
             f"{_NO_NESTED_TEAM}"
         ),
         "acceptance_check": (
-            f"`{output}` is valid review JSON with a decisive qualified/rejected "
-            "verdict and an evidence-grounded contribution judgment."
+            f"`{output}` is a decisive independent review of route {route_id}."
         ),
         "role": "idea-review",
         "owns_paths": [output],
@@ -118,22 +129,16 @@ def _review_task(
 
 
 def portfolio_tasks(
-    team_id: str = TEAM_ID,
-    artifact_root: str = "research/ideation",
-    portfolio_size: int = DEFAULT_PORTFOLIO_SIZE,
+    team_id: str | None = None,
+    artifact_root: str | None = None,
 ) -> list[dict[str, Any]]:
-    if portfolio_size < 1:
-        raise ValueError("portfolio_size must be positive")
+    resolved_team_id = team_id or _team_id(1)
+    internal_root = artifact_root or _artifact_root(resolved_team_id)
     routes = [
-        _route_task(
-            team_id,
-            artifact_root,
-            f"route-{index:02d}",
-        )
-        for index in range(1, portfolio_size + 1)
+        _route_task(resolved_team_id, internal_root, f"route-{index:02d}")
+        for index in range(1, DEFAULT_PORTFOLIO_SIZE + 1)
     ]
-    reviews = [_review_task(route, artifact_root) for route in routes]
-    return [*routes, *reviews]
+    return [*routes, *(_review_task(route, internal_root) for route in routes)]
 
 
 def _selection_tasks(
@@ -141,147 +146,123 @@ def _selection_tasks(
     artifact_root: str,
     available_review_ids: tuple[str, ...],
 ) -> list[dict[str, Any]]:
-    specs = {task["task_id"]: task for task in portfolio_tasks(team_id, artifact_root)}
+    specs = {
+        task["task_id"]: task
+        for task in portfolio_tasks(team_id, artifact_root)
+    }
     candidates: list[dict[str, str]] = []
     for review_id in available_review_ids:
         review = specs[review_id]
-        route_id = str(review_id.removesuffix("-review"))
-        route = specs[route_id]
+        route_task_id = str(review_id.removesuffix("-review"))
+        route = specs[route_task_id]
         candidates.append({
             "route_id": str(route["target"]),
-            "route_task_id": route_id,
+            "route_task_id": route_task_id,
             "route_artifact": str(route["owns_paths"][0]),
             "review_task_id": review_id,
             "review_artifact": str(review["owns_paths"][0]),
         })
     selector_id = f"{team_id}-evidence-selector"
-    return [
-        {
-            "task_id": selector_id,
-            "title": "Adversarially select the strongest supported idea",
-            "objective": (
-                "Read every route/review pair in the manifest, then inspect all other "
-                "relevant evidence that has arrived before you decide, including probes "
-                "and later routes. First judge whether the portfolio covers the key "
-                "uncertainties well enough to choose; if not, state what materially "
-                "different evidence is missing instead of filling the selection record. "
-                "When it is sufficient, choose the qualified route with the strongest "
-                "case for important, credible, nontrivial new knowledge in whatever form "
-                "fits the question. Let new evidence change the choice when it changes "
-                "the contribution's credibility. Do not rank local convenience as "
-                "scientific value; record resource gaps for the winning route. "
-                "Evidence available when this selector was formed:\n"
-                + json.dumps(candidates, ensure_ascii=True, indent=2)
-                + "\nWrite `research/IDEA_SELECTION.json` as one JSON object with "
-                f"schema_version={_SELECTION_SCHEMA_VERSION}, "
-                f"policy=`{SELECTION_POLICY}`, route_id, "
-                "route_task_id, review_task_id, route_artifact, review_artifact, "
-                "rationale, evidence_considered, resource_requirements, and "
-                "unresolved_risks (array). Select only a route whose independent review "
-                "is qualified. This is a qualitative research decision, not a score. "
-                f"{_NO_NESTED_TEAM}"
-            ),
-            "acceptance_check": (
-                "`research/IDEA_SELECTION.json` records a fresh adversarial choice from "
-                "the sufficiently broad evidence available."
-            ),
-            "role": "idea-selector",
-            "owns_paths": [str(_SELECTION_PATH)],
-            "target": "evidence-selection",
-            "priority": 0,
-        },
-    ]
+    output = f"{_selection_artifact_root(team_id)}/selection.json"
+    return [{
+        "task_id": selector_id,
+        "title": "Select the strongest supported idea",
+        "objective": (
+            "Read all twelve route/review pairs below and choose exactly one route. "
+            "The choice is source-only and happens once; do not run candidate code or "
+            "experiments. Record why the winner survives the alternatives, resource "
+            "needs, unresolved risks, and one single-line rejection reason for each "
+            "of the other eleven routes.\n"
+            + json.dumps(candidates, ensure_ascii=True, indent=2)
+            + f"\nWrite `{output}` as one JSON object with schema_version="
+            f"{_SELECTION_SCHEMA_VERSION}, policy=`{SELECTION_POLICY}`, route_id, "
+            "route_task_id, review_task_id, route_artifact, review_artifact, rationale, "
+            "evidence_considered, resource_requirements, unresolved_risks (array), and "
+            "rejections (object mapping every unselected route_id to one line). "
+            f"{_NO_NESTED_TEAM}"
+        ),
+        "acceptance_check": (
+            f"`{output}` records one winner after all twelve routes and reviews and "
+            "contains eleven single-line rejection reasons."
+        ),
+        "role": "idea-selector",
+        "owns_paths": [output],
+        "target": "evidence-selection",
+        "priority": 0,
+    }]
 
 
-def _portfolio_identity(direction: str) -> tuple[str, str, str]:
-    normalized = " ".join(str(direction or "").split())
-    if not normalized:
-        raise ValueError("broad research portfolio requires a direction")
-    digest = hashlib.sha256(f"{TEAM_ID}\n{normalized}".encode("utf-8")).hexdigest()
-    key = digest[:12]
-    return (
-        f"{TEAM_ID}-{key}",
-        f"research/ideation/portfolios/{key}",
-        digest,
-    )
+def _resolved_roots(
+    project_root: Path,
+    state_root: Path | None,
+) -> tuple[Path, Path]:
+    project = Path(project_root).expanduser().resolve()
+    state = Path(state_root or project).expanduser().resolve()
+    return project, state
 
 
-def _state_payload(project_root: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads((project_root / _STATE_PATH).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+@contextmanager
+def _state_lock(state_root: Path) -> Iterator[None]:
+    path = state_root / _STATE_LOCK_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        with exclusive_file_lock(handle, lock_name="idea portfolio state"):
+            yield
+
+
+def _pipeline_payload(state_root: Path) -> dict[str, Any]:
+    payload = read_pipeline_state(state_root)
     return payload if isinstance(payload, dict) else {}
 
 
-def _write_state(project_root: Path, payload: dict[str, Any]) -> None:
-    path = project_root / _STATE_PATH
-    previous_digest = str(_state_payload(project_root).get("direction_sha256") or "")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(
-        f"{path.name}.tmp.{os.getpid()}.{threading.get_ident():x}.{uuid.uuid4().hex[:8]}"
+def _portfolio_meta(payload: dict[str, Any]) -> dict[str, Any]:
+    value = payload.get("idea_portfolio")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _selected_idea(payload: dict[str, Any]) -> dict[str, Any] | None:
+    value = payload.get("selected_idea")
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _write_pipeline_unlocked(
+    state_root: Path,
+    payload: dict[str, Any],
+) -> None:
+    write_pipeline_state(state_root, payload)
+
+
+def _meta_matches(
+    meta: dict[str, Any],
+    *,
+    team_id: str,
+    artifact_root: str,
+) -> bool:
+    try:
+        generation = max(1, int(meta.get("generation") or 1))
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        meta.get("team_id") == team_id
+        and team_id == _team_id(generation)
+        and meta.get("artifact_root") == artifact_root
+        and meta.get("selection_policy") == SELECTION_POLICY
     )
-    try:
-        tmp.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
-    if previous_digest != str(payload.get("direction_sha256") or ""):
-        (project_root / _SELECTION_PATH).unlink(missing_ok=True)
-
-
-def _active_portfolio(
-    project_root: Path,
-) -> tuple[Path, str, str, str] | None:
-    payload = _state_payload(project_root)
-    team_id = str(payload.get("team_id") or "")
-    artifact_root = str(payload.get("artifact_root") or "")
-    digest = str(payload.get("direction_sha256") or "")
-    key = digest[:12]
-    if (
-        team_id != f"{TEAM_ID}-{key}"
-        or len(digest) != 64
-        or artifact_root != f"research/ideation/portfolios/{key}"
-    ):
-        return None
-    root = (project_root / TEAM_ROOT / team_id).resolve()
-    try:
-        root.relative_to((project_root / TEAM_ROOT).resolve())
-    except ValueError:
-        return None
-    return root, team_id, artifact_root, digest
 
 
 def _selection_team_root(project_root: Path, team_id: str) -> Path:
-    return (project_root / TEAM_ROOT / f"{team_id}-selection").resolve()
-
-
-def _valid_shard(root: Path, task: dict[str, Any]) -> bool:
-    raw_path = str(task.get("result_shard") or "").strip()
-    if not raw_path:
-        return False
-    path = Path(raw_path).expanduser().resolve()
-    try:
-        path.relative_to(root.resolve())
-        row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
-    except (ValueError, OSError, IndexError):
-        return False
-    return bool(
-        isinstance(row, dict)
-        and row.get("success") is True
-        and str(row.get("task_id") or "") == str(task.get("task_id") or "")
-        and str(row.get("member_id") or "") == str(task.get("owner") or "")
-    )
+    return (project_root / TEAM_ROOT / _selection_team_id(team_id)).resolve()
 
 
 def _task_output_path(project_root: Path, task: dict[str, Any]) -> Path | None:
     owned = list(task.get("owns_paths") or [])
     if len(owned) != 1:
         return None
-    path = project_root / str(owned[0])
+    path = (project_root / str(owned[0])).resolve()
+    try:
+        path.relative_to(project_root.resolve())
+    except ValueError:
+        return None
     return path
 
 
@@ -295,7 +276,39 @@ def _json_object(path: Path | None) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _review_payload(project_root: Path, task: dict[str, Any]) -> dict[str, Any] | None:
+def _valid_shard(root: Path, task: dict[str, Any]) -> bool:
+    raw_path = str(task.get("result_shard") or "").strip()
+    if not raw_path:
+        return False
+    path = Path(raw_path).expanduser().resolve()
+    try:
+        path.relative_to(root.resolve())
+        row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    except (ValueError, OSError, IndexError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(row, dict)
+        and row.get("success") is True
+        and str(row.get("task_id") or "") == str(task.get("task_id") or "")
+        and str(row.get("member_id") or "") == str(task.get("owner") or "")
+    )
+
+
+def _route_output_present(project_root: Path, task: dict[str, Any]) -> bool:
+    path = _task_output_path(project_root, task)
+    if path is None:
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(text.strip()) and ("https://" in text or "http://" in text)
+
+
+def _review_payload(
+    project_root: Path,
+    task: dict[str, Any],
+) -> dict[str, Any] | None:
     payload = _json_object(_task_output_path(project_root, task))
     target = str(task.get("target") or "")
     if (
@@ -310,8 +323,61 @@ def _review_payload(project_root: Path, task: dict[str, Any]) -> dict[str, Any] 
     return payload
 
 
-def _selection_payload(project_root: Path) -> dict[str, Any] | None:
-    payload = _json_object(project_root / _SELECTION_PATH)
+def _one_line(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _compact_selection(payload: dict[str, Any]) -> dict[str, Any]:
+    route_id = _one_line(payload.get("route_id"))
+    rejections = payload.get("rejections")
+    compact_rejections = {
+        _one_line(key): _one_line(value)
+        for key, value in (
+            rejections.items() if isinstance(rejections, dict) else ()
+        )
+        if _one_line(key) != route_id and _one_line(value)
+    }
+    risks = payload.get("unresolved_risks")
+    compact_risks = [
+        _one_line(item)
+        for item in (risks if isinstance(risks, list) else ())
+        if _one_line(item)
+    ]
+    compact: dict[str, Any] = {
+        "schema_version": _SELECTION_SCHEMA_VERSION,
+        "policy": SELECTION_POLICY,
+        "route_id": route_id,
+        "route_task_id": _one_line(payload.get("route_task_id")),
+        "review_task_id": _one_line(payload.get("review_task_id")),
+        "route_artifact": _one_line(payload.get("route_artifact")),
+        "review_artifact": _one_line(payload.get("review_artifact")),
+        "rationale": _one_line(payload.get("rationale")),
+        "evidence_considered": _one_line(payload.get("evidence_considered")),
+        "resource_requirements": _one_line(payload.get("resource_requirements")),
+        "unresolved_risks": compact_risks,
+        "rejections": compact_rejections,
+    }
+    for key in (
+        "team_id",
+        "selection_team_id",
+    ):
+        value = _one_line(payload.get(key))
+        if value:
+            compact[key] = value
+    for key in ("selected_at", "research_intent_generation"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            compact[key] = value
+    if payload.get("migrated_from_legacy") is True:
+        compact["migrated_from_legacy"] = True
+    return compact
+
+
+def _selection_payload(
+    project_root: Path,
+    path: Path,
+) -> dict[str, Any] | None:
+    payload = _json_object(path)
     required = (
         "route_id",
         "route_task_id",
@@ -326,86 +392,154 @@ def _selection_payload(project_root: Path) -> dict[str, Any] | None:
         payload is None
         or payload.get("schema_version") != _SELECTION_SCHEMA_VERSION
         or payload.get("policy") != SELECTION_POLICY
-        or any(not str(payload.get(key) or "").strip() for key in required)
+        or any(not _one_line(payload.get(key)) for key in required)
         or not isinstance(payload.get("unresolved_risks"), list)
+        or not isinstance(payload.get("rejections"), dict)
     ):
         return None
-    return payload
+    route_id = str(payload["route_id"])
+    rejections = {
+        _one_line(key): _one_line(value)
+        for key, value in payload["rejections"].items()
+        if str(key) != route_id and _one_line(value)
+    }
+    if len(rejections) != DEFAULT_PORTFOLIO_SIZE - 1:
+        return None
+    payload["rejections"] = rejections
+    return _compact_selection(payload)
 
 
-def _route_output_present(project_root: Path, task: dict[str, Any]) -> bool:
-    path = _task_output_path(project_root, task)
-    if path is None:
-        return False
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return (
-        path.is_file()
-        and bool(text.strip())
-        and ("https://" in text or "http://" in text)
-    )
+def _valid_selected_idea(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    required = ("route_id", "rationale", "resource_requirements", "rejections")
+    if any(not payload.get(key) for key in required):
+        return None
+    rejections = payload.get("rejections")
+    if not isinstance(rejections, dict):
+        return None
+    normalized = {
+        str(key): _one_line(value)
+        for key, value in rejections.items()
+        if str(key) != str(payload.get("route_id")) and _one_line(value)
+    }
+    if len(normalized) != DEFAULT_PORTFOLIO_SIZE - 1:
+        return None
+    selected = dict(payload)
+    selected["rejections"] = normalized
+    return _compact_selection(selected)
 
 
-def _valid_review_tasks(
-    project_root: Path,
-    root: Path,
-    actual: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    reviews = [
-        task
-        for task in actual.values()
-        if str(task.get("role") or "") == "idea-review"
-        and task.get("state") == "done"
-        and _valid_shard(root, task)
-        and _review_payload(project_root, task) is not None
-    ]
-    reviews.sort(
-        key=lambda task: (
-            int(task.get("finish_seq") or 0),
-            float(task.get("finished_ts") or 0),
-            str(task.get("task_id") or ""),
-        )
-    )
-    return reviews
+def _review_reason(review: dict[str, Any] | None) -> str:
+    if not review:
+        return "not selected by the authoritative portfolio comparison"
+    concerns = review.get("fatal_concerns")
+    if isinstance(concerns, list):
+        first = next((_one_line(item) for item in concerns if _one_line(item)), "")
+        if first:
+            return first
+    summary = _one_line(review.get("summary"))
+    return summary or "not selected by the authoritative portfolio comparison"
 
 
 def _available_review_ids(
     project_root: Path,
     root: Path,
     actual: dict[str, dict[str, Any]],
-) -> tuple[str, ...]:
-    reviews = _valid_review_tasks(project_root, root, actual)
-    if not any(
-        (_review_payload(project_root, task) or {}).get("verdict") == "qualified"
-        for task in reviews
-    ):
-        return ()
-    return tuple(str(task["task_id"]) for task in reviews)
-
-
-def _base_state(
-    project_root: Path,
     *,
     team_id: str,
     artifact_root: str,
-    direction_digest: str,
-) -> dict[str, Any]:
-    current = _state_payload(project_root)
-    payload = {
-        "artifact_root": artifact_root,
-        "direction_sha256": direction_digest,
-        "team_id": team_id,
+) -> tuple[str, ...]:
+    specs = portfolio_tasks(team_id, artifact_root)
+    route_ids = {
+        str(task["task_id"])
+        for task in specs
+        if task.get("role") == "idea-route"
     }
-    if (
-        str(current.get("direction_sha256") or "") == direction_digest
-        and str(current.get("team_id") or "") == team_id
+    review_ids = {
+        str(task["task_id"])
+        for task in specs
+        if task.get("role") == "idea-review"
+    }
+    if len(route_ids) != DEFAULT_PORTFOLIO_SIZE or len(review_ids) != DEFAULT_PORTFOLIO_SIZE:
+        return ()
+    if any(
+        actual.get(task_id, {}).get("state") != "done"
+        or not _valid_shard(root, actual.get(task_id, {}))
+        or not _route_output_present(project_root, actual.get(task_id, {}))
+        for task_id in route_ids
     ):
-        for key in ("selection_review_task_ids", "selection_team_id"):
-            if key in current:
-                payload[key] = current[key]
-    return payload
+        return ()
+    if any(
+        actual.get(task_id, {}).get("state") != "done"
+        or not _valid_shard(root, actual.get(task_id, {}))
+        or _review_payload(project_root, actual.get(task_id, {})) is None
+        for task_id in review_ids
+    ):
+        return ()
+    for route_id in route_ids:
+        route = actual.get(route_id, {})
+        review = actual.get(f"{route_id}-review", {})
+        route_owner = str(route.get("owner") or "")
+        review_owner = str(review.get("owner") or "")
+        if not route_owner or not review_owner or route_owner == review_owner:
+            return ()
+    return tuple(sorted(review_ids))
+
+
+def _retry_invalid_terminal_tasks(
+    project_root: Path,
+    root: Path,
+    actual: dict[str, dict[str, Any]],
+    *,
+    team_id: str,
+    artifact_root: str,
+) -> tuple[str, ...]:
+    retried: list[str] = []
+    specs = {
+        str(task["task_id"]): task
+        for task in portfolio_tasks(team_id, artifact_root)
+    }
+    for route_spec in (
+        task for task in specs.values() if task.get("role") == "idea-route"
+    ):
+        route_id = str(route_spec["task_id"])
+        review_id = f"{route_id}-review"
+        route = actual.get(route_id, {})
+        review = actual.get(review_id, {})
+        route_valid = bool(
+            route.get("state") == "done"
+            and _valid_shard(root, route)
+            and _route_output_present(project_root, route)
+        )
+        review_valid = bool(
+            review.get("state") == "done"
+            and _valid_shard(root, review)
+            and _review_payload(project_root, review) is not None
+        )
+        if (
+            route.get("state") in {"done", "failed"}
+            and not route_valid
+            and task_board.retry_terminal(root, route_id)
+        ):
+            retried.append(route_id)
+        if (
+            review.get("state") in {"done", "failed"}
+            and (not route_valid or not review_valid)
+            and task_board.retry_terminal(root, review_id)
+        ):
+            retried.append(review_id)
+    return tuple(retried)
+
+
+def _dissolve_team(root: Path, reason: str) -> None:
+    if not root.is_dir():
+        return
+    for task in task_board.snapshot(root):
+        if task.get("state") in {"pending", "claimed", "running"}:
+            task_board.fail(root, str(task["task_id"]), reason=reason)
+    roster.set_state(root, "dissolved")
+    pool.update(root, width=0, state="dissolved")
 
 
 def _ensure_selection_team(
@@ -414,25 +548,57 @@ def _ensure_selection_team(
     root: Path,
     team_id: str,
     artifact_root: str,
-    direction_digest: str,
+    state_root: Path | None = None,
 ) -> Path | None:
+    project_root, state_root = _resolved_roots(project_root, state_root)
+    with _state_lock(state_root):
+        payload = _pipeline_payload(state_root)
+        meta = _portfolio_meta(payload)
+        if not _meta_matches(
+            meta,
+            team_id=team_id,
+            artifact_root=artifact_root,
+        ):
+            return None
+        if _valid_selected_idea(_selected_idea(payload)) is not None:
+            return _selection_team_root(project_root, team_id)
+
     actual = {
         str(task.get("task_id") or ""): task
         for task in task_board.snapshot(root)
     }
-    state = _state_payload(project_root)
-    raw_reviews = state.get("selection_review_task_ids")
-    reviews = (
-        tuple(str(item) for item in raw_reviews)
-        if isinstance(raw_reviews, list) and raw_reviews
-        else ()
+    if _retry_invalid_terminal_tasks(
+        project_root,
+        root,
+        actual,
+        team_id=team_id,
+        artifact_root=artifact_root,
+    ):
+        actual = {
+            str(task.get("task_id") or ""): task
+            for task in task_board.snapshot(root)
+        }
+    if any(
+        task.get("state") in {"pending", "claimed", "running"}
+        for task in actual.values()
+    ) and (
+        str(pool.read(root).get("state") or "") != "running"
+        or int(pool.read(root).get("width", 0) or 0) != DEFAULT_PORTFOLIO_SIZE
+    ):
+        pool.update(root, width=DEFAULT_PORTFOLIO_SIZE, state="running")
+
+    reviews = _available_review_ids(
+        project_root,
+        root,
+        actual,
+        team_id=team_id,
+        artifact_root=artifact_root,
     )
     if not reviews:
-        reviews = _available_review_ids(project_root, root, actual)
-    if not reviews:
         return None
-    selection_team_id = f"{team_id}-selection"
+
     selection_root = _selection_team_root(project_root, team_id)
+    selection_team_id = _selection_team_id(team_id)
     tasks = _selection_tasks(team_id, artifact_root, reviews)
     existing = task_board.snapshot(selection_root)
     receipt = formation.load_receipt(selection_root)
@@ -447,8 +613,8 @@ def _ensure_selection_team(
             root=selection_root,
             team_id=selection_team_id,
             mission=(
-                "Judge whether the available independent evidence is broad enough, then "
-                "adversarially select the strongest supported research contribution."
+                "Select one idea exactly once after all twelve source-only routes "
+                "and independent reviews finish."
             ),
             lead="engineer",
             cwd=project_root,
@@ -460,30 +626,126 @@ def _ensure_selection_team(
         and int(pool.read(selection_root).get("width", 0) or 0) != 1
     ):
         pool.update(selection_root, width=1, state="running")
-    payload = _base_state(
-        project_root,
-        team_id=team_id,
-        artifact_root=artifact_root,
-        direction_digest=direction_digest,
+
+    selector = next(
+        (
+            task
+            for task in task_board.snapshot(selection_root)
+            if task.get("role") == "idea-selector"
+        ),
+        {},
     )
-    payload["selection_review_task_ids"] = list(reviews)
-    payload["selection_team_id"] = selection_team_id
-    _write_state(project_root, payload)
+    if selector.get("state") in {"done", "failed"}:
+        selection = _selection_from_tasks(
+            project_root,
+            root,
+            selection_root,
+            team_id,
+            artifact_root,
+            reviews,
+        )
+        if selection is None and task_board.retry_terminal(
+            selection_root,
+            str(selector.get("task_id") or ""),
+        ):
+            pool.update(selection_root, width=1, state="running")
+
+    with _state_lock(state_root):
+        payload = _pipeline_payload(state_root)
+        meta = _portfolio_meta(payload)
+        if not _meta_matches(
+            meta,
+            team_id=team_id,
+            artifact_root=artifact_root,
+        ):
+            _dissolve_team(
+                selection_root,
+                "superseded by a newer research direction",
+            )
+            return None
+        meta["selection_team_id"] = selection_team_id
+        meta["selection_review_task_ids"] = list(reviews)
+        payload["idea_portfolio"] = meta
+        _write_pipeline_unlocked(state_root, payload)
     return selection_root
 
 
-def ensure_idea_portfolio(project_root: Path, *, direction: str) -> Path:
+def ensure_idea_portfolio(
+    project_root: Path,
+    *,
+    direction: str,
+    state_root: Path | None = None,
+) -> Path:
     nested_task_id = os.environ.get(_TEAM_TASK_ENV, "").strip()
     if nested_task_id:
         raise RuntimeError(
             "nested idea portfolio formation is disabled inside team task "
             f"{nested_task_id!r}"
         )
-    project_root = Path(project_root).expanduser().resolve()
-    team_id, artifact_root, direction_digest = _portfolio_identity(direction)
+    project_root, state_root = _resolved_roots(project_root, state_root)
+    migrate_legacy_idea_selection(project_root, state_root=state_root)
+
+    stale_roots: list[Path] = []
+    with _state_lock(state_root):
+        payload = _pipeline_payload(state_root)
+        selected = _valid_selected_idea(_selected_idea(payload))
+        meta = _portfolio_meta(payload)
+        if selected is not None:
+            team = str(
+                meta.get("team_id")
+                or _team_id(
+                    max(
+                        1,
+                        int(payload.get("research_intent_generation") or 1),
+                    )
+                )
+            )
+            root = project_root / TEAM_ROOT / team
+            _write_handoff(project_root, selected)
+            return root
+
+        previous_direction = _one_line(meta.get("direction"))
+        normalized_direction = _one_line(direction)
+        try:
+            generation = max(
+                1,
+                int(payload.get("research_intent_generation") or 1),
+                int(meta.get("generation") or 1),
+            )
+        except (TypeError, ValueError):
+            generation = 1
+        if meta and previous_direction and previous_direction != normalized_direction:
+            old_team = str(meta.get("team_id") or "")
+            if old_team:
+                stale_roots.extend((
+                    project_root / TEAM_ROOT / old_team,
+                    _selection_team_root(project_root, old_team),
+                ))
+            generation += 1
+            payload["research_intent_generation"] = generation
+        team_id = _team_id(generation)
+        artifact_root = _artifact_root(team_id)
+        payload["research_intent_generation"] = generation
+        payload["idea_portfolio"] = {
+            "schema_version": 1,
+            "generation": generation,
+            "team_id": team_id,
+            "artifact_root": artifact_root,
+            "direction": normalized_direction,
+            "selection_policy": SELECTION_POLICY,
+        }
+        payload["current_verdict"] = "idea_selection_pending"
+        payload["next_action"] = (
+            "Complete twelve source-only routes, twelve independent reviews, "
+            "and the one-time selector."
+        )
+        _write_pipeline_unlocked(state_root, payload)
+
+    for stale in stale_roots:
+        _dissolve_team(stale, "superseded by a newer research direction")
+
     root = project_root / TEAM_ROOT / team_id
     tasks = portfolio_tasks(team_id, artifact_root)
-    route_count = sum(task.get("role") == "idea-route" for task in tasks)
     existing = task_board.snapshot(root)
     receipt = formation.load_receipt(root)
     canonical = (
@@ -497,40 +759,36 @@ def ensure_idea_portfolio(project_root: Path, *, direction: str) -> Path:
             root=root,
             team_id=team_id,
             mission=(
-                "Explore genuinely distinct mechanism families in parallel, review each "
-                "independently, and let a fresh selector judge when the available "
-                "evidence is broad enough to choose "
-                f"for direction {direction_digest}."
+                "Complete exactly twelve distinct source-only routes and one "
+                "independent review for each before one selector chooses."
             ),
             lead="engineer",
             cwd=project_root,
             tasks=tasks,
         )
-        pool.update(root, width=route_count, state="running")
+        pool.update(root, width=DEFAULT_PORTFOLIO_SIZE, state="running")
     elif (
         str(pool.read(root).get("state") or "") == "running"
-        and int(pool.read(root).get("width", 0) or 0) != route_count
+        and int(pool.read(root).get("width", 0) or 0) != DEFAULT_PORTFOLIO_SIZE
     ):
-        pool.update(root, width=route_count, state="running")
-    _write_state(
-        project_root,
-        _base_state(
-            project_root,
-            team_id=team_id,
-            artifact_root=artifact_root,
-            direction_digest=direction_digest,
-        ),
-    )
+        pool.update(root, width=DEFAULT_PORTFOLIO_SIZE, state="running")
+
     selection_root = _ensure_selection_team(
         project_root,
         root=root,
         team_id=team_id,
         artifact_root=artifact_root,
-        direction_digest=direction_digest,
+        state_root=state_root,
     )
-    selection = idea_portfolio_selection(project_root)
+    selection = idea_portfolio_selection(project_root, state_root=state_root)
     if selection is not None and selection_root is not None:
-        _materialize_selection(project_root, root, selection_root, selection)
+        _materialize_selection(
+            project_root,
+            root,
+            selection_root,
+            selection,
+            state_root=state_root,
+        )
     return root
 
 
@@ -540,95 +798,169 @@ def _selection_from_tasks(
     selection_root: Path,
     team_id: str,
     artifact_root: str,
-    direction_digest: str,
     available_review_ids: tuple[str, ...],
 ) -> dict[str, Any] | None:
-    selection_specs = _selection_tasks(team_id, artifact_root, available_review_ids)
-    if not task_board.material_specs_match(selection_root, selection_specs):
-        return None
-    selection_actual = {
-        str(task.get("task_id") or ""): task
-        for task in task_board.snapshot(selection_root)
-    }
-    selector = selection_actual.get(f"{team_id}-evidence-selector", {})
-    if selector.get("state") != "done":
-        return None
-    if not _valid_shard(selection_root, selector):
-        return None
-    selection = _selection_payload(project_root)
-    if selection is None:
-        return None
-    route_task_id = str(selection.get("route_task_id") or "")
-    review_task_id = str(selection.get("review_task_id") or "")
-    if route_task_id != review_task_id.removesuffix("-review"):
-        return None
     base_actual = {
         str(task.get("task_id") or ""): task
         for task in task_board.snapshot(root)
     }
+    canonical_review_ids = _available_review_ids(
+        project_root,
+        root,
+        base_actual,
+        team_id=team_id,
+        artifact_root=artifact_root,
+    )
+    if tuple(sorted(available_review_ids)) != canonical_review_ids:
+        return None
+    selection_specs = _selection_tasks(team_id, artifact_root, available_review_ids)
+    if not task_board.material_specs_match(selection_root, selection_specs):
+        return None
+    selector = next(
+        (
+            task
+            for task in task_board.snapshot(selection_root)
+            if task.get("role") == "idea-selector"
+        ),
+        {},
+    )
+    if selector.get("state") != "done" or not _valid_shard(selection_root, selector):
+        return None
+    selection_path = _task_output_path(project_root, selector)
+    if selection_path is None:
+        return None
+    selection = _selection_payload(project_root, selection_path)
+    if selection is None:
+        return None
+
+    route_task_id = str(selection.get("route_task_id") or "")
+    review_task_id = str(selection.get("review_task_id") or "")
     route = base_actual.get(route_task_id, {})
     review = base_actual.get(review_task_id, {})
-    valid_review_ids = {
-        str(task.get("task_id") or "")
-        for task in _valid_review_tasks(project_root, root, base_actual)
-    }
     review_payload = _review_payload(project_root, review)
     if (
-        route.get("state") != "done"
+        route_task_id != review_task_id.removesuffix("-review")
+        or route.get("state") != "done"
         or review.get("state") != "done"
         or not _valid_shard(root, route)
         or not _valid_shard(root, review)
         or not _route_output_present(project_root, route)
         or review_payload is None
-        or review_payload.get("verdict") != "qualified"
-        or review_task_id not in valid_review_ids
+        or review_task_id not in canonical_review_ids
         or str(selection.get("route_id") or "") != str(route.get("target") or "")
+        or str(selection.get("route_artifact") or "")
+        != str((route.get("owns_paths") or [""])[0])
+        or str(selection.get("review_artifact") or "")
+        != str((review.get("owns_paths") or [""])[0])
     ):
         return None
-    owners = {
-        str(task.get("owner") or "")
-        for task in (route, review, selector)
-    }
-    finished_at = [
+
+    route_owner = str(route.get("owner") or "")
+    review_owner = str(review.get("owner") or "")
+    finished = [
         float(task.get("finished_ts") or 0)
         for task in (route, review, selector)
     ]
-    if "" in owners or len(owners) != 3 or not (
-        0 < finished_at[0] <= finished_at[1] <= finished_at[2]
+    latest_review_finished = max(
+        float(base_actual[review_id].get("finished_ts") or 0)
+        for review_id in canonical_review_ids
+    )
+    if (
+        not route_owner
+        or not review_owner
+        or route_owner == review_owner
+        or not str(selector.get("owner") or "")
+        or not (0 < finished[0] <= finished[1] <= finished[2])
+        or finished[2] < latest_review_finished
     ):
         return None
     return {
         **selection,
-        "schema_version": _SELECTION_SCHEMA_VERSION,
-        "policy": SELECTION_POLICY,
         "team_id": team_id,
-        "selection_team_id": f"{team_id}-selection",
-        "direction_sha256": direction_digest,
+        "selection_team_id": _selection_team_id(team_id),
         "selected_at": float(selector.get("finished_ts") or 0),
     }
 
 
-def idea_portfolio_selection(project_root: Path) -> dict[str, Any] | None:
-    project_root = Path(project_root).expanduser().resolve()
-    active = _active_portfolio(project_root)
-    if active is None:
+def _task_selection(
+    project_root: Path,
+    state_root: Path,
+    meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    team_id = str(meta.get("team_id") or "")
+    artifact_root = str(meta.get("artifact_root") or "")
+    raw_reviews = meta.get("selection_review_task_ids")
+    if (
+        not team_id
+        or not artifact_root
+        or not isinstance(raw_reviews, list)
+        or len(raw_reviews) != DEFAULT_PORTFOLIO_SIZE
+    ):
         return None
-    root, team_id, artifact_root, direction_digest = active
-    state = _state_payload(project_root)
-    raw_reviews = state.get("selection_review_task_ids")
-    if not isinstance(raw_reviews, list) or not raw_reviews:
-        return None
-    reviews = tuple(str(item) for item in raw_reviews)
+    root = project_root / TEAM_ROOT / team_id
     selection_root = _selection_team_root(project_root, team_id)
-    return _selection_from_tasks(
+    selection = _selection_from_tasks(
         project_root,
         root,
         selection_root,
         team_id,
         artifact_root,
-        direction_digest,
-        reviews,
+        tuple(str(item) for item in raw_reviews),
     )
+    if selection is None:
+        return None
+    try:
+        generation = max(1, int(meta.get("generation") or 1))
+    except (TypeError, ValueError):
+        return None
+    selection["research_intent_generation"] = generation
+    return _valid_selected_idea(selection)
+
+
+def idea_portfolio_selection(
+    project_root: Path,
+    *,
+    state_root: Path | None = None,
+) -> dict[str, Any] | None:
+    project_root, state_root = _resolved_roots(project_root, state_root)
+    migrate_legacy_idea_selection(project_root, state_root=state_root)
+    payload = _pipeline_payload(state_root)
+    selected = _valid_selected_idea(_selected_idea(payload))
+    if selected is not None:
+        return selected
+    return _task_selection(project_root, state_root, _portfolio_meta(payload))
+
+
+def _write_handoff(project_root: Path, selection: dict[str, Any]) -> None:
+    from ...manager.source_writeback import atomic_write
+
+    selection = _valid_selected_idea(selection) or {}
+    rejections = selection.get("rejections")
+    rejection_lines = "\n".join(
+        f"- **{route_id}**: {_one_line(reason)}"
+        for route_id, reason in sorted(
+            rejections.items() if isinstance(rejections, dict) else ()
+        )
+    )
+    unresolved = selection.get("unresolved_risks")
+    unresolved_lines = "\n".join(
+        f"- {_one_line(item)}"
+        for item in (unresolved if isinstance(unresolved, list) else ())
+        if _one_line(item)
+    ) or "- None recorded at selection."
+    text = (
+        "# HANDOFF — IDEA\n\n"
+        "## Selected idea\n"
+        f"- Route: `{selection.get('route_id')}`\n"
+        f"- Why it won: {selection.get('rationale')}\n"
+        f"- Evidence considered: {selection.get('evidence_considered')}\n"
+        f"- Resource needs: {selection.get('resource_requirements')}\n\n"
+        "## Unresolved implementation obligations\n"
+        f"{unresolved_lines}\n\n"
+        "## Rejected routes\n"
+        f"{rejection_lines}\n"
+    )
+    atomic_write(project_root / _HANDOFF_PATH, text)
 
 
 def _materialize_selection(
@@ -636,176 +968,297 @@ def _materialize_selection(
     root: Path,
     selection_root: Path,
     selection: dict[str, Any],
-) -> None:
-    path = project_root / _SELECTION_PATH
-    current = _json_object(path) or {}
-    merged = {**current, **selection}
-    if current != merged:
-        tmp = path.with_name(
-            f"{path.name}.tmp.{os.getpid()}.{threading.get_ident():x}.{uuid.uuid4().hex[:8]}"
-        )
+    *,
+    state_root: Path | None = None,
+) -> bool:
+    project_root, state_root = _resolved_roots(project_root, state_root)
+    team_id = str(selection.get("team_id") or "")
+    if (
+        root.resolve() != (project_root / TEAM_ROOT / team_id).resolve()
+        or selection_root.resolve() != _selection_team_root(project_root, team_id)
+        or selection.get("selection_team_id") != _selection_team_id(team_id)
+    ):
+        return False
+    selected = _valid_selected_idea(selection)
+    if selected is None:
+        return False
+
+    with _state_lock(state_root):
+        payload = _pipeline_payload(state_root)
         try:
-            tmp.write_text(
-                json.dumps(merged, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
+            current_generation = max(
+                1,
+                int(payload.get("research_intent_generation") or 1),
             )
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        except (TypeError, ValueError):
+            return False
+        if int(selected.get("research_intent_generation") or 0) != current_generation:
+            return False
+        existing = _valid_selected_idea(_selected_idea(payload))
+        if existing is not None:
+            if (
+                existing.get("route_id") != selected.get("route_id")
+                or existing.get("route_task_id") != selected.get("route_task_id")
+            ):
+                return False
+            selected = existing
+        else:
+            meta = _portfolio_meta(payload)
+            if not _meta_matches(
+                meta,
+                team_id=team_id,
+                artifact_root=str(meta.get("artifact_root") or ""),
+            ):
+                return False
+            payload["selected_idea"] = selected
+            payload["current_verdict"] = "idea_selected"
+            payload["next_action"] = (
+                "Build the selected mechanism and strongest fair baseline, then "
+                "rewrite HANDOFF.md for Experiment."
+            )
+            meta["selection_complete"] = True
+            payload["idea_portfolio"] = meta
+            _write_pipeline_unlocked(state_root, payload)
+
+    _write_handoff(project_root, selected)
     if str(pool.read(selection_root).get("state") or "") not in {
         "draining",
         "dissolved",
     }:
         pool.update(selection_root, state="draining")
-
-
-def late_selection_reviews(
-    project_root: Path,
-) -> tuple[dict[str, str], ...]:
-    """Qualified reviews that settled after the original selection evidence."""
-    project_root = Path(project_root).expanduser().resolve()
-    active = _active_portfolio(project_root)
-    state = _state_payload(project_root)
-    selection_reviews = {
-        str(item) for item in state.get("selection_review_task_ids") or ()
-    }
-    if active is None or not selection_reviews:
-        return ()
-    root, team_id, artifact_root, _digest = active
-    specs = {
-        str(task["task_id"]): task
-        for task in portfolio_tasks(team_id, artifact_root)
-    }
-    actual = {
-        str(task.get("task_id") or ""): task
-        for task in task_board.snapshot(root)
-    }
-    late_ids = tuple(
-        sorted(
-            task_id
-            for task_id, spec in specs.items()
-            if spec.get("role") == "idea-review" and task_id not in selection_reviews
-        )
-    )
-    if not late_ids:
-        return ()
-    rows: list[dict[str, str]] = []
-    for review_id in late_ids:
-        review = actual.get(review_id, {})
-        route_id = review_id.removesuffix("-review")
-        route = actual.get(route_id, {})
-        payload = _review_payload(project_root, review)
-        if (
-            review.get("state") != "done"
-            or route.get("state") != "done"
-            or not _valid_shard(root, review)
-            or not _valid_shard(root, route)
-            or payload is None
-            or payload.get("verdict") != "qualified"
-        ):
-            continue
-        rows.append({
-            "route_task_id": route_id,
-            "route_artifact": str(specs[route_id]["owns_paths"][0]),
-            "review_task_id": review_id,
-            "review_artifact": str(specs[review_id]["owns_paths"][0]),
-            "summary": " ".join(str(payload.get("summary") or "").split()),
-            "novelty_delta": " ".join(
-                str(payload.get("novelty_delta") or "").split()
-            ),
-        })
-    return tuple(rows)
-
-
-def refresh_idea_portfolio(project_root: Path) -> None:
-    """Keep late routes claimable after an evidence-based selection."""
-    project_root = Path(project_root).expanduser().resolve()
-    active = _active_portfolio(project_root)
-    if active is None or idea_portfolio_selection(project_root) is None:
-        return
-    root, team_id, artifact_root, _digest = active
-    specs = portfolio_tasks(team_id, artifact_root)
-    actual = {
-        str(task.get("task_id") or ""): task
-        for task in task_board.snapshot(root)
-    }
-    state = _state_payload(project_root)
-    selection_reviews = {
-        str(item) for item in state.get("selection_review_task_ids") or ()
-    }
-    late_ids = [
-        str(task["task_id"])
-        for task in specs
-        if task.get("role") == "idea-review"
-        and str(task["task_id"]) not in selection_reviews
-    ]
-    unsettled = any(
-        str(actual.get(task_id, {}).get("state") or "")
-        not in {"done", "failed", "blocked"}
-        for task_id in late_ids
-    )
-    if unsettled:
-        marker = registry.marker_path(project_root, team_id)
-        if not marker.exists():
-            registry.write_marker(
-                project_root,
-                team_id=team_id,
-                team_root=root,
-                cwd=str(project_root),
-                now=time.time(),
-            )
-        route_count = sum(task.get("role") == "idea-route" for task in specs)
-        pool.update(root, width=route_count, state="running")
-    elif str(pool.read(root).get("state") or "") != "dissolved":
+    if str(pool.read(root).get("state") or "") not in {"draining", "dissolved"}:
         pool.update(root, state="draining")
+    return True
 
 
-def idea_portfolio_completion_issues(project_root: Path) -> tuple[str, ...]:
-    project_root = Path(project_root).expanduser().resolve()
-    if not portfolio_required(project_root):
+def _legacy_selector_payload(
+    project_root: Path,
+    legacy_meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    direct = _json_object(project_root / _LEGACY_SELECTION_PATH)
+    if direct is not None:
+        return direct
+    selection_team = str(legacy_meta.get("selection_team_id") or "")
+    if not selection_team:
+        return None
+    selection_root = project_root / TEAM_ROOT / selection_team
+    for task in task_board.snapshot(selection_root):
+        if task.get("role") != "idea-selector" or task.get("state") != "done":
+            continue
+        payload = _json_object(_task_output_path(project_root, task))
+        if payload is not None:
+            return payload
+    return None
+
+
+def _legacy_selection(
+    project_root: Path,
+) -> dict[str, Any] | None:
+    legacy_meta = _json_object(project_root / _LEGACY_STATE_PATH) or {}
+    source = _legacy_selector_payload(project_root, legacy_meta)
+    if source is None:
+        return None
+    route_id = _one_line(source.get("route_id"))
+    if not route_id:
+        return None
+
+    team_id = _one_line(
+        source.get("team_id")
+        or legacy_meta.get("team_id")
+        or "legacy-research-idea-portfolio"
+    )
+    root = project_root / TEAM_ROOT / team_id
+    tasks = task_board.snapshot(root)
+    routes = {
+        str(task.get("target") or ""): task
+        for task in tasks
+        if task.get("role") == "idea-route"
+    }
+    reviews = {
+        str(task.get("target") or ""): task
+        for task in tasks
+        if task.get("role") == "idea-review"
+    }
+    route_ids = set(routes) | set(reviews)
+    if len(route_ids) < DEFAULT_PORTFOLIO_SIZE:
+        route_ids.update(
+            f"route-{index:02d}"
+            for index in range(1, DEFAULT_PORTFOLIO_SIZE + 1)
+        )
+    route_ids.discard(route_id)
+    rejection_ids = sorted(route_ids)[: DEFAULT_PORTFOLIO_SIZE - 1]
+    rejections: dict[str, str] = {}
+    old_rejections = source.get("rejections")
+    if isinstance(old_rejections, dict):
+        rejections.update(
+            {
+                candidate: _one_line(old_rejections.get(candidate))
+                for candidate in rejection_ids
+                if _one_line(old_rejections.get(candidate))
+            }
+        )
+    for candidate in rejection_ids:
+        if candidate in rejections:
+            continue
+        review = _review_payload(project_root, reviews.get(candidate, {}))
+        rejections[candidate] = _review_reason(review)
+
+    selected_route = routes.get(route_id, {})
+    route_artifact = _one_line(
+        source.get("route_artifact")
+        or next(iter(selected_route.get("owns_paths") or ()), "")
+    )
+    return {
+        "schema_version": _SELECTION_SCHEMA_VERSION,
+        "policy": SELECTION_POLICY,
+        "route_id": route_id,
+        "route_task_id": _one_line(source.get("route_task_id")),
+        "review_task_id": _one_line(source.get("review_task_id")),
+        "route_artifact": route_artifact,
+        "review_artifact": _one_line(source.get("review_artifact")),
+        "rationale": _one_line(source.get("rationale"))
+        or "Selected by the prior authoritative twelve-route selector.",
+        "evidence_considered": _one_line(source.get("evidence_considered"))
+        or "The completed prior twelve-route portfolio and its independent reviews.",
+        "resource_requirements": _one_line(source.get("resource_requirements"))
+        or "Carry forward the resource requirements recorded by the selected route.",
+        "unresolved_risks": (
+            list(source.get("unresolved_risks"))
+            if isinstance(source.get("unresolved_risks"), list)
+            else []
+        ),
+        "rejections": rejections,
+        "team_id": team_id,
+        "selection_team_id": _one_line(legacy_meta.get("selection_team_id")),
+        "migrated_from_legacy": True,
+    }
+
+
+def migrate_legacy_idea_selection(
+    project_root: Path,
+    *,
+    state_root: Path | None = None,
+    materialize_handoff: bool = True,
+) -> bool:
+    """Move an old completed selector into pipeline state without rerunning it."""
+    project_root, state_root = _resolved_roots(project_root, state_root)
+    handoff: dict[str, Any] | None = None
+    migrated_selection = False
+    with _state_lock(state_root):
+        payload = _pipeline_payload(state_root)
+        if str(payload.get("vertical") or "").strip().lower() != "research":
+            return False
+        selected = _valid_selected_idea(_selected_idea(payload))
+        if payload.get("legacy_selection_consumed") is True:
+            handoff = selected
+        else:
+            payload["legacy_selection_consumed"] = True
+            if selected is not None:
+                handoff = selected
+                _write_pipeline_unlocked(state_root, payload)
+            else:
+                migrated = _valid_selected_idea(_legacy_selection(project_root))
+                if migrated is None:
+                    _write_pipeline_unlocked(state_root, payload)
+                else:
+                    generation = max(
+                        1,
+                        int(payload.get("research_intent_generation") or 1),
+                    )
+                    payload["research_intent_generation"] = generation
+                    migrated["research_intent_generation"] = generation
+                    migrated = _valid_selected_idea(migrated)
+                    if migrated is None:
+                        _write_pipeline_unlocked(state_root, payload)
+                    else:
+                        payload["selected_idea"] = migrated
+                        payload["current_verdict"] = "idea_selected"
+                        payload["next_action"] = (
+                            "Resume the mapped research stage with the selected idea; "
+                            "mapped stages must be reviewed under the current four-stage "
+                            "checklist."
+                        )
+                        meta = _portfolio_meta(payload)
+                        meta.update({
+                            "schema_version": 1,
+                            "generation": generation,
+                            "team_id": migrated.get("team_id"),
+                            "selection_team_id": migrated.get("selection_team_id"),
+                            "selection_policy": SELECTION_POLICY,
+                            "selection_complete": True,
+                            "migrated_from_legacy": True,
+                        })
+                        payload["idea_portfolio"] = meta
+                        _write_pipeline_unlocked(state_root, payload)
+                        handoff = migrated
+                        migrated_selection = True
+    if materialize_handoff and handoff is not None:
+        _write_handoff(project_root, handoff)
+    return migrated_selection
+
+
+def idea_portfolio_completion_issues(
+    project_root: Path,
+    *,
+    state_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Validate the internal portfolio and materialize its sole visible handoff."""
+    project_root, state_root = _resolved_roots(project_root, state_root)
+    if not portfolio_required(state_root):
         return ()
-    active = _active_portfolio(project_root)
-    if active is None:
-        return ("research idea portfolio state is missing or invalid",)
-    root, team_id, artifact_root, direction_digest = active
+    migrate_legacy_idea_selection(project_root, state_root=state_root)
+    payload = _pipeline_payload(state_root)
+    selected = _valid_selected_idea(_selected_idea(payload))
+    if selected is not None:
+        _write_handoff(project_root, selected)
+        return ()
+
+    meta = _portfolio_meta(payload)
+    team_id = str(meta.get("team_id") or "")
+    artifact_root = str(meta.get("artifact_root") or "")
+    if not _meta_matches(meta, team_id=team_id, artifact_root=artifact_root):
+        return ("internal research idea portfolio state is missing or invalid",)
+    root = project_root / TEAM_ROOT / team_id
     tasks = portfolio_tasks(team_id, artifact_root)
     if not task_board.material_specs_match(root, tasks):
-        return ("research idea portfolio task board is missing or not canonical",)
-    issues: list[str] = []
+        return ("internal research idea portfolio task board is missing or invalid",)
     selection_root = _ensure_selection_team(
         project_root,
         root=root,
         team_id=team_id,
         artifact_root=artifact_root,
-        direction_digest=direction_digest,
+        state_root=state_root,
     )
     if selection_root is None:
-        issues.append(
-            "research idea portfolio has no qualified independent review yet"
+        return (
+            "research idea portfolio has not completed all twelve route/review pairs",
         )
-        return tuple(issues)
-    if int(pool.read(selection_root).get("width", 0) or 0) != 1:
-        issues.append("research selection pipeline did not preserve width 1")
-    selection = idea_portfolio_selection(project_root)
-    if selection is not None:
-        _materialize_selection(project_root, root, selection_root, selection)
-        return tuple(issues)
-    issues.append(
-        "research adversarial selection is still incomplete"
+    selection = _task_selection(
+        project_root,
+        state_root,
+        _portfolio_meta(_pipeline_payload(state_root)),
     )
-    return tuple(issues)
+    if selection is None:
+        return ("the one-time idea selector has not completed validly",)
+    if not _materialize_selection(
+        project_root,
+        root,
+        selection_root,
+        selection,
+        state_root=state_root,
+    ):
+        return ("the selector conflicts with the selected idea in pipeline state",)
+    return ()
 
 
 __all__ = [
     "DEFAULT_PORTFOLIO_SIZE",
     "SELECTION_POLICY",
     "TEAM_ID",
-    "TEAM_ROOT",
     "ensure_idea_portfolio",
     "idea_portfolio_completion_issues",
     "idea_portfolio_selection",
-    "late_selection_reviews",
+    "migrate_legacy_idea_selection",
     "portfolio_required",
     "portfolio_tasks",
-    "refresh_idea_portfolio",
 ]

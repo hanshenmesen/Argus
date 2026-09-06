@@ -138,3 +138,43 @@ def test_nothing_blocks_a_decision_that_is_allowed() -> None:
     blockers = final_stage_completion_blockers(_review(), **kwargs)
 
     assert (decision is None) == bool(blockers)
+
+
+def test_research_final_review_done_certifies_regardless_of_result_grades() -> None:
+    """For the paper vertical the Reviewer's ``done`` on the final review is
+    the certification. Grades such as ``finite_verification`` or novelty
+    ``unverified`` describe the verdict; they do not overrule it."""
+    from argus_skill.manager.stage_decider import _review_certifies_completion
+
+    review = SimpleNamespace(
+        status="done",
+        research_result={
+            "result_class": "finite_verification",
+            "correctness_status": "verified",
+            "novelty_status": "unverified",
+            "significance_status": "publishable",
+            "statement_fidelity_status": "verified",
+            "evidence": ["independent recomputation matched every headline number"],
+            "limitations": [],
+        },
+    )
+    assert (
+        _review_certifies_completion(
+            review,
+            vertical="research",
+            mission_scope="final_submission",
+            research_target_level="publishable",
+        )
+        == ""
+    )
+    # Formal verticals keep the grade check.
+    assert (
+        _review_certifies_completion(
+            review,
+            vertical="math",
+            mission_scope="final_submission",
+            research_target_level="publishable",
+        )
+        == "result_class_below_publishable:finite_verification"
+    )
+

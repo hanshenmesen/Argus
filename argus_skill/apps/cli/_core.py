@@ -257,6 +257,7 @@ def _resolve_project_bundle(
         migrate_legacy_session_workdir,
         read_session_meta,
         resolve_session_workdir,
+        session_workdir_is_bound,
     )
 
     state_dir = core_paths.session_state_root(sid, root=global_root)
@@ -264,11 +265,11 @@ def _resolve_project_bundle(
         return None
     meta = read_session_meta(global_root, sid)
     try:
-        if meta is None:
+        if not session_workdir_is_bound(meta):
             # Prefer the last daemon workspace over the shell cwd. A Web/CLI
             # restart may be initiated from the state directory, which must
-            # never become the execution root for a legacy external-worktree
-            # session.
+            # never become the execution root for a legacy or partially
+            # initialized external-worktree session.
             from ...daemon.state import read_daemon_status
 
             prior = read_daemon_status(state_dir).project_workdir
@@ -295,23 +296,6 @@ def _resolve_project_bundle(
         global_root=global_root,
         fingerprint=sid,
     )
-
-
-def _lifetime_entry_error(args: argparse.Namespace) -> str:
-    """Return an actionable error if the lifetime agent is under-configured.
-
-    The lifetime daemon / cockpit requires trusted machine house rules, but it
-    may start without an objective. The first substantive user prompt is routed
-    through the Manager, which decides BOUNDED versus STANDING and authors the
-    persisted execution objective for a standing campaign.
-    """
-    from ...life.special_prompts import describe_special_prompt_gate
-
-    ok, detail = describe_special_prompt_gate()
-    if not ok:
-        return detail
-    return ""
-
 
 
 _FOLLOW_HEARTBEAT_SECONDS = 20.0
@@ -444,14 +428,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     setup_only = (
         bool(getattr(args, "non_interactive", False))
-        or bool(getattr(args, "accept_house_rules", False))
         or bool(getattr(args, "set_git_global", False))
         or bool(getattr(args, "configure_codex", False))
     )
     if setup_only and not args.setup:
         sys.stderr.write(
-            "argus-skill: --non-interactive / --accept-house-rules / "
-            "--set-git-global / --configure-codex require --setup\n"
+            "argus-skill: --non-interactive / --set-git-global / "
+            "--configure-codex require --setup\n"
         )
         return 2
     readiness_modifier = (
@@ -561,10 +544,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if getattr(args, "web", False):
-        entry_error = _lifetime_entry_error(args)
-        if entry_error:
-            sys.stderr.write(f"argus-skill: {entry_error}\n")
-            return 2
         # Nothing may promise a URL before the stack that serves it is known
         # to be present.
         missing = _missing_web_dependency()
@@ -608,7 +587,6 @@ def main(argv: list[str] | None = None) -> int:
             backend=getattr(args, "backend", None),
             auth_mode=getattr(args, "auth_mode", None),
             non_interactive=bool(getattr(args, "non_interactive", False)),
-            accept_house_rules=bool(getattr(args, "accept_house_rules", False)),
             allow_prerelease=bool(getattr(args, "allow_prerelease", False)),
             api_url=getattr(args, "api_url", None),
             api_key=getattr(args, "api_key", None),
@@ -651,10 +629,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # All interactive use goes through the Ink cockpit; ``argus-skill`` remains
     # the daemon/admin CLI for explicit flags.
-    entry_error = _lifetime_entry_error(args)
-    if entry_error:
-        sys.stderr.write(f"argus-skill: {entry_error}\n")
-        return 2
     from ..tui_launcher import main as run_tui
 
     forwarded = list(sys.argv[1:] if argv is None else argv)
@@ -767,10 +741,6 @@ def _cmd_daemon_start(args: argparse.Namespace, *, foreground: bool) -> int:
     )
     if continuous_error:
         sys.stderr.write(f"argus-skill: {continuous_error}\n")
-        return 2
-    entry_error = _lifetime_entry_error(args)
-    if entry_error:
-        sys.stderr.write(f"argus-skill: {entry_error}\n")
         return 2
     if bool(getattr(args, "allow_prerelease", False)):
         os.environ["ARGUS_SKILL_ALLOW_BACKEND_PRERELEASE"] = "1"
@@ -906,7 +876,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     advisor = run_doctor_advisor(
         report,
         context,
-        requested=str(getattr(args, "advisor", "auto") or "auto"),
+        # Diagnostics must remain read-only unless the operator explicitly
+        # selects an advisor.  The top-level `--doctor` compatibility flag has
+        # no --advisor argument, so its missing attribute must mean `none`.
+        requested=str(getattr(args, "advisor", "none") or "none"),
         # A backend whose CLI is installed but not logged in is the first
         # thing a new user needs told. Reporting "ready" and hiding the
         # login behind --deep sends them off to fail on their first task.
@@ -1289,7 +1262,6 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         global_root=bundle.global_root,
     )
     chat_state["_frontdoor_credential_imported"] = credential is not None
-    _front_door_classify(bundle, question, chat_state)
     runner = _ensure_manager_runner(chat_state, bundle)
     if runner is None:
         reason = str(chat_state.get("manager_runner_error") or "").strip()
@@ -1299,6 +1271,12 @@ def _cmd_ask(args: argparse.Namespace) -> int:
             + " — nothing was queued\n"
         )
         return 1
+    _front_door_classify(
+        bundle,
+        question,
+        chat_state,
+        ensure_runner=lambda _state, _bundle: runner,
+    )
     operator_context, _revision = build_operator_context_block(
         "manager", bundle.project.root, consume_once=False
     )
@@ -2031,31 +2009,60 @@ def _render_lifecycle_status_lines(
 
 
 def _render_inbox_injection_lines(bundle: Any, *, limit: int = 3) -> list[str]:
-    """Surface recent inbox-injection journal entries (Opt #4).
+    """Surface recent inbox-injection events (Opt #4).
 
     Lets the operator confirm that `argus-skill --notify "..."` was
-    seen by the daemon and injected into a mission prompt. Returns
-    [] when no inbox.injected entries exist.
+    seen by the daemon and injected into a mission prompt. The drains
+    emit ``life.inbox.drained`` into events.jsonl; that type is not part
+    of the ``EventJournal`` projection, so this reads the raw event tail
+    (same as ``_render_mid_mission_progress_lines``). Returns [] when no
+    injection events exist.
     """
     try:
-        entries = list(bundle.journal.tail(50))
+        import json as _json
+        events_path = Path(bundle.project.root) / "events.jsonl"
+        if not events_path.exists():
+            return []
+        with events_path.open("rb") as fh:
+            fh.seek(0, 2)
+            end = fh.tell()
+            read_chunk = min(end, 256 * 1024)
+            fh.seek(end - read_chunk)
+            raw_tail = fh.read().decode("utf-8", errors="replace")
+        injected: list[dict[str, Any]] = []
+        for raw_line in raw_tail.splitlines():
+            if "life.inbox.drained" not in raw_line:
+                continue
+            try:
+                row = _json.loads(raw_line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if (
+                row.get("canonical_type") or row.get("type")
+            ) != "life.inbox.drained":
+                continue
+            injected.append(row)
     except Exception:  # noqa: BLE001
         return []
-    injected = [
-        e for e in entries
-        if getattr(e, "kind", "") == "inbox.injected"
-    ][-limit:]
+    injected = injected[-limit:]
     if not injected:
         return []
     lines = ["  inbox (last injections):"]
-    for e in injected:
-        ts = getattr(e, "ts", 0.0)
+    for row in injected:
         try:
             import datetime as _dt
-            stamp = _dt.datetime.fromtimestamp(float(ts)).strftime("%H:%M:%S")
+            stamp = _dt.datetime.fromtimestamp(
+                float(row.get("ts", 0.0))
+            ).strftime("%H:%M:%S")
         except Exception:  # noqa: BLE001
             stamp = "?"
-        summary = (getattr(e, "summary", "") or "").replace("\n", " ")
+        messages = row.get("messages")
+        summary = " | ".join(
+            str(message).strip() for message in messages
+        ) if isinstance(messages, list) else ""
+        summary = summary.replace("\n", " ")
         if len(summary) > 100:
             summary = summary[:97] + "..."
         lines.append(f"    {stamp}  {summary}")
@@ -2263,7 +2270,10 @@ def _cmd_status(args: argparse.Namespace) -> int:
             question = _clean_follow_text(
                 str(getattr(item, "pending_question", "")), limit=160
             )
-            print(f"    - [{getattr(item, 'id', '')}] {question}")
+            title = _clean_follow_text(
+                str(getattr(item, "title", "current task")), limit=80
+            )
+            print(f"    - {title}: {question}")
         print("    answer with: argus (then just reply), or argus --notify '<answer>'")
     history_parts = [part for part in (
         f"{done} done" if done else "",
@@ -2282,7 +2292,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         summary = outcome_dimension_summary(
             getattr(latest_outcome_item, "outcome", None)
         )
-        print(f"  outcome  : {' · '.join(summary)}")
+        print(f"  result   : {' · '.join(summary)}")
     latest_reply = _latest_user_visible_reply(Path(bundle.project.root))
     if latest_reply:
         print(f"  last reply: {latest_reply}")

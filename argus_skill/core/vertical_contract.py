@@ -9,7 +9,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 VERTICAL_CONTRACT_VERSION = 1
 _COMPLETION_GATES = frozenset({"none", "metric", "certified"})
@@ -127,6 +127,15 @@ class IterationAssessment:
 
 
 @dataclass(frozen=True)
+class PlannerReviewPurchaseDecision:
+    """A vertical-owned decision about a proposed review purchase."""
+
+    defer_reason: str = ""
+    discard_semantic_duplicate: bool = False
+    release_stage_closing_blocker: bool = False
+
+
+@dataclass(frozen=True)
 class VerticalLibraryContext:
     """Core-owned inputs for optional provider-owned Skill preparation."""
 
@@ -168,26 +177,25 @@ class VerticalContract:
     library_preparer: Callable[[VerticalLibraryContext], None] | None = None
     stage_completion_validator: Callable[..., object] | None = None
     planner_task_validator: Callable[[str, Path, Any], object] | None = None
+    review_purchase_policy: Callable[..., PlannerReviewPurchaseDecision] | None = None
     iteration_assessor: IterationAssessmentHook | None = None
     # Optional: records the operator's stated objective at project setup, for a
     # vertical that cannot pick a completion bar on its own. See
     # ``adopt_operator_objective``.
     operator_objective_adopter: Callable[[Path, str], object] | None = None
-    stage_checks: dict[str, tuple[tuple[str, str], ...]] | None = None
+    # Optional: carries this vertical's own pre-isolation artifacts (stage
+    # names, selection records) when legacy Manager state is imported into an
+    # isolated state root. Keyword-only forwarding; see ``import_legacy_state``.
+    legacy_state_importer: Callable[..., object] | None = None
     stage_primary_deliverables: dict[str, tuple[str, ...]] | None = None
+    # Optional role-operation routing by canonical stage. The framework keeps
+    # the fallback operation domain-blind; each vertical owns any specialization.
+    engineer_stage_operations: dict[str, str] | None = None
     # Stages whose Engineer round runs with live web search enabled. ``None``
     # means "this vertical declares nothing", which is NOT the same as an
     # explicitly declared empty set ("never search"): the former keeps the
     # framework default, the latter overrides it off.
     engineer_live_search_stages: frozenset[str] | None = None
-
-    @property
-    def assurance_level(self) -> str:
-        if self.stage_checks or self.stage_completion_validator is not None:
-            return "hybrid"
-        if self.checklist_optional_stages == frozenset(self.stage_order):
-            return "runtime-authored"
-        return "reviewer"
 
     def banner(self, role: str) -> str:
         if self.role_guidance is None:
@@ -227,6 +235,9 @@ class VerticalContract:
 
     def primary_deliverables(self, stage: str) -> tuple[str, ...]:
         return tuple((self.stage_primary_deliverables or {}).get(stage, ()))
+
+    def engineer_operation(self, stage: str, *, default: str = "mission") -> str:
+        return str((self.engineer_stage_operations or {}).get(stage, default))
 
     def live_search_stages(
         self,
@@ -320,6 +331,31 @@ class VerticalContract:
             if str(issue).strip()
         )
 
+    def review_purchase(
+        self,
+        *,
+        project_root: Path,
+        task: Any,
+        existing_items: Iterable[Any],
+        semantic_duplicate: Any | None,
+        stage_reviewed_at: float | None,
+    ) -> PlannerReviewPurchaseDecision | None:
+        if self.review_purchase_policy is None:
+            return None
+        value = self.review_purchase_policy(
+            project_root=project_root,
+            task=task,
+            existing_items=existing_items,
+            semantic_duplicate=semantic_duplicate,
+            stage_reviewed_at=stage_reviewed_at,
+        )
+        if isinstance(value, PlannerReviewPurchaseDecision):
+            return value
+        raise VerticalContractError(
+            f"vertical {self.name!r} review purchase policy returned "
+            f"{type(value).__name__}, expected PlannerReviewPurchaseDecision"
+        )
+
     def assess_iteration(
         self,
         *,
@@ -370,6 +406,19 @@ class VerticalContract:
             return False
         self.operator_objective_adopter(project_root, str(request or ""))
         return True
+
+    def import_legacy_state(self, *, source_root: Path, state_root: Path) -> None:
+        """Carry this vertical's pre-isolation artifacts into the state root.
+
+        Called once, right after legacy Manager state naming this vertical has
+        been copied into an isolated state root. The framework knows only that
+        an import happened; whatever stage-name or selection migration the
+        vertical needs stays vertical-local behind this hook, so the state
+        importer never has to name a domain.
+        """
+        if self.legacy_state_importer is None:
+            return
+        self.legacy_state_importer(source_root=source_root, state_root=state_root)
 
     def prepare_mission(
         self,
@@ -531,6 +580,11 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         raise VerticalContractError(
             f"vertical {name!r} has a non-callable planner task validator"
         )
+    review_purchase_policy = getattr(provider, "review_purchase_policy", None)
+    if review_purchase_policy is not None and not callable(review_purchase_policy):
+        raise VerticalContractError(
+            f"vertical {name!r} has a non-callable review purchase policy"
+        )
     iteration_assessor = getattr(provider, "iteration_assessment", None)
     if iteration_assessor is not None and not callable(iteration_assessor):
         raise VerticalContractError(
@@ -543,38 +597,11 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         raise VerticalContractError(
             f"vertical {name!r} has a non-callable operator objective adopter"
         )
-    raw_stage_checks = getattr(provider, "STAGE_CHECKS", {}) or {}
-    if not isinstance(raw_stage_checks, dict):
-        raise VerticalContractError(f"vertical {name!r} stage checks are not a mapping")
-    unknown_stage_checks = sorted(set(raw_stage_checks) - set(stage_order))
-    if unknown_stage_checks:
+    legacy_state_importer = getattr(provider, "import_legacy_state", None)
+    if legacy_state_importer is not None and not callable(legacy_state_importer):
         raise VerticalContractError(
-            f"vertical {name!r} has checks for unknown stages: "
-            f"{', '.join(unknown_stage_checks)}"
+            f"vertical {name!r} has a non-callable legacy state importer"
         )
-    stage_checks: dict[str, tuple[tuple[str, str], ...]] = {}
-    for stage, checks in raw_stage_checks.items():
-        if not isinstance(checks, (list, tuple)):
-            raise VerticalContractError(
-                f"vertical {name!r} checks for {stage!r} are not a sequence"
-            )
-        normalized_checks: list[tuple[str, str]] = []
-        for check in checks:
-            if not isinstance(check, (list, tuple)) or len(check) != 2:
-                raise VerticalContractError(
-                    f"vertical {name!r} check for {stage!r} is not a label-command pair"
-                )
-            label, command = check
-            if not isinstance(label, str) or not label.strip():
-                raise VerticalContractError(
-                    f"vertical {name!r} check for {stage!r} has an empty label"
-                )
-            if not isinstance(command, str) or not command.strip():
-                raise VerticalContractError(
-                    f"vertical {name!r} check for {stage!r} has an empty command"
-                )
-            normalized_checks.append((label.strip(), command.strip()))
-        stage_checks[stage] = tuple(normalized_checks)
     raw_primary_deliverables = (
         getattr(provider, "STAGE_PRIMARY_DELIVERABLES", {}) or {}
     )
@@ -597,6 +624,24 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
             if (path := str(value or "").strip())
         )
         for stage, values in raw_primary_deliverables.items()
+    }
+    raw_stage_operations = getattr(provider, "ENGINEER_STAGE_OPERATIONS", {}) or {}
+    if not isinstance(raw_stage_operations, dict):
+        raise VerticalContractError(
+            f"vertical {name!r} Engineer stage operations are not a mapping"
+        )
+    unknown_operation_stages = sorted(
+        set(raw_stage_operations) - set(stage_order)
+    )
+    if unknown_operation_stages:
+        raise VerticalContractError(
+            f"vertical {name!r} has Engineer operations for unknown stages: "
+            f"{', '.join(unknown_operation_stages)}"
+        )
+    engineer_stage_operations = {
+        str(stage): str(operation).strip()
+        for stage, operation in raw_stage_operations.items()
+        if str(operation).strip()
     }
     raw_live_search_stages = getattr(provider, "ENGINEER_LIVE_SEARCH_STAGES", None)
     engineer_live_search_stages: frozenset[str] | None = None
@@ -693,10 +738,12 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         ),
         stage_completion_validator=stage_completion_validator,
         planner_task_validator=planner_task_validator,
+        review_purchase_policy=review_purchase_policy,
         iteration_assessor=iteration_assessor,
         operator_objective_adopter=operator_objective_adopter,
-        stage_checks=stage_checks,
+        legacy_state_importer=legacy_state_importer,
         stage_primary_deliverables=stage_primary_deliverables,
+        engineer_stage_operations=engineer_stage_operations,
         engineer_live_search_stages=engineer_live_search_stages,
     )
 
@@ -706,6 +753,7 @@ __all__ = [
     "MissionPrelude",
     "IterationAssessment",
     "IterationAssessmentHook",
+    "PlannerReviewPurchaseDecision",
     "RolePromptFragment",
     "VerticalContract",
     "VerticalContractError",

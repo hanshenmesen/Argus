@@ -99,13 +99,15 @@ def test_engineer_account_is_labeled_and_capped_at_6000_chars(monkeypatch) -> No
         planner_review_instruction="",
         round_index=1,
         session_id=None,
-        main_summary="a" * 7000,
+        main_summary="HEAD:" + "m" * 6990 + ":TAIL",
         main_error=None,
     )
 
-    account = prompt.split("## Engineer's account of this round\n", 1)[1]
-    assert account.startswith("a" * 6000)
-    assert not account.startswith("a" * 6001)
+    account = prompt.split("## Engineer's account of this round\n", 1)[1].split(
+        "\n\nOperator messages:\n", 1
+    )[0]
+    assert account.startswith("HEAD:") and account.endswith(":TAIL")
+    assert "…[middle omitted 1100 characters]…" in account and len(account) <= 6000
 
 
 def test_reviewer_rejects_retroactive_audit_reconstruction(monkeypatch) -> None:
@@ -288,6 +290,7 @@ class _UncorrelatedEngineerRunner:
 
 
 def test_config_path_is_threaded_into_evaluate(tmp_path: Path) -> None:
+    log_path = str(tmp_path / "global" / "projects" / "deadbeef" / "events.jsonl")
     reviewer = _CapturingReviewer()
     engine = SupervisedEngineer(
         engineer_runner=_OneRoundEngineerRunner(),
@@ -298,7 +301,7 @@ def test_config_path_is_threaded_into_evaluate(tmp_path: Path) -> None:
     config = SupervisedConfig(
         max_rounds=1,
         background_subagent_advisory=False,
-        engineer_log_path=_LOG_PATH,
+        engineer_log_path=log_path,
     )
     engine.run(
         objective="implement the increment",
@@ -307,7 +310,7 @@ def test_config_path_is_threaded_into_evaluate(tmp_path: Path) -> None:
         workdir=tmp_path,
         on_event=lambda _e: None,
     )
-    assert reviewer.seen_log_path == _LOG_PATH
+    assert reviewer.seen_log_path == log_path
     assert reviewer.seen_call_id == _CALL_ID
     assert reviewer.seen_round_max == 1
 
@@ -315,6 +318,7 @@ def test_config_path_is_threaded_into_evaluate(tmp_path: Path) -> None:
 def test_gateway_synthesized_call_id_uses_legacy_unscoped_audit(
     tmp_path: Path,
 ) -> None:
+    log_path = str(tmp_path / "global" / "projects" / "deadbeef" / "events.jsonl")
     reviewer = _CapturingReviewer()
     engine = SupervisedEngineer(
         engineer_runner=_UncorrelatedEngineerRunner(),
@@ -325,7 +329,7 @@ def test_gateway_synthesized_call_id_uses_legacy_unscoped_audit(
     config = SupervisedConfig(
         max_rounds=1,
         background_subagent_advisory=False,
-        engineer_log_path=_LOG_PATH,
+        engineer_log_path=log_path,
     )
 
     engine.run(
