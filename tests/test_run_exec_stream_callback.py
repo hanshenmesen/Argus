@@ -109,6 +109,64 @@ def test_none_callback_leaves_turn_unchanged(_fake_copilot, monkeypatch) -> None
     assert result.exit_code == 0
 
 
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_copilot_model_response_waits_for_authoritative_result(
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+) -> None:
+    final = "MILESTONE_STATUS=done\nNEXT_OWNER=reviewer"
+    lines = [
+        json.dumps({"type": "assistant.message", "data": {"content": final}}),
+        json.dumps(
+            {
+                "type": "model.response",
+                "data": {
+                    "kind": "response",
+                    "response": {
+                        "content": final,
+                        "responses_message_status": "completed",
+                        "phase": "final_answer",
+                    },
+                },
+            }
+        ),
+        json.dumps({"type": "result", "sessionId": "sess-final", "exitCode": exit_code}),
+    ]
+    process = _FakeProc(lines)
+
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        AgentCliRunner,
+        "_resolve_executable",
+        staticmethod(lambda value: value),
+    )
+    monkeypatch.setattr(
+        AgentCliRunner,
+        "_build_command",
+        lambda self, **kwargs: ["copilot", "-p"],
+    )
+
+    def terminate(proc, *, include_detached_children=False):  # noqa: ARG001
+        raise AssertionError("model responses must not terminate the provider")
+
+    monkeypatch.setattr(AgentCliRunner, "_terminate_process", staticmethod(terminate))
+
+    result = AgentCliRunner(
+        agent_bin="copilot",
+        backend=BACKEND_COPILOT,
+    ).run_exec(
+        prompt="finish",
+        resume_thread_id=None,
+        options=RunnerOptions(),
+        run_label="engineer-r1",
+    )
+
+    assert result.thread_id == "sess-final"
+    assert result.turn_completed is (exit_code == 0)
+    assert result.turn_failed is (exit_code != 0)
+    assert result.agent_messages == [final]
+
+
 def test_claude_stream_records_tool_activity_and_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

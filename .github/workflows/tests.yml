@@ -221,6 +221,7 @@ jobs:
           npm --prefix frontend/web ci
           npm --prefix desktop-tauri ci
       - name: Lint and test desktop sources
+        shell: bash
         run: |
           python -m ruff check argus_skill desktop-tauri/scripts tests/desktop
           python -m pytest -q tests/desktop/test_frozen_runtime.py

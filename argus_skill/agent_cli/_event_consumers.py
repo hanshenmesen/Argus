@@ -389,6 +389,16 @@ class EventConsumerMixin:
                 agent_messages.append(content.strip())
             return thread_id, turn_completed, turn_failed, fatal_error
 
+        if event_type == "model.response" and isinstance(data, dict):
+            response = data.get("response")
+            response = response if isinstance(response, dict) else {}
+            content = response.get("content")
+            if isinstance(content, str) and content.strip():
+                message = content.strip()
+                if not agent_messages or agent_messages[-1] != message:
+                    agent_messages.append(message)
+            return thread_id, turn_completed, turn_failed, fatal_error
+
         if event_type == "error":
             turn_failed = True
             if fatal_error is None:

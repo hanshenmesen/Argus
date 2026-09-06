@@ -20,6 +20,17 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = ROOT / "desktop-tauri" / "argus_backend.spec"
 
 
+def test_desktop_multicommand_test_step_fails_on_first_error() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(
+        encoding="utf-8"
+    )
+    step = workflow.split("- name: Lint and test desktop sources", 1)[1].split(
+        "- name: Build frozen backend and unsigned Tauri package layout", 1
+    )[0]
+
+    assert "shell: bash" in step
+
+
 def _execute_spec_collection(tree: ast.Module) -> tuple[dict, list[tuple[str, str]]]:
     prefix: list[ast.stmt] = []
     for node in tree.body:

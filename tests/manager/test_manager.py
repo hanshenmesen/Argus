@@ -154,6 +154,7 @@ def test_standalone_route_retries_project_domain_in_domain_field(
         "manager-classify-field-retry",
     ]
     assert "project domain" in runner.calls[1]["prompt"]
+    assert "RESEARCH_TARGET_LEVEL" in runner.calls[1]["prompt"]
 
 
 def test_standalone_route_retry_names_the_failed_contract_field(
