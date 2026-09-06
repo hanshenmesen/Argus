@@ -79,13 +79,23 @@ def _planner_report_from_payload(parsed: Mapping[str, Any]) -> dict[str, Any]:
     plan itself had become the obstacle.
     """
     nested = parsed.get("planner_report")
-    source = nested if isinstance(nested, dict) else parsed
+    sources = (nested, parsed) if isinstance(nested, dict) else (parsed,)
+
+    def field(*names: str) -> Any:
+        # Fill only absent fields from the flat event. Explicit nested values,
+        # including false, empty strings and None, remain authoritative.
+        for source in sources:
+            for name in names:
+                if name in source:
+                    return source[name]
+        return None
+
     return _planner_report(
-        forward_progress=source.get("forward_progress"),
-        plan_signal=source.get("plan_signal"),
-        challenge=source.get("challenge", source.get("plan_challenge")),
-        alternative=source.get("alternative", source.get("plan_alternative")),
-        authority_impact=source.get("authority_impact"),
+        forward_progress=field("forward_progress"),
+        plan_signal=field("plan_signal"),
+        challenge=field("challenge", "plan_challenge"),
+        alternative=field("alternative", "plan_alternative"),
+        authority_impact=field("authority_impact"),
     )
 
 
@@ -355,6 +365,44 @@ _VERDICT_KEYS = (
 )
 
 
+def _compact_research_result_blocks(text: str) -> str:
+    """Keep JSON evidence strings out of the line-based control-field reader."""
+    from ..core.role_reply import _line_pattern
+
+    pattern = _line_pattern(("RESEARCH_RESULT",))
+    decoder = json.JSONDecoder()
+    chunks: list[str] = []
+    consumed = offset = 0
+    for line in text.splitlines(keepends=True):
+        start = offset
+        offset += len(line)
+        if start < consumed:
+            continue
+        stripped = line.lstrip(" \t")
+        match = pattern.match(stripped)
+        if match is None:
+            continue
+        body_start = start + len(line) - len(stripped) + match.start("value")
+        while body_start < len(text) and text[body_start].isspace():
+            body_start += 1
+        if text.startswith("```", body_start):
+            fence_end = text.find("\n", body_start)
+            if fence_end < 0:
+                continue
+            body_start = fence_end + 1
+            while body_start < len(text) and text[body_start].isspace():
+                body_start += 1
+        try:
+            payload, end = decoder.raw_decode(text, body_start)
+        except ValueError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        chunks.extend((text[consumed:start], "RESEARCH_RESULT=" + json.dumps(payload)))
+        consumed = end
+    return "".join((*chunks, text[consumed:])) if chunks else text
+
+
 def _parse_named_verdict(text: str) -> ReviewDecision | None:
     """The verdict as stated on named lines, or ``None`` if it was not.
 
@@ -370,6 +418,7 @@ def _parse_named_verdict(text: str) -> ReviewDecision | None:
         read_optional,
     )
 
+    text = _compact_research_result_blocks(text)
     values = read_key_values(text, _VERDICT_KEYS)
     status = str(values.get("STATUS") or "").strip().lower()
     if status not in _STATUSES:
@@ -388,9 +437,10 @@ def _parse_named_verdict(text: str) -> ReviewDecision | None:
     evidence = _tagged_values(read_optional(values, "FRONTIER_EVIDENCE"))
     regression = _tagged_values(read_optional(values, "REGRESSION_ENVELOPE"))
     signal = _tagged_values(read_optional(values, "SESSION_SIGNAL"))
-    research_result = normalize_research_result(
-        _load_json(read_optional(values, "RESEARCH_RESULT"))
-    )
+    raw_research_result = _load_json(read_optional(values, "RESEARCH_RESULT"))
+    if raw_research_result is None:
+        raw_research_result = _load_json(read_block(text, "RESEARCH_RESULT", _VERDICT_KEYS))
+    research_result = normalize_research_result(raw_research_result)
     return _apply_model_judgment_policy(
         ReviewDecision(
             status=status,
