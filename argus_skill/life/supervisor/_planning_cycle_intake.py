@@ -28,7 +28,7 @@ from ._planning_cycle_helpers import (
     _revision_reason,
 )
 
-_REVISION_TERMINAL_STATUSES = {"done", "failed", "aborted", "skipped", "superseded"}
+_TERMINAL_TASK_STATUSES = {"done", "failed", "aborted", "skipped", "superseded"}
 
 
 class PlanningCycleIntakeMixin:
@@ -80,8 +80,10 @@ class PlanningCycleIntakeMixin:
         ).strip()
         if not objective:
             return None
+        # Paused work still owns this objective and must resume, not be
+        # duplicated by the direct-mission bootstrap on the next planning pass.
         if any(
-            item.status in {"pending", "running", "claimed"}
+            item.status not in _TERMINAL_TASK_STATUSES
             for item in self.memory.backlog.active()
         ):
             return None
@@ -366,7 +368,7 @@ class PlanningCycleIntakeMixin:
                 })
                 return PLAN_ERROR
             if (
-                requested_item.status in _REVISION_TERMINAL_STATUSES
+                requested_item.status in _TERMINAL_TASK_STATUSES
                 and not state.revision_active_items
             ):
                 self._emit({
@@ -383,7 +385,7 @@ class PlanningCycleIntakeMixin:
                 state.revision_request = None
                 revision_request = None
             elif (
-                requested_item.status not in _REVISION_TERMINAL_STATUSES
+                requested_item.status not in _TERMINAL_TASK_STATUSES
                 and requested_item.id not in {item.id for item in state.revision_active_items}
             ):
                 self._emit({
@@ -402,7 +404,7 @@ class PlanningCycleIntakeMixin:
                 "trigger_item_id": requested_item_id,
                 **(
                     {"terminal_trigger_status": requested_item.status}
-                    if requested_item.status in _REVISION_TERMINAL_STATUSES
+                    if requested_item.status in _TERMINAL_TASK_STATUSES
                     else {}
                 ),
                 "reason": _revision_reason(revision_request),

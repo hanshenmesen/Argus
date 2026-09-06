@@ -30,8 +30,12 @@ def test_supersede_items_persists_only_named_pending_work(tmp_path: Path) -> Non
     assert [item.id for item in persisted.pending()] == [unrelated.id]
 
 
-@pytest.mark.parametrize("status", ["running", "done", "failed", "aborted", "skipped", "superseded"])
-def test_supersede_items_skips_running_and_terminal_work(tmp_path: Path, status: str) -> None:
+@pytest.mark.parametrize("status", [
+    "running", "paused_external_work", "paused_budget", "paused_operator",
+    "research_incomplete", "infra_blocked", "done", "failed", "aborted",
+    "skipped", "superseded",
+])
+def test_supersede_items_skips_non_pending_work(tmp_path: Path, status: str) -> None:
     backlog = Backlog(tmp_path / "backlog.jsonl")
     item = backlog.add(BacklogItem.new(title="Existing work", objective="a"))
     backlog.update(item.id, status=status)

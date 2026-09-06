@@ -178,6 +178,12 @@ def test_planner_retires_pending_tasks_without_requiring_new_work(
     pending = backlog.add(BacklogItem.new(title="Repair the refuted mechanism", objective="a"))
     running = backlog.add(BacklogItem.new(title="Work already running", objective="b"))
     backlog.mark_running(running.id)
+    parked = backlog.add(BacklogItem.new(title="Waiting for a GPU job", objective="d"))
+    backlog.update(
+        parked.id,
+        status="paused_external_work",
+        outcome={"external_wait": {"work_id": "training", "workdir": str(project)}},
+    )
     done = backlog.add(BacklogItem.new(title="Completed work", objective="c"))
     backlog.mark_done(done.id)
     reason = "The experiment refuted this mechanism family."
@@ -186,6 +192,7 @@ def test_planner_retires_pending_tasks_without_requiring_new_work(
         "REASON=Close the refuted line of work.",
         f"RETIRE_TASK={pending.id} | {reason}",
         f"RETIRE_TASK={running.id} | This work already started.",
+        f"RETIRE_TASK={parked.id} | This work is waiting for a GPU job.",
         f"RETIRE_TASK={done.id} | This work already finished.",
         "RETIRE_TASK=unknown | This item no longer exists.",
     ]
@@ -214,6 +221,8 @@ def test_planner_retires_pending_tasks_without_requiring_new_work(
     assert rows[pending.id].superseded_reason == reason
     assert rows[pending.id].superseded_by_plan_id
     assert rows[running.id].status == "running"
+    assert rows[parked.id].status == "paused_external_work"
+    assert rows[parked.id].outcome["external_wait"]["work_id"] == "training"
     assert rows[done.id].status == "done"
     events = [
         json.loads(line)
@@ -227,7 +236,10 @@ def test_planner_retires_pending_tasks_without_requiring_new_work(
     assert retired[0]["superseded_by_plan_id"] == rows[pending.id].superseded_by_plan_id
     skipped = [record for record in caplog.records if "retirement skipped" in record.message]
     assert len(skipped) == 1
-    assert all(item_id in skipped[0].message for item_id in (running.id, done.id, "unknown"))
+    assert all(
+        item_id in skipped[0].message
+        for item_id in (running.id, parked.id, done.id, "unknown")
+    )
     assert f"{pending.id}: {pending.title}" in planner.calls[0]["prompt"]
     if outcome == "new_task":
         new_item, = backlog.pending()
@@ -282,8 +294,12 @@ def test_planner_reuses_front_door_route_without_manager_reclassification(
     assert supervisor.memory.backlog.pending()[0].manager_decision["vertical"] == "software"
 
 
+@pytest.mark.parametrize("existing_status", [
+    "pending", "running", "paused_external_work", "paused_operator", "research_incomplete",
+])
 def test_bounded_manager_direct_task_skips_planner_decomposition(
     tmp_path: Path,
+    existing_status: str,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -335,6 +351,17 @@ def test_bounded_manager_direct_task_skips_planner_decomposition(
     assert "stage_closing" in pending[0].tags
     assert "review:required" in pending[0].tags
     assert planner.calls == []
+
+    # A later planning pass must not bootstrap the same finite objective again
+    # while its original mission is running or waiting to resume.
+    from argus_skill.life.supervisor._planning_cycle_helpers import _PlanCycleState
+
+    memory.backlog.update(pending[0].id, status=existing_status)
+    original = memory.backlog.history()
+    state = _PlanCycleState(None)
+    state.manager_intent = supervisor._manager_intent_context()
+    assert supervisor._enqueue_bounded_manager_direct(state) is None
+    assert memory.backlog.history() == original
 
 
 def _kernel_supervisor(

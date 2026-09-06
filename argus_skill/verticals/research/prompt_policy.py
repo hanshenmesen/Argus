@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -125,32 +126,65 @@ def _project_local_hub_dirs(root: Path) -> list[Path]:
     return found
 
 
-def _tree_bytes(path: Path) -> int:
-    total = 0
-    stack = [path]
-    while stack:
-        directory = stack.pop()
+def _snapshot_weight_bytes(snapshot: Path) -> int:
+    """Check standard HF weight-file completeness without reading tensors."""
+    try:
+        config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            return 0
+    except (OSError, ValueError):
+        return 0
+
+    def complete_size(names: set[str]) -> int:
+        files: dict[Path, int] = {}
         try:
-            entries = list(os.scandir(directory))
-        except OSError:
-            continue
-        for entry in entries:
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
-                elif entry.is_file(follow_symlinks=False):
-                    total += entry.stat(follow_symlinks=False).st_size
-            except OSError:
+            for name in names:
+                relative = Path(name)
+                if relative.is_absolute() or ".." in relative.parts:
+                    return 0
+                path = (snapshot / relative).resolve(strict=True)
+                if not path.is_file() or path.name.endswith(".incomplete"):
+                    return 0
+                size = path.stat().st_size
+                if size <= 0:
+                    return 0
+                files[path] = size
+        except (OSError, RuntimeError):
+            return 0
+        return sum(files.values())
+
+    for filename in ("model.safetensors", "pytorch_model.bin"):
+        size = complete_size({filename})
+        if size:
+            return size
+        try:
+            index = json.loads(
+                (snapshot / f"{filename}.index.json").read_text(encoding="utf-8")
+            )
+            mapping = index.get("weight_map") if isinstance(index, dict) else None
+            if not isinstance(mapping, dict) or not mapping:
                 continue
-    return total
+            names = list(mapping.values())
+            if any(
+                not isinstance(name, str) or not name
+                or Path(name).suffix != Path(filename).suffix
+                for name in names
+            ):
+                continue
+            size = complete_size(set(names))
+            if size:
+                return size
+        except (OSError, ValueError):
+            continue
+    return 0
 
 
 def _query_local_models(project_root: Path | None) -> tuple[list[tuple[str, int, Path]], list[str]]:
     """Return ``(models, datasets)`` found in local Hugging Face caches.
 
-    Models are ``(repo_id, bytes_on_disk, cache_dir)``; the hub layout keeps
-    real files under ``blobs/`` and symlinks under ``snapshots/``, so sizes
-    count only regular files without following links.
+    Models are ``(repo_id, weight_bytes, snapshot_dir)``. Only snapshots with
+    configuration and a complete standard weight-file set are included;
+    orphan blobs, metadata-only downloads, and partial shards are not models.
     """
     models: dict[str, tuple[int, Path]] = {}
     datasets: set[str] = set()
@@ -168,13 +202,17 @@ def _query_local_models(project_root: Path | None) -> tuple[list[tuple[str, int,
             if not entry.name.startswith("models--"):
                 continue
             repo_id = entry.name[len("models--"):].replace("--", "/", 1)
-            blobs = Path(entry.path) / "blobs"
-            size = _tree_bytes(blobs if blobs.is_dir() else Path(entry.path))
-            if size <= 0:
+            try:
+                snapshots = sorted((Path(entry.path) / "snapshots").iterdir())
+            except OSError:
                 continue
-            known = models.get(repo_id)
-            if known is None or size > known[0]:
-                models[repo_id] = (size, hub)
+            for snapshot in snapshots:
+                size = _snapshot_weight_bytes(snapshot)
+                if size <= 0:
+                    continue
+                known = models.get(repo_id)
+                if known is None or size > known[0]:
+                    models[repo_id] = (size, snapshot)
     ordered = sorted(
         ((repo_id, size, hub) for repo_id, (size, hub) in models.items()),
         key=lambda item: (-item[1], item[0]),
@@ -205,15 +243,15 @@ def local_model_inventory_block(project_root: Path | None = None) -> str:
     if len(models) > _MODEL_INVENTORY_LIMIT:
         lines.append(f"- ... and {len(models) - _MODEL_INVENTORY_LIMIT} smaller checkpoints")
     dataset_line = (
-        "Datasets cached locally: " + ", ".join(f"`{name}`" for name in datasets[:_MODEL_INVENTORY_LIMIT])
+        "Dataset cache directories: " + ", ".join(f"`{name}`" for name in datasets[:_MODEL_INVENTORY_LIMIT])
         if datasets
         else ""
     )
     block = (
         "## Model weights already on this machine\n"
-        "These checkpoints sit in local Hugging Face caches and load without a "
-        "download; point `cache_dir` or `HF_HUB_CACHE` at the directory shown "
-        "rather than downloading a second copy elsewhere.\n"
+        "These local snapshots contain configuration and complete standard weight "
+        "files. Use the snapshot path to reuse those files; tokenizer, dependencies, "
+        "and runtime compatibility have not been tested.\n"
         + "\n".join(lines)
         + (f"\n{dataset_line}" if dataset_line else "")
         + "\n\n"
@@ -267,6 +305,11 @@ def _hardware_block_for_stage(stage: str, project_root: Path | None = None) -> s
         for block in (local_hardware_block(), local_model_inventory_block(project_root))
         if block
     )
+
+
+def research_runtime_context(stage: str, project_root: Path | None = None) -> str:
+    """Live resource facts for a Reviewer's delta, outside its policy hash."""
+    return _hardware_block_for_stage(stage, project_root)
 
 
 def active_context_paths(stage: str) -> tuple[str, ...]:
@@ -572,11 +615,8 @@ def _reviewer_fragment(
         block
         # Live HANDOFF/REVIEW contents belong to the Reviewer's round delta, not
         # this static policy fragment used to decide whether a session resumes.
-        # The machine's compute and cached weights are shown so the Reviewer can
-        # judge whether the evidence was gathered at the scale the claim needs.
         for block in (
             _stage_playbook_block(stage),
-            _hardware_block_for_stage(stage, project_root),
             policy,
         )
         if block
@@ -593,7 +633,12 @@ def render_role_prompt_context(
 ) -> str:
     """Keep changing research evidence in the round delta, not the static policy."""
     if role == "reviewer" and operation == "evaluate":
-        return active_research_context(stage, project_root)
+        return "\n\n".join(
+            block for block in (
+                active_research_context(stage, project_root),
+                research_runtime_context(stage, project_root),
+            ) if block
+        )
     return ""
 
 
@@ -645,6 +690,7 @@ __all__ = [
     "active_context_paths",
     "local_hardware_block",
     "local_model_inventory_block",
+    "research_runtime_context",
     "render_role_prompt_fragment",
     "render_role_prompt_context",
     "STAGE_PLAYBOOK_PATHS",

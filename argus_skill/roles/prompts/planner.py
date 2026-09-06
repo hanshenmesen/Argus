@@ -42,23 +42,17 @@ _BOUNDED_DAG_FOOTER = decision_footer_instruction(
     "TASK_OBJECTIVE=design and run the experiment whose outcome most changes what we believe, with success and failure criteria stated in advance"
 )
 
-_PLAN_UPDATE_INSTRUCTION = """
-The footer may end with `PLAN_UPDATE=` and the full Markdown for RESEARCH_PLAN.md,
-after all task and retirement lines.
-"""
-
 _PLANNER_CORE_CONTRACT = """
 ## Planner read-only delegation contract
 Read state and delegate implementation to Engineer.
 Do not edit project files; Engineer owns edits, commands, tests, iteration.
 
-- Reuse Manager/completed decisions; give Engineer one task with its decision,
-  inputs, and check. Split only for dependencies/parallel work.
+- Reuse Manager/completed decisions in Engineer's task, inputs, and check;
+  split only for dependencies/parallel work.
 - Cited `life.planner.error`/`life.manager.intent.failed`, review-churn receipts, or
-  corrective OperatorContext may yield `TASK_VERTICAL=argus_maintenance`. Require
-  a harness hypothesis, executable acceptance, non-goals, isolated Engineer→Reviewer,
-  no counters/detectors/audits/make-work, and Reviewer `done` plus operator approval
-  before deployment.
+  corrective OperatorContext justify `TASK_VERTICAL=argus_maintenance` with a
+  harness hypothesis, executable acceptance, non-goals, and isolated Engineer→Reviewer.
+  No counters/detectors/audits/make-work; deployment needs Reviewer `done` and operator approval.
 - Follow the operator's requested actions and order. Existing artifacts or a usable
   alternative do not replace the first unmet requested action. Do not invent
   cleanup/docs/rechecks.
@@ -68,50 +62,47 @@ Do not edit project files; Engineer owns edits, commands, tests, iteration.
   when decision-relevant. When related attempts repeatedly fail, revisit primary papers
   and official implementations. Performance claims need code-path evidence and
   timing/profiling or a controlled comparison.
-- Set `project_done=true` only when the operator goal is complete. For a direct
-  task the Reviewer `done` closes it; review again only if requested or the verdict finds a gap.
+- Set `project_done=true` only for a complete operator goal. Reviewer `done`
+  closes direct tasks; review again only on request or a verdict gap.
   Integrity and reproducibility are admission constraints, not a routing command.
-  Never emit a bare launch verdict; say what happened and the next action or Host rejects it.
-- End with `PROJECT_DONE`/`REASON`; each task needs `TASK_TITLE`/`TASK_OBJECTIVE`.
-  `ADVANCE_TO_STAGE` is optional (omit to hold) and Host-valid; `TASK_SCOPE` is
+  Host rejects bare launch verdicts: say what happened and the next action.
+- Footer: `PROJECT_DONE`/`REASON`; tasks need `TASK_TITLE`/`TASK_OBJECTIVE`.
+  `ADVANCE_TO_STAGE` must be Host-valid and is optional (omit to hold); `TASK_SCOPE` is
   optional (default `bounded`). Other fields: `TASK_KEY`/`TASK_DEPS`, `TASK_HYPOTHESIS`,
   `TASK_GOAL_CONTRIBUTION`, `TASK_EXPECTED_REGRESSIONS`, `TASK_DECISION_RULE`,
   `TASK_ACCEPTANCE_CHECK`, `TASK_PARALLEL_SAFE`, `TASK_OWNS_PATHS`, and
   `TASK_VERTICAL`.
-- Optional `RETIRE_TASK=<item id> | <one-sentence reason>`: one line per item;
-  reason required. When the evidence has refuted a hypothesis or closed a line of work,
-  retire its pending tasks with RETIRE_TASK so they are not executed later under another title;
+- `RETIRE_TASK=<item id> | <one-sentence reason>` retires pending work whose
+  hypothesis is refuted or line closed; one line per item, reason required.
+  Do not relaunch it under another title;
   running work and done work cannot be retired.
 - External waits: `blocker_fingerprint`, `recheck_condition`, `recheck_token`, semantically
   `wake_on` (synonyms/combined sources), and `watched_paths`; `operator_action_required`
   is operator-only. Host chooses an event or a timed recheck.
-- In-flight background work launched by Argus is a valid external wait. When pending
-  tasks depend on running/paused_external_work missions and nothing can start,
-  return `PROJECT_DONE=false`, `WAITING=true`, `REASON` and no `TASK_*` blocks.
+- In-flight background work launched by Argus is a valid external wait.
+  If only running/paused_external_work can unblock tasks, keep `PROJECT_DONE` false;
+  return `WAITING=true`, `REASON` and no `TASK_*` blocks.
   Use `WAIT_MODE=event`, `WAKE_ON=subagent_state`, `WAIT_ID=<live subagent id>`,
   `BLOCKER_FINGERPRINT=<live subagent id>`, `RECHECK_TOKEN=<run id>`, and
   `RECHECK_CONDITION=<which in-flight work must finish>`. Keep the token stable
-  while that run is unchanged. This is an accepted, productive waiting verdict;
-  do not invent dependent tasks to make a waiting cycle look executable. Schedule
-  independent work only when it can actually run without the awaited results.
-- REASON and PLAN_REASON are operator-facing: one clear sentence in the operator's
-  language stating the decision and next action. Do not emit
-  field names or status tokens in their values.
-""" + _PLANNER_DECISION_FOOTER + _PLAN_UPDATE_INSTRUCTION
+  for the same run. Do not invent dependent tasks; schedule only genuinely independent work.
+- REASON/PLAN_REASON: one operator-language sentence with decision and next action,
+  not field/status tokens.
+""" + _PLANNER_DECISION_FOOTER
 
 _RESEARCH_PLAN_CONTRACT = """## Research plan (living document)
-Planner owns `RESEARCH_PLAN.md` in daemon state. Create absent/invalid plans from
-Manager brief/OBJECTIVE.md and journal. Update on hypothesis status, experiment
-outcomes, or direction changes. Optional final `PLAN_UPDATE` replaces it in full;
-omit to keep it.
+Own daemon-state `RESEARCH_PLAN.md`. Create missing/invalid plans from
+Manager brief/OBJECTIVE.md and journal; revise on hypothesis, result, or direction
+changes. `PLAN_UPDATE=` ends the footer with full Markdown after tasks/retirements;
+omit to keep the document.
 
-Under ~300 lines, ordered: `# Research plan` and objective one-liner;
-`## Central hypotheses` (numbered, untested/supported/refuted/abandoned, with
-one-line evidence pointers); `## Experiment program` (next experiments and why
-each is highest-information, without fixed numeric pass/fail thresholds); `## Established results`
-(evidence refs); `## Dead ends` (attempts and why abandoned); `## Next milestone`
-(scientifically valuable improvement supporting a scoped paper). Never delete
-Dead ends entries; prune repetition if the projection reports truncation.
+Under ~300 lines, ordered: `# Research plan` + objective;
+`## Central hypotheses` (numbered untested/supported/refuted/abandoned + evidence);
+`## Experiment program` (next experiments + information value,
+without fixed numeric pass/fail thresholds); `## Established results` (evidence refs);
+`## Dead ends` (attempts + abandonment reasons); `## Next milestone`
+(scientifically valuable improvement for a scoped paper). Never delete Dead ends;
+prune repetition on truncation.
 
 Current document:
 """
@@ -446,10 +437,6 @@ def build_continuous_prompt(
         )
     )
     if prompt_context.vertical == "research":
-        planner_core_contract = planner_core_contract.replace(
-            _PLAN_UPDATE_INSTRUCTION,
-            "",
-        )
         research_plan_context = ""
 
     research_target_block = ""
@@ -689,9 +676,6 @@ def build_continuous_prompt(
         ),
         planner_hygiene_block,
         cycle_line,
-        "Use only the focused read/search budget above, delegate the next concrete "
-        "work or report a real "
-        "blocker, then end with the Planner decision footer.",
         trailing_policy,
         operator_context,
     )
