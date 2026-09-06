@@ -324,7 +324,7 @@ def test_planner_prompt_requires_read_only_delegation_and_minimal_footer() -> No
     assert "`wake_on`" in _PLANNER_CORE_CONTRACT
     assert "semantically" in _PLANNER_CORE_CONTRACT
     assert "synonyms/combined sources" in _PLANNER_CORE_CONTRACT
-    assert "bounded poll" in _PLANNER_CORE_CONTRACT
+    assert "a timed recheck" in _PLANNER_CORE_CONTRACT
     for field in ("`TASK_TITLE`", "`TASK_OBJECTIVE`", "`TASK_ACCEPTANCE_CHECK`"):
         assert field in _PLANNER_CORE_CONTRACT
     for field in (

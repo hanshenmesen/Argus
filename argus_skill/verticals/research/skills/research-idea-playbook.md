@@ -20,7 +20,7 @@ hypothesis.
    independent review, and run one selector after all 24 tasks finish.
 2. For an operator-locked paper direction, validate and position the supplied idea
    without creating a portfolio or selecting a replacement. For an exploratory
-   target, perform the bounded source-only investigation requested; do not
+   target, perform the source-only investigation requested; do not
    manufacture twelve routes or a paper commitment.
 3. For a direct Idea-only request, produce the requested source-grounded idea,
    comparison, or critique and stop after independent review. Do not continue
@@ -68,11 +68,11 @@ project-visible selection report.
 Describe the decisive experiment as a direction — which comparison would settle
 the thesis and why it is decisive — in the prose a strong collaborator would
 use. Do not fix numeric success thresholds, decision procedures, or frozen
-design tables in the handoff: those choices belong to Experiment, where they
+design tables in HANDOFF.md: those choices belong to Experiment, where they
 are made in contact with real evidence and revised as it accumulates.
 
 A direct Idea-only request returns its reviewed result to the operator and does
-not create a cross-stage handoff.
+not write HANDOFF.md.
 
 ## Progressive disclosure
 
@@ -87,4 +87,4 @@ the stage.
 | A reviewer needs the strongest adversarial case | `reviewer/kill-argument.md` | One decisive scientific objection |
 
 These sources answer a route question. They do not create another candidate
-process, selector, handoff, or completion rule.
+process, selector, HANDOFF.md, or completion rule.

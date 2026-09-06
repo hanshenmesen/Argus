@@ -68,8 +68,8 @@ Do not edit project files; Engineer owns edits, commands, tests, iteration.
   when decision-relevant. When related attempts repeatedly fail, revisit primary papers
   and official implementations. Performance claims need code-path evidence and
   timing/profiling or a controlled comparison.
-- Set `project_done=true` only when the operator goal is complete. Bounded-direct
-  Reviewer `done` closes it; review again only if requested or the verdict finds a gap.
+- Set `project_done=true` only when the operator goal is complete. For a direct
+  task the Reviewer `done` closes it; review again only if requested or the verdict finds a gap.
   Integrity and reproducibility are admission constraints, not a routing command.
   Never emit a bare launch verdict; say what happened and the next action or Host rejects it.
 - End with `PROJECT_DONE`/`REASON`; each task needs `TASK_TITLE`/`TASK_OBJECTIVE`.
@@ -80,7 +80,7 @@ Do not edit project files; Engineer owns edits, commands, tests, iteration.
   `TASK_VERTICAL`.
 - External waits: `blocker_fingerprint`, `recheck_condition`, `recheck_token`, semantically
   `wake_on` (synonyms/combined sources), and `watched_paths`; `operator_action_required`
-  is operator-only. Host chooses an event or bounded poll.
+  is operator-only. Host chooses an event or a timed recheck.
 - REASON and PLAN_REASON are operator-facing. In the operator's language, state
   what was decided and its next consequence in one clear sentence. Do not emit
   field names or status tokens in their values.
@@ -97,7 +97,7 @@ Keep it under ~300 lines and use exactly this section order: `# Research plan`
 then an objective one-liner; `## Central hypotheses` (numbered, each marked
 untested/supported/refuted/abandoned with a one-line evidence pointer);
 `## Experiment program` (what runs next and why each is the highest-information
-move, without hard numeric result gates); `## Established results`
+move, without fixed numeric pass/fail thresholds); `## Established results`
 with evidence refs; `## Dead ends` with what was tried and why abandoned; and
 `## Next milestone` naming any scientifically valuable improvement that could
 support a scoped paper. Never delete a Dead
@@ -202,7 +202,7 @@ def build_bounded_single_task_prompt(
         + review_policy
         + shell_block
         + "\n\nRules:\n"
-        "- Preserve the Manager handoff exactly: paths, requested outputs, order, "
+        "- Preserve the Manager's brief exactly: paths, requested outputs, order, "
         "constraints, exclusions, and stopping conditions.\n"
         "- Name the concrete work and one decisive acceptance check that fails when "
         "the requested result is wrong.\n"
@@ -215,7 +215,7 @@ def build_bounded_single_task_prompt(
         + _BOUNDED_DAG_FOOTER
         + "\n\n"
         + _reviewed_facts_block()
-        + "\n\nManager execution handoff:\n"
+        + "\n\nManager's brief:\n"
         + objective.strip()
     )
     policy_root = state_root if state_root is not None else project_root
@@ -278,7 +278,7 @@ def build_bounded_dag_prompt(
         else ""
     )
     prompt = (
-        "Plan the Manager handoff as a small executable DAG. Do not do the work."
+        "Plan the Manager's brief as a small executable DAG. Do not do the work."
         + verification
         + shell_block
         + review_policy
@@ -307,7 +307,7 @@ def build_bounded_dag_prompt(
         "missing. Existing grounding never forbids fresh upstream research when it "
         "can change the plan. When related attempts repeatedly fail, revisit the "
         "source assumption.\n"
-        "- Dependencies must reflect real handoffs. Independent nodes may run in parallel.\n"
+        "- A dependency means one task needs the other's result. Independent nodes may run in parallel.\n"
         "- More than one mission runs at a time. A long job holds its slot for "
         "hours without holding the others, so a cycle that schedules only that "
         "job leaves the rest of the campaign idle for as long as it runs; "
@@ -337,7 +337,7 @@ def build_bounded_dag_prompt(
         + "\n\n"
         + _reviewed_facts_block()
         + "\n\n"
-        "Manager execution handoff:\n" + objective.strip()
+        "Manager's brief:\n" + objective.strip()
     )
     if policy_root is not None:
         from ...core.operator_context import build_operator_context_block
@@ -626,8 +626,8 @@ def build_continuous_prompt(
             "For the active vertical's final independent certification task, "
             "the Planner structured task must emit `scope:\"final_submission\"` "
             "(legacy key-value: `TASK_SCOPE=final_submission`) so the successful "
-            "Reviewer verdict can close the final stage. Use `scope:\"bounded\"` "
-            "for ordinary prerequisite work, and do not use final_submission for "
+            "Reviewer verdict can close the final stage. Ordinary prerequisite work "
+            "keeps the default scope, and do not use final_submission for "
             "verticals without a certified final stage or research target."
         )
 
@@ -740,7 +740,7 @@ def build_continuous_resume_prompt(
         )
     return _join_prompt_blocks(
         "## Continued Planner cycle\n"
-        "You are resuming your own bounded Planner session. The original role "
+        "You are resuming your own Planner session. The original role "
         "contract remains binding; do not replay old exploration or re-author "
         "the static policy. Current state below supersedes stale session facts.",
         str(prompt_context.role_banner or ""),

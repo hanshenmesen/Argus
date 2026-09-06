@@ -94,4 +94,4 @@ task, then return here. Do not preload the table.
 | Compilation or venue structure is uncertain | `engineer/venue-format-preflight.md` | Compile against the official author kit |
 
 Specialist Skills produce parts of the manuscript. They do not define stage
-completion or run scientific, visual, language, or whole-paper review gates.
+completion or run scientific, visual, language, or whole-paper review passes.

@@ -480,7 +480,7 @@ def render_reviewer_prompt(
             "in the operator's language (Chinese here), answerable in a sentence "
             "— no jargon/JSON/template names.\n"
             "- `done` is rare here — only at/above the known ceiling.\n"
-            "Ignore GROUND_TRUTH/gate/marker/status/provenance files (the harness "
+            "Ignore GROUND_TRUTH/marker/status/provenance files (the harness "
             "ignores them) and artifact hygiene — the scorer's number is the only "
             "evidence. A round that MEASURED a real number, even a worse one, made "
             "progress by ruling out a mechanism. This OVERRIDES the generic "
@@ -629,7 +629,7 @@ def render_reviewer_prompt(
         )
     )
     handoff_policy = (
-        "`done` closes a bounded direct task when its contract and decisive check "
+        "`done` closes a direct task when its contract and decisive check "
         "pass. Use `replan_requested` only to change the plan; `plan_signal` is "
         "advisory and cannot override `status`. Use `continue` for a material gap and give "
         "the next work package; "
@@ -644,7 +644,7 @@ def render_reviewer_prompt(
             "claim needs code-path evidence plus profiling, timing, or a controlled comparison. "
             "Integrity is mandatory but not scientific value by itself. Ask the "
             "operator only for authority/information they own. "
-            "Bounded `done` closes; final-submission `done` may certify."
+            "An ordinary task's `done` closes that task; a final-submission `done` may certify the project."
         )
     )
     # Keep the requested footer smaller than the compatibility parser. Legacy
@@ -706,7 +706,7 @@ def render_reviewer_prompt(
         + _PLAN_SIGNAL_VOCABULARY
         + "Put the next Engineer "
         "instruction only in next_action. Do not inspect or edit "
-        "checkpoint/context-packet/handoff bookkeeping.\n\n"
+        "checkpoint or context bookkeeping.\n\n"
         + ("" if _requires_engineering_audit else _verification_directive())
         + audit_integrity_block
         + verification_instruction
@@ -719,7 +719,7 @@ def render_reviewer_prompt(
         + "\n\n"
         + surprise_judgment_block
         + venv_skill_block
-        + "\n\n## Handoff policy\n"
+        + "\n\n## What each verdict means\n"
         + handoff_policy
         + "\n\n"
         + objective_block

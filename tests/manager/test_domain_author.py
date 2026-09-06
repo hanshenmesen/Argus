@@ -617,7 +617,7 @@ def test_grounded_vertical_prompt_preserves_manager_agency_and_planner_boundary(
     assert "no task work or Live View" in prompt
     assert "presentations" not in prompt
     assert "Omit `execution_task` for a standalone existing route" in prompt
-    assert "include it only when bounded context must be rewritten" in prompt
+    assert "include it only when the task text must be rewritten" in prompt
 
 
 def test_read_only_repository_audit_avoids_maintenance_meta_review() -> None:

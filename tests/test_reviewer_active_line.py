@@ -23,7 +23,7 @@ def test_reviewer_is_not_given_checkpoint_bookkeeping():
     p = _prompt()
     assert "/tmp/project/CHECKPOINT.md" not in p
     assert "CHECKPOINT_RECOMMENDED" not in p
-    assert "Do not inspect or edit checkpoint/context-packet/handoff bookkeeping" in p
+    assert "Do not inspect or edit checkpoint or context bookkeeping" in p
 
 
 def test_reviewer_never_acts_as_checkpoint_editor():

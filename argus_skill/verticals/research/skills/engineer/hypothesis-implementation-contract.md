@@ -25,5 +25,5 @@ selected thesis and the reachable call chain and return exactly one conclusion:
 - `NOT_IMPLEMENTED`: the selected mechanism is absent or unreachable.
 
 Fix `MISMATCH` or `NOT_IMPLEMENTED` in place before claim-bearing runs. Do not
-reopen Idea selection, and do not write a separate handoff for the alignment
-result — the Experiment playbook's handoff at Paper entry is the only one.
+reopen Idea selection, and do not write a separate note for the alignment
+result — the HANDOFF.md written at Paper entry is the only one.

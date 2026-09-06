@@ -1023,13 +1023,15 @@ def format_stage_checklist(
     scope_norm = (scope or "").strip().lower().replace("-", "_")
     if role_norm == "reviewer" and scope_norm == "bounded":
         framing = (
-            "You are the L2 reviewer for a bounded mission. Verify the mission's "
+            "You are reviewing one task within a larger project. Verify the task's "
             "explicit acceptance criteria and only the checklist items materially "
-            "touched by this mission. Unrelated open items belong to later bounded "
-            "missions: report them honestly, but do not use them to keep this "
-            "mission running. Reply `done` when this bounded objective is satisfied; "
-            "the Manager separately keeps the project stage on HOLD until every "
-            "stage item is certified. Do not run any `validate-*` shell command — "
+            "touched by this task, as a senior colleague would: what did it set "
+            "out to establish, and does the evidence establish it? Unrelated open "
+            "items belong to later tasks: report them honestly, but do not use "
+            "them to keep this task running. Reply `done` when this task's "
+            "objective is satisfied; the Manager separately keeps the project "
+            "stage open until every stage item is met. Do not run any "
+            "`validate-*` shell command — "
             "there isn't one. Read the relevant artifacts yourself."
         )
     elif role_norm == "reviewer":

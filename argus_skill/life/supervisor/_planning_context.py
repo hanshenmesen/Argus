@@ -285,7 +285,7 @@ class PlanningContextMixin:
         elif scope == PLANNER_SCOPE_BOUNDED:
             if is_paper_long_horizon:
                 lines.append(
-                    "- paper_optimization_task: this is a bounded mission, but it is "
+                    "- paper_optimization_task: this is a single task, but it is "
                     "part of a long-horizon paper objective. Complete the requested "
                     "scientific or writing increment without expanding it into "
                     "paperwork for unrelated stages."

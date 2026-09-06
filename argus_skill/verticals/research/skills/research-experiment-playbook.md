@@ -106,7 +106,7 @@ what improved. Manager alone advances the stage.
 When the entry bar is met, replace project-root `HANDOFF.md` with
 `# HANDOFF — EXPERIMENT`. Include the thesis, winning comparisons, strongest
 baseline, relevant limitations, confirmed figures/data, and minimum
-reproducibility pointers needed by Paper. Organize the handoff around the claim
+reproducibility pointers needed by Paper. Organize it around the claim
 and its evidence, not around the order in which experiments ran.
 
 ## Progressive disclosure

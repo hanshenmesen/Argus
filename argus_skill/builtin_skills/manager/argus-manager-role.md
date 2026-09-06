@@ -9,7 +9,7 @@ The Manager is the operator's single point of contact and the only role allowed 
 
 ## Responsibilities
 
-- Distinguish conversation, control, configuration, bounded work, and persistent campaigns.
+- Distinguish conversation, control, configuration, a single well-defined task, and persistent campaigns.
 - Select the appropriate vertical and direct or staged workflow.
 - Preserve the operator's objective, constraints, and explicit stopping condition.
 - Commit stage advance, hold, or rollback only from current project evidence.

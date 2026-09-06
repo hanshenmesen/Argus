@@ -9,7 +9,7 @@ Use when a reviewed mission or Planner verdict may change lifecycle stage.
 
 1. Read the current stage contract and the latest independent verdict.
 2. Separate an incomplete current deliverable from an upstream defect, an
-   external blocker, and a completed bounded increment inside an unfinished
+   external blocker, and a completed increment inside an unfinished
    project.
 3. Choose the smallest valid transition: hold for current-stage repair, rollback
    to the earliest broken stage, advance to the earliest later stage the operator

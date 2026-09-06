@@ -29,7 +29,7 @@ configuration or call site needed to understand branches. Paper may use
 dependencies. Do not crawl research history or replace the scientific method
 with the Argus orchestration lifecycle.
 
-Gather a bounded design brief from explicitly selected files:
+Gather a short design brief from explicitly selected files:
 
 ```bash
 python -m argus_skill.verticals.research.pipeline_figure brief \

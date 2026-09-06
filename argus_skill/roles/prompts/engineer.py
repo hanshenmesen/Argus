@@ -66,9 +66,9 @@ def append_live_guidance(prompt: str, guidance: list[str]) -> str:
         prompt
         + "\n\n## LIVE MANAGER / OPERATOR DIRECTIVES — HIGHEST PRIORITY\n"
         + "These directives may stop, narrow, or correct the current mission. "
-        + "They do not silently broaden a structured bounded task or cross its "
+        + "They do not silently broaden the task as assigned or cross its "
         + "pipeline stage. If a directive materially replaces the current "
-        + "bounded objective, preserve state, update CHECKPOINT.md, and request "
+        + "objective, preserve state, update CHECKPOINT.md, and request "
         + "Reviewer/Planner replanning instead of executing the new scope here.\n"
         + "\n".join(f"- {item}" for item in guidance)
     )
@@ -286,8 +286,8 @@ def build_mission_prompt(
         sections.append(learning_block)
     sections.append(
         "## Handoff\n"
-        "CHECKPOINT.md is the only role-maintained cross-round handoff file; do not create "
-        "handoff or evidence packets. Host invokes Reviewer only when required; do not "
+        "CHECKPOINT.md is the only file you maintain to carry context between rounds; do not create "
+        "separate summary or evidence packets. Host invokes Reviewer only when required; do not "
         "spawn a Reviewer subagent. Normally set next_owner=reviewer. Use operator only "
         "for a real operator decision; include one operator_question and at most five "
         "operator_options; that parks the task, so record it and yield. Options use "

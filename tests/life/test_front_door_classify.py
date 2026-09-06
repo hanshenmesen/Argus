@@ -89,7 +89,7 @@ def test_front_door_prompt_has_a_strict_token_efficiency_budget(tmp_path) -> Non
     assert "Ambiguity defaults to no control" in prompt
     assert "FORBID only for an explicit command" in prompt
     assert "ALLOW only when explicitly re-enabled" in prompt
-    assert "conversation, status, bounded inspection" in prompt
+    assert "conversation, status, a quick inspection" in prompt
     assert "finite local task" in prompt
     assert "IMPLEMENT" in prompt
     assert "DEBUG" in prompt

@@ -67,11 +67,11 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "single-line rejection reason for every other route into Experiment. "
                 "For a staged operator-locked paper direction, `HANDOFF.md` instead "
                 "validates and positions the supplied idea without inventing a selector "
-                "or rejected routes. It replaces prior handoff text rather than appending "
+                "or rejected routes. It replaces the previous text rather than appending "
                 "history. The selection itself is what completes this stage; a missing "
-                "or thin handoff note is written on the way out, not a reason to hold. "
+                "or thin note is written on the way out, not a reason to hold. "
                 "A direct Idea-only request returns its independently reviewed result "
-                "without a cross-stage handoff."
+                "without writing that file."
             ),
             evidence_hint="the selected idea in internal pipeline state",
         ),
@@ -158,7 +158,7 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "needed to write the paper. Classify the complete evidence as headline, "
                 "mechanism, disambiguating control, scope-changing, or completeness "
                 "evidence, and name its canonical and repeat locations. The evidence "
-                "decides whether Experiment is done; a missing or stale handoff note "
+                "decides whether Experiment is done; a missing or stale note "
                 "is written by the round that advances, never a reason to hold a stage "
                 "whose science is complete."
             ),
@@ -215,7 +215,7 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             statement=(
                 "Keep project-root `HANDOFF.md` as the single upstream context for Paper, "
                 "rewritten rather than accumulated. Do not create parallel project-visible "
-                "handoff files. Its presence or wording never decides whether Paper is "
+                "context files. Its presence or wording never decides whether Paper is "
                 "done; the manuscript does."
             ),
             evidence_hint="HANDOFF.md as context only",

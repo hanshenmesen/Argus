@@ -233,8 +233,8 @@ def test_bounded_review_stage_checklist_stays_compact(
     assert stats["estimated_tokens"] < 2_500
     assert "## Stage checklist (review)" in prompt
     assert "Full pipeline checklist" not in prompt
-    assert "bounded mission" in prompt
-    assert "only the checklist items materially touched by this mission" in prompt
+    assert "reviewing one task within a larger project" in prompt
+    assert "only the checklist items materially touched by this task" in prompt
     assert "review.scope" in prompt
     assert "review.visual" in prompt
 

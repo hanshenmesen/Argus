@@ -392,7 +392,7 @@ def test_planner_prompt_marks_absent_or_corrupt_plan_for_creation(tmp_path) -> N
 
 
 def test_research_plan_contract_avoids_hard_result_gates() -> None:
-    assert "without hard numeric result gates" in _RESEARCH_PLAN_CONTRACT
+    assert "without fixed numeric pass/fail thresholds" in _RESEARCH_PLAN_CONTRACT
     assert "scientifically valuable improvement" in _RESEARCH_PLAN_CONTRACT
 
 

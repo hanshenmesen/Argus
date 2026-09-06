@@ -111,7 +111,7 @@ def _stage_playbook_block(stage: str) -> str:
         "## Authoritative stage playbook\n"
         f"Playbook: `{playbook}`. Open `{resolved}` before acting. It is "
         f"the single workflow playbook for `{stage}`. Other Skills are optional "
-        "tools: they cannot redefine the stage, its completion bar, the handoff, or "
+        "tools: they cannot redefine the stage, its completion bar, HANDOFF.md, or "
         "project-visible artifacts."
     )
 
@@ -133,7 +133,7 @@ def active_research_context(stage: str, project_root: Path | None) -> str:
             "## Active research context\n"
             f"The only normal cross-stage context for `{stage}` is `{relative}`, "
             "and it is currently absent or empty. Do not substitute historical "
-            "research files or search the project for an older handoff."
+            "research files or search the project for an older version of it."
         )
     if len(text) > _CONTEXT_CHAR_LIMIT:
         text = text[:_CONTEXT_CHAR_LIMIT].rstrip() + "\n[context truncated]"
@@ -272,7 +272,7 @@ def _narrative_editor_block() -> str:
         "and the complete method/result coverage. Within the affected passage, clarify "
         "what the evidence establishes using only supported inferences; keep other "
         "evidence in its existing carrier. "
-        "You may propose moving unique content in your final handoff, but you may not "
+        "You may propose moving unique content in your closing note, but you may not "
         "unilaterally remove it or change its scientific meaning. Keep the abstract's "
         "claims and evidence; its length and shape follow the venue and the claim, not a "
         "quota. Compile when "
@@ -297,7 +297,7 @@ def _engineer_fragment(
         "## Engineer responsibility\n"
         "Execute the current playbook directly. Use code, explicit configuration, raw "
         "outputs, figures, bibliography, manuscript source, and rendered output as work "
-        "products. Do not create substitute handoffs or process reports, and do not "
+        "products. Do not create substitute summaries or process reports, and do not "
         "change stage state. The host runs independent preliminary paper reviews after your "
         "turn; do not spawn a second scientific, visual, or cold-read review team."
     )

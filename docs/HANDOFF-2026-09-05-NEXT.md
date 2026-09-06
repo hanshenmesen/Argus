@@ -246,3 +246,14 @@ runtime checkout 的 rev(现为 `600c013af166`;若你先部署了新代码则为
 "research 任何 prompt/skill 不得再出现写作配额"的守护测试。
 `test_research_protocol_quality.py::test_review_combines_parallel_scientific_visual_and_language_passes`
 在本改动之前（775f8b8cc）已经失败，与本次无关。
+
+## 2026-09-06 · 角色提示词去掉 bounded / gate / handoff 机器味
+
+模型读到的提示词（Manager、Planner、Engineer、Reviewer 四个角色提示，research 阶段清单，
+Planner 上下文，builtin 角色 skill，research skill）里的流程词改为普通研究者的说法：
+"bounded task/mission" → 单个任务、明确的调查；"Manager handoff" → Manager 的 brief；
+"gate" → bar/check/pass；"handoff note" → 给下一阶段的笔记（HANDOFF.md 文件名保留）。
+按任务审稿的 L2 Reviewer 框架改为"像资深同事一样：它想证明什么，证据是否证明了"。
+协议 token（`scope:bounded`、`final_submission`、TASK_SCOPE 默认值）、文件名、
+函数名和代码注释不动。受影响的 9 个测试断言同步更新；宽泛选择集
+（prompt/handoff/bounded/reviewer/planner/engineer/manager/skill/stage）全部通过。

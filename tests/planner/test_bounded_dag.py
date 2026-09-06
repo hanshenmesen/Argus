@@ -538,7 +538,7 @@ def test_bounded_planner_reassembles_chunked_opencode_footer(tmp_path) -> None:
     # and TASK_* fields land in earlier chunks than the closing lines, the old
     # _extract (agent_messages[-1]) dropped them and the plan was rejected.
     runner = _ChunkedRunner(
-        "Plan the Manager handoff one task:",
+        "Plan the Manager's brief one task:",
         "PLAN_REASON=one chunked task",
         "TASK_KEY=survey",
         "TASK_DEPS=",
