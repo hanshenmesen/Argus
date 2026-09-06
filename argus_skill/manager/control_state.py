@@ -468,6 +468,33 @@ class CampaignControlStore:
         )
         return head
 
+    def clear_wait_for_new_evidence_if_current(
+        self,
+        *,
+        identity: CampaignIdentity,
+        expected_head: ControlHead | None,
+        stage_projection: dict[str, Any],
+        terminal_evidence: Iterable[dict[str, Any]],
+        reason: str,
+    ) -> ControlHead | None:
+        """Publish one verdict only if its campaign and control revision remain current.
+
+        The caller holds the Manager pipeline lock to serialize objective changes.
+        """
+        with self.locked():
+            if self.campaign_identity() != identity or self.read_head() != expected_head:
+                return None
+            head, _ = self._next_revision_unlocked(
+                identity=identity,
+                updates={
+                    "active_wait": None,
+                    "stage_projection": dict(stage_projection),
+                    "terminal_evidence": [dict(row) for row in terminal_evidence],
+                },
+                reason=reason,
+            )
+            return head
+
     def clear_wait_if_current(
         self,
         *,
