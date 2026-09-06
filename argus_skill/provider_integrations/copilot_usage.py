@@ -158,12 +158,14 @@ def _capture_cursor(
 
 def copilot_store_supports_token_billing(path: Path | None) -> bool:
     """Expect token telemetry unless a readable store proves it is legacy."""
-    if path is None or not path.is_file():
+    if path is None:
         return False
+    if not path.is_file():
+        return True
     try:
         with _connect(path) as conn:
             columns = conn.execute("PRAGMA table_info(assistant_usage_events)").fetchall()
-        return any(row[1] == "total_nano_aiu" for row in columns)
+        return not columns or any(row[1] == "total_nano_aiu" for row in columns)
     except (OSError, sqlite3.Error):
         # Busy/corrupt stores do not establish a legacy billing contract.
         return True

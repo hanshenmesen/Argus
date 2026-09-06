@@ -295,8 +295,9 @@ def test_personal_fallback_uses_its_own_baseline_and_exact_session(
     assert usage.cost_usd == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize("store_exists", [False, True])
 def test_modern_missing_usage_is_pending_and_reconciles_late_wal_write(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, store_exists: bool
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "operator"))
     root = tmp_path / "argus"
@@ -304,7 +305,10 @@ def test_modern_missing_usage_is_pending_and_reconciles_late_wal_write(
     monkeypatch.setenv("ARGUS_SKILL_COPILOT_GUARD", "0")
     # Reproduce the actual two-store layout, with no COPILOT_HOME in the parent.
     _db(tmp_path / "operator" / ".copilot")
-    db = _db(root / "copilot-home")
+    home = root / "copilot-home"
+    db = home / "session-store.db"
+    if store_exists:
+        _db(home)
     project = root / "projects" / "p1"
     backend = AgentCliBackend(backend="copilot")
     backend.set_usage_context(project_root=project, mission_id="mission-1")
@@ -329,6 +333,14 @@ def test_modern_missing_usage_is_pending_and_reconciles_late_wal_write(
         pytest.fail("modern ledger thread_id must not require raw event history")
 
     monkeypatch.setattr("argus_skill.core.usage._legacy_call_threads", unexpected_event_scan)
+    if not store_exists:
+        # A first invocation with a store that has not appeared yet cannot be
+        # declared legacy. Preserve pending status until the late DB arrives.
+        first = ledger.records()[0]
+        assert first.pricing_tier == "copilot_token_pending"
+        assert first.cost_usd is None
+        assert not db.exists()
+        _db(home)
     # Keep a connection open so the delayed row changes only the WAL, not the DB.
     with sqlite3.connect(db) as connection:
         connection.execute("PRAGMA journal_mode=WAL")
@@ -401,7 +413,10 @@ def test_legacy_premium_only_cli_without_token_store_still_settles(
     home = tmp_path / "legacy-copilot"
     home.mkdir()
     with sqlite3.connect(home / "session-store.db") as connection:
-        connection.execute("CREATE TABLE sessions (id TEXT)")
+        connection.execute(
+            "CREATE TABLE assistant_usage_events "
+            "(id INTEGER PRIMARY KEY, session_id TEXT, premium_requests REAL)"
+        )
     monkeypatch.setenv("COPILOT_HOME", str(home))
     monkeypatch.setenv("ARGUS_SKILL_COPILOT_GUARD", "0")
     backend = AgentCliBackend(backend="copilot")
@@ -425,7 +440,12 @@ def test_legacy_premium_only_cli_without_token_store_still_settles(
     assert UsageLedger(project).records()[0].cost_basis == "premium_request"
 
 
-def test_unreadable_existing_store_does_not_establish_premium_only_billing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("state", ["missing", "uninitialized", "unreadable"])
+def test_unknown_store_does_not_establish_premium_only_billing(tmp_path: Path, state: str) -> None:
     db = tmp_path / "session-store.db"
-    db.write_bytes(b"incomplete SQLite file")
+    if state == "unreadable":
+        db.write_bytes(b"incomplete SQLite file")
+    elif state == "uninitialized":
+        with sqlite3.connect(db) as connection:
+            connection.execute("CREATE TABLE sessions (id TEXT)")
     assert copilot_store_supports_token_billing(db)
