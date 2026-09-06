@@ -1019,6 +1019,76 @@ def test_research_route_prompts_require_the_fields_the_parser_requires() -> None
     )
     assert "Add research target fields only when the operator stated them" not in fast
     assert "`target_venue` only when the operator stated one" in grounded
+    for prompt in (fast, grounded):
+        assert "Figures, plots, diagrams, a Figure 1" in prompt
+        assert "a revision of a research manuscript are `research`" in prompt
+        assert "only for that part and excludes a full campaign, choose `direct`" in prompt
+        assert "START_STAGE=\n" in prompt
+        assert "START_STAGE=<stage name or empty>" in prompt
+        assert "used only with WORKFLOW_MODE=direct" in prompt
+        assert "must be one of the chosen vertical's stages" in prompt
+        assert "Empty means its first stage" in prompt
+        assert "A staged workflow always starts at its first stage" in prompt
+
+
+@pytest.mark.parametrize("fast", [True, False], ids=["fast", "grounded"])
+def test_direct_research_figure_route_seeds_paper(tmp_path, monkeypatch, fast) -> None:
+    monkeypatch.setenv("ARGUS_SKILL_MANAGER_FAST_ROUTE", "1" if fast else "0")
+    runner = _DecisionRunner({
+        "choice": "existing",
+        "vertical": "research",
+        "workflow_mode": "direct",
+        "start_stage": "paper",
+        "confidence": 0.99,
+        "research_target_level": "exploratory",
+        "research_direction_mode": "locked",
+    })
+    manager = Manager(project_root=tmp_path, runner=runner)
+    task = "Produce only publication figures for this paper; no full research campaign."
+
+    decision = manager.decide_vertical(task)
+    assert decision.start_stage == "paper"
+    division = manager.commit_vertical_decision(task, decision)
+
+    state = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
+    assert division.vertical == "research"
+    assert division.workflow_mode == "direct"
+    assert state["current_stage"] == "paper"
+    assert runner.calls[0]["run_label"] == (
+        "manager-classify-fast" if fast else "manager-classify-grounded"
+    )
+
+
+@pytest.mark.parametrize("ask_on_new_domain", [False, True])
+def test_new_domain_start_stage_survives_commit_and_confirmation(
+    tmp_path, ask_on_new_domain,
+) -> None:
+    task = "Validate the supplied field report."
+    decision = parse_vertical_decision({
+        "choice": "new",
+        "vertical": "field_report",
+        "workflow_mode": "direct",
+        "start_stage": " VaLiDaTe ",
+        "execution_task": task,
+    })
+    assert decision is not None
+    manager = Manager(project_root=tmp_path)
+
+    division = manager.commit_vertical_decision(
+        task, decision, ask_on_new_domain=ask_on_new_domain,
+    )
+    if ask_on_new_domain:
+        division = manager.commit_domain(
+            division.task,
+            division.proposed_domain,
+            execution_task=division.execution_task,
+            workflow_mode=division.workflow_mode,
+            start_stage=division.start_stage,
+        )
+
+    state = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
+    assert division.workflow_mode == "direct"
+    assert state["current_stage"] == "validate"
 
 
 def test_fast_route_environment_cannot_restore_tool_free_shortcut(

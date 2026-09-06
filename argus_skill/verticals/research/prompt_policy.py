@@ -18,6 +18,15 @@ _CONTEXT_CHAR_LIMIT = 32_000
 _COMPUTE_STAGES = frozenset({"idea", "experiment"})
 _HARDWARE_CACHE_SECONDS = 60.0
 _hardware_cache: tuple[float, str] | None = None
+# Local checkpoint inventory: scanning a few cache directories is cheap, but
+# not so cheap that every prompt render should redo it.
+_model_inventory_cache: dict[str, tuple[float, str]] = {}
+# Prompt budget: the largest checkpoints are the ones a claim about scale
+# needs; beyond this many the list stops informing and starts crowding.
+_MODEL_INVENTORY_LIMIT = 40
+_MODEL_CACHE_DIRS_KNOB = "ARGUS_SKILL_MODEL_CACHE_DIRS"
+_PROJECT_SCAN_DEPTH = 3
+_SKIPPED_DIR_NAMES = frozenset({"node_modules", "site-packages", "__pycache__"})
 
 
 def _query_local_gpus() -> list[str]:
@@ -48,11 +57,173 @@ def _query_local_gpus() -> list[str]:
             used_gb = int(used_mib) / 1024
         except ValueError:
             continue
+        free_gb = max(total_gb - used_gb, 0.0)
         lines.append(
             f"- GPU {index}: {name}, {total_gb:.0f} GB memory "
-            f"({used_gb:.0f} GB currently in use)"
+            f"({free_gb:.0f} GB free, {used_gb:.0f} GB in use by running jobs)"
         )
     return lines
+
+
+def _hub_cache_dirs(project_root: Path | None) -> list[Path]:
+    """Every place Hugging Face weights may already sit on this machine."""
+    env = os.environ
+    candidates: list[Path] = []
+    if env.get("HF_HUB_CACHE"):
+        candidates.append(Path(env["HF_HUB_CACHE"]))
+    if env.get("HF_HOME"):
+        candidates.append(Path(env["HF_HOME"]) / "hub")
+    if env.get("TRANSFORMERS_CACHE"):
+        candidates.append(Path(env["TRANSFORMERS_CACHE"]))
+    candidates.append(Path.home() / ".cache" / "huggingface" / "hub")
+    from ...core.knobs import resolve_knob
+
+    configured = resolve_knob(_MODEL_CACHE_DIRS_KNOB, "").value
+    for raw in configured.split(os.pathsep):
+        if raw.strip():
+            candidates.append(Path(raw.strip()).expanduser())
+    if project_root is not None:
+        candidates.extend(_project_local_hub_dirs(Path(project_root)))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def _project_local_hub_dirs(root: Path) -> list[Path]:
+    """Directories a few levels under the project that hold ``models--*``."""
+    found: list[Path] = []
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        holds_models = False
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            name = entry.name
+            if name.startswith("models--") or name.startswith("datasets--"):
+                holds_models = True
+                continue
+            if name.startswith(".") or name in _SKIPPED_DIR_NAMES:
+                continue
+            if depth + 1 <= _PROJECT_SCAN_DEPTH:
+                stack.append((Path(entry.path), depth + 1))
+        if holds_models:
+            found.append(directory)
+    return found
+
+
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    stack = [path]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total
+
+
+def _query_local_models(project_root: Path | None) -> tuple[list[tuple[str, int, Path]], list[str]]:
+    """Return ``(models, datasets)`` found in local Hugging Face caches.
+
+    Models are ``(repo_id, bytes_on_disk, cache_dir)``; the hub layout keeps
+    real files under ``blobs/`` and symlinks under ``snapshots/``, so sizes
+    count only regular files without following links.
+    """
+    models: dict[str, tuple[int, Path]] = {}
+    datasets: set[str] = set()
+    for hub in _hub_cache_dirs(project_root):
+        try:
+            entries = list(os.scandir(hub))
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if entry.name.startswith("datasets--"):
+                datasets.add(entry.name[len("datasets--"):].replace("--", "/", 1))
+                continue
+            if not entry.name.startswith("models--"):
+                continue
+            repo_id = entry.name[len("models--"):].replace("--", "/", 1)
+            blobs = Path(entry.path) / "blobs"
+            size = _tree_bytes(blobs if blobs.is_dir() else Path(entry.path))
+            if size <= 0:
+                continue
+            known = models.get(repo_id)
+            if known is None or size > known[0]:
+                models[repo_id] = (size, hub)
+    ordered = sorted(
+        ((repo_id, size, hub) for repo_id, (size, hub) in models.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return ordered, sorted(datasets)
+
+
+def local_model_inventory_block(project_root: Path | None = None) -> str:
+    """List the checkpoints already on disk so experiments are sized to what
+    is here instead of to the one model that happened to be handy.
+
+    Informational only. Cached briefly per project root; fail-soft to an
+    empty string when no cache holds any weights.
+    """
+    key = str(Path(project_root).resolve()) if project_root is not None else ""
+    now = time.monotonic()
+    cached = _model_inventory_cache.get(key)
+    if cached is not None and now - cached[0] < _HARDWARE_CACHE_SECONDS:
+        return cached[1]
+    models, datasets = _query_local_models(project_root)
+    if not models and not datasets:
+        _model_inventory_cache[key] = (now, "")
+        return ""
+    lines: list[str] = []
+    for repo_id, size, hub in models[:_MODEL_INVENTORY_LIMIT]:
+        shown = f"{size / 1024**3:.1f} GB" if size >= 1024**3 else f"{size / 1024**2:.0f} MB"
+        lines.append(f"- `{repo_id}` ({shown}) in `{hub}`")
+    if len(models) > _MODEL_INVENTORY_LIMIT:
+        lines.append(f"- ... and {len(models) - _MODEL_INVENTORY_LIMIT} smaller checkpoints")
+    dataset_line = (
+        "Datasets cached locally: " + ", ".join(f"`{name}`" for name in datasets[:_MODEL_INVENTORY_LIMIT])
+        if datasets
+        else ""
+    )
+    block = (
+        "## Model weights already on this machine\n"
+        "These checkpoints sit in local Hugging Face caches and load without a "
+        "download; point `cache_dir` or `HF_HUB_CACHE` at the directory shown "
+        "rather than downloading a second copy elsewhere.\n"
+        + "\n".join(lines)
+        + (f"\n{dataset_line}" if dataset_line else "")
+        + "\n\n"
+        "A claim about language models in general is tested across families "
+        "and sizes, not on the one model that happened to be handy. The weights "
+        "above are the cheapest way to widen a comparison, and several of them "
+        "can be evaluated at once on separate GPUs."
+    )
+    _model_inventory_cache[key] = (now, block)
+    return block
 
 
 def local_hardware_block() -> str:
@@ -88,8 +259,14 @@ def local_hardware_block() -> str:
     return block
 
 
-def _hardware_block_for_stage(stage: str) -> str:
-    return local_hardware_block() if stage in _COMPUTE_STAGES else ""
+def _hardware_block_for_stage(stage: str, project_root: Path | None = None) -> str:
+    if stage not in _COMPUTE_STAGES:
+        return ""
+    return "\n\n".join(
+        block
+        for block in (local_hardware_block(), local_model_inventory_block(project_root))
+        if block
+    )
 
 
 def active_context_paths(stage: str) -> tuple[str, ...]:
@@ -245,12 +422,18 @@ def _planner_fragment(stage: str, project_root: Path | None) -> str:
         for block in (
             _stage_playbook_block(stage),
             active_research_context(stage, project_root),
-            _hardware_block_for_stage(stage),
+            _hardware_block_for_stage(stage, project_root),
             (
                 "## Planner responsibility\n"
                 f"Plan only the highest-value unresolved work in `{stage or '(unknown)'}` "
                 "under the stage playbook. Keep repairs in the current stage, avoid "
-                "ceremonial tasks, and leave stage transitions to Manager."
+                "ceremonial tasks, and leave stage transitions to Manager. A hypothesis "
+                "the evidence has refuted closes its family of repairs: do not schedule "
+                "another variant of the same objective under a new title; schedule the "
+                "re-derivation of the thesis from what the evidence establishes and its "
+                "confirmation on untouched data at the scale the claim needs. In `paper`, "
+                "schedule writing; a run belongs there only for a specific evidence gap "
+                "the manuscript exposed."
             ),
         )
         if block
@@ -314,7 +497,7 @@ def _engineer_fragment(
         for block in (
             _stage_playbook_block(stage),
             context,
-            _hardware_block_for_stage(stage),
+            _hardware_block_for_stage(stage, project_root),
             narrative_packaging,
             (
                 "## On-demand method figure\n"
@@ -388,7 +571,13 @@ def _reviewer_fragment(
         block
         # Live HANDOFF/REVIEW contents belong to the Reviewer's round delta, not
         # this static policy fragment used to decide whether a session resumes.
-        for block in (_stage_playbook_block(stage), policy)
+        # The machine's compute and cached weights are shown so the Reviewer can
+        # judge whether the evidence was gathered at the scale the claim needs.
+        for block in (
+            _stage_playbook_block(stage),
+            _hardware_block_for_stage(stage, project_root),
+            policy,
+        )
         if block
     )
 
@@ -440,6 +629,7 @@ __all__ = [
     "active_research_context",
     "active_context_paths",
     "local_hardware_block",
+    "local_model_inventory_block",
     "render_role_prompt_fragment",
     "STAGE_PLAYBOOK_PATHS",
 ]

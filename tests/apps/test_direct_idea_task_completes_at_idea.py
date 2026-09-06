@@ -1,4 +1,4 @@
-"""A direct ideation task completes at the idea stage; it never marches into experiment.
+"""Direct research tasks complete at the stage containing their deliverable.
 
 idea-01 (s-0b1c7fa1, 2026-09-04) was an "identify and select one research idea"
 objective routed as a direct research task. Its Reviewer accepted the ideation
@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from argus_skill.apps._runtime_stage_transition import StageTransitionMixin
 from argus_skill.core.models import ReviewDecision
@@ -27,7 +29,25 @@ class _Sink:
         self.events.append(event)
 
 
-def test_direct_ideation_verdict_completes_the_idea_stage(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("start_stage", "expected_stage", "reason", "evidence"),
+    [
+        (
+            "", "idea",
+            "The ideation package passes independent review; the selected direction is precise.",
+            "research/candidates.md",
+        ),
+        (
+            "paper", "paper",
+            "The requested publication figures pass independent review.",
+            "paper/figures/figure1.pdf",
+        ),
+    ],
+    ids=["idea", "paper"],
+)
+def test_direct_research_verdict_completes_at_deliverable_stage(
+    tmp_path: Path, start_stage: str, expected_stage: str, reason: str, evidence: str,
+) -> None:
     state_root = tmp_path / "state"
     workdir = tmp_path / "worktree"
     workdir.mkdir()
@@ -35,9 +55,10 @@ def test_direct_ideation_verdict_completes_the_idea_stage(tmp_path: Path) -> Non
         state_root,
         "research",
         workflow_mode="direct",
+        start_stage=start_stage,
         research_target_level="exploratory",
     )
-    assert read_pipeline_state(state_root).get("current_stage") == "idea"
+    assert read_pipeline_state(state_root).get("current_stage") == expected_stage
 
     runtime = SimpleNamespace(
         manager=Manager(project_root=state_root, execution_workdir=workdir, runner=object()),
@@ -46,7 +67,7 @@ def test_direct_ideation_verdict_completes_the_idea_stage(tmp_path: Path) -> Non
     )
     review = ReviewDecision(
         status="done",
-        reason="The ideation package passes independent review; the selected direction is precise.",
+        reason=reason,
         next_action="",
         research_result={
             "result_class": "new_candidate",
@@ -54,7 +75,7 @@ def test_direct_ideation_verdict_completes_the_idea_stage(tmp_path: Path) -> Non
             "novelty_status": "unverified",
             "significance_status": "unverified",
             "statement_fidelity_status": "passed",
-            "evidence": ["research/candidates.md"],
+            "evidence": [evidence],
         },
     )
     decision = StageTransitionMixin._decide_stage_transition(
@@ -62,13 +83,13 @@ def test_direct_ideation_verdict_completes_the_idea_stage(tmp_path: Path) -> Non
         rounds_list=[SimpleNamespace(review=review)],
         workdir=workdir,
         sink=_Sink(),
-        root_task_id="idea-direct",
+        root_task_id=f"{expected_stage}-direct",
         mission_scope="bounded",
         stage_closing=True,
     )
 
     assert decision["action"] == "complete"
-    assert decision["target_stage"] == "idea"
+    assert decision["target_stage"] == expected_stage
     state = read_pipeline_state(state_root)
-    assert state["current_stage"] == "idea"
+    assert state["current_stage"] == expected_stage
     assert state["current_verdict"] == "certified"

@@ -22,9 +22,9 @@ and ``manager/domain_author.py``):
   is FAIL-HARD: if nothing valid is resolvable it RAISES
   ``VerticalResolutionError`` rather than silently defaulting to ``"research"``.
 * the **write side** (``persist_vertical``) writes the chosen vertical into the
-  pipeline state and seeds ``current_stage`` to the vertical's first stage. It
-  validates the name (``require_vertical``) and RAISES on an unknown vertical or
-  a corrupt state file — no swallowed errors.
+  pipeline state and seeds ``current_stage`` to the requested direct start stage
+  or the vertical's first stage. It validates the name (``require_vertical``)
+  and RAISES on an unknown vertical or a corrupt state file — no swallowed errors.
 
 The resolved vertical has one authority: the Manager-persisted ``vertical`` in
 ``.argus/PIPELINE_STATE.json`` (including a Manager-authored data domain).
@@ -485,6 +485,7 @@ def persist_vertical(
     research_target_level: str | None = None,
     research_direction_mode: str | None = None,
     workflow_mode: str | None = None,
+    start_stage: str = "",
     target_venue: str | None = None,
     allow_research_direction_change: bool = False,
 ) -> None:
@@ -499,16 +500,16 @@ def persist_vertical(
 
     STAGE AUTHORITY — the harness must NOT control ``current_stage``; only the
     reviewer agent moves it (advance via its verdict, or roll back via
-    ``stage_machine.rollback_stage``). So this function SEEDS the vertical's
-    first stage only when no stage exists yet (initialization of a fresh state
-    file); it NEVER overwrites or resets an existing stage. A stale stage left
-    by a vertical change is real progress — clobbering it to the first stage is
-    an unauthorized rollback that destroys evidence. It is left for the
+    ``stage_machine.rollback_stage``). So this function SEEDS the requested valid
+    ``start_stage`` for direct work, otherwise the vertical's first stage, only
+    when no stage exists yet; it NEVER overwrites or resets an existing stage.
+    A stale stage left by a vertical change is real progress — clobbering it to
+    the first stage is an unauthorized rollback that destroys evidence. It is left for the
     reviewer / rollback path to handle, and the read-side ``current_stage()``
     already falls back to the vertical's first stage at read time without
     mutating the file.
     """
-    from .stage_machine import migrate_legacy_research_stage
+    from .stage_machine import migrate_legacy_research_stage, normalize_stage_for_project
 
     migrate_legacy_research_stage(project_root)
     legacy_direct = str(vertical or "").strip().lower() == "direct"
@@ -616,9 +617,15 @@ def persist_vertical(
     # (see docstring). Write an initial stage only when none exists yet — leave
     # any existing stage, even one not in this vertical's order, untouched.
     if not _normalize_stage(payload.get("current_stage")):
-        first_stage = _vertical_first_stage(vert, project_root)
-        if first_stage:
-            payload["current_stage"] = first_stage
+        initial_stage = (
+            normalize_stage_for_project(
+                project_root, start_stage, vertical=vert, require_known=True,
+            )
+            if payload.get("workflow_mode") == "direct" and start_stage else ""
+        )
+        initial_stage = initial_stage or _vertical_first_stage(vert, project_root)
+        if initial_stage:
+            payload["current_stage"] = initial_stage
     if vert == "research":
         payload.setdefault("selected_idea", None)
         payload.setdefault("current_verdict", "in_progress")

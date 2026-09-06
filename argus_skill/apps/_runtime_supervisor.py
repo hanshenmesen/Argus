@@ -256,6 +256,7 @@ def run_life_supervisor(
                         division.proposed_domain,
                         execution_task=division.execution_task,
                         workflow_mode=division.workflow_mode,
+                        start_stage=division.start_stage,
                     )
                 from ..manager.front_door import require_manager_execution_task
 

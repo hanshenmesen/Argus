@@ -7,8 +7,8 @@ description: "The single authoritative playbook for writing a complete, compilab
 
 ## Outcome
 
-Produce a complete manuscript that argues one important positive contribution
-from the confirmed Experiment evidence. Aim for the clarity, confidence,
+Produce a complete manuscript that argues the strongest contribution the
+confirmed Experiment evidence supports. Aim for the clarity, confidence,
 technical density, and visual finish of the strongest papers in the selected
 venue.
 
@@ -69,6 +69,20 @@ do not become the narrative.
    protecting every claim, number, named baseline and limit. Then read the
    paper once as a stranger and fix what fails.
 10. Compile successfully with the selected venue's current rules.
+
+Paper writes; it does not develop the method. A new run belongs in this stage
+only when the manuscript exposes a specific evidence gap, such as a missing
+baseline or an unrepresented model family or scale, and it is run at the scale
+the claim needs; a new mechanism variant never does. The manuscript reports
+only what was run: no simulated, placeholder, projected, or illustrative
+results appear anywhere in it, and in particular no human-study numbers that
+were not collected from participants. A study that did not run is outside the
+claims and may be one sentence of future work.
+
+A direct request for part of a paper (figures, a section, a revision) produces
+exactly that deliverable with this Playbook's figure and writing skills and
+stops after independent review. It does not require a full manuscript, a venue
+profile, or HANDOFF.md.
 
 Paper performs normal authoring checks, not a separate scientific, visual,
 language, or whole-paper acceptance. Those happen together in Review.

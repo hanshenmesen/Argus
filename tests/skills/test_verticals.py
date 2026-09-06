@@ -409,6 +409,39 @@ def test_persist_vertical_seeds_first_stage_only_when_missing(tmp_path: Path) ->
     assert payload["current_stage"] == "idea"
 
 
+@pytest.mark.parametrize(
+    ("workflow_mode", "start_stage", "expected"),
+    [
+        ("direct", "paper", "paper"),
+        ("direct", " DrAfT ", "paper"),
+        ("direct", "not_a_stage", "idea"),
+        ("direct", "", "idea"),
+        ("staged", "paper", "idea"),
+    ],
+)
+def test_persist_vertical_seeds_requested_direct_stage(
+    tmp_path: Path, workflow_mode: str, start_stage: str, expected: str,
+) -> None:
+    persist_vertical(
+        tmp_path, "research", workflow_mode=workflow_mode, start_stage=start_stage,
+    )
+
+    payload = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
+    assert payload["current_stage"] == expected
+
+
+@pytest.mark.parametrize("existing_stage", ["experiment", "off_order"])
+def test_persist_start_stage_never_resets_existing_research_stage(
+    tmp_path: Path, existing_stage: str,
+) -> None:
+    root = _project(tmp_path, "research", current=existing_stage)
+
+    persist_vertical(root, "research", workflow_mode="direct", start_stage="paper")
+
+    payload = json.loads((root / ".argus" / "PIPELINE_STATE.json").read_text())
+    assert payload["current_stage"] == existing_stage
+
+
 def test_kernelbench_research_checklist_is_not_paper_literature_gate(tmp_path: Path) -> None:
     root = _project(tmp_path, "kernelbench", current="research")
 

@@ -31,7 +31,18 @@ _RESEARCH_DELIVERABLE_ROUTING = (
     "implementation, experiments, or a paper, choose direct research; use broad "
     "for idea discovery and locked for one supplied idea. Research target level "
     "sets the requested quality bar and never expands an idea-only deliverable "
-    "into a paper.\n\n"
+    "into a paper. Figures, plots, diagrams, a Figure 1, a section, a draft, or "
+    "a revision of a research manuscript are `research`. When the operator asks "
+    "only for that part and excludes a full campaign, choose `direct` and produce "
+    "exactly that part; add no manuscript, experiments, or literature review. "
+    "A direct research request names START_STAGE for its deliverable: `idea` for "
+    "proposing, comparing, or reviewing ideas and surveys; `experiment` for a "
+    "bounded empirical study or implementation with real runs and no manuscript; "
+    "`paper` for figures, drafts, sections, and manuscript revisions.\n\n"
+    "Optional START_STAGE=<stage name or empty> is used only with "
+    "WORKFLOW_MODE=direct and must be one of the chosen vertical's stages. "
+    "Empty means its first stage. A staged workflow always starts at its first "
+    "stage.\n\n"
 )
 
 _MIN_PLAN_STEPS = 3
@@ -344,6 +355,7 @@ def build_fast_vertical_decision_prompt(
             "VERTICAL=software\n"
             "DOMAIN=\n"
             "WORKFLOW_MODE=direct\n"
+            "START_STAGE=\n"
             "REQUIRE_INDEPENDENT_REVIEW=true\n"
             "CONFIDENCE=0.9\n"
             "RATIONALE=brief reason"
@@ -443,6 +455,7 @@ def build_vertical_decision_prompt(
             "VERTICAL=software\n"
             "DOMAIN=\n"
             "WORKFLOW_MODE=direct\n"
+            "START_STAGE=\n"
             "REQUIRE_INDEPENDENT_REVIEW=true\n"
             "RATIONALE=brief reason"
         )
@@ -903,7 +916,10 @@ def build_stage_decision_prompt(
         "- Judge the science, not the bookkeeping. A missing or outdated note for the "
         "next stage, review file, template detail, or file marker is repair work for the "
         "next round; it is never by itself a reason to HOLD a stage whose work "
-        "the Reviewer accepted.\n\n"
+        "the Reviewer accepted.\n"
+        "- Evidence scale is part of the science. A checklist can be nominally met by a "
+        "handful of items or one model; when the objective's claim is broader than what "
+        "was measured, HOLD for the wider evidence rather than ADVANCE on a narrow win.\n\n"
         + decision_footer_instruction(
             "ACTION=hold\n"
             "TARGET_STAGE=current stage\n"

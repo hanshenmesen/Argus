@@ -134,8 +134,12 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "baseline is beaten. Comparisons must include real strong published "
                 "baselines rather than renamed local heuristics, use current models and "
                 "appropriate public or official benchmarks where relevant, and pass a "
-                "positive control through the real evaluator. Otherwise improve the method "
-                "or experiment in the current Experiment stage."
+                "positive control through the real evaluator. Evidence scale is part of "
+                "the bar: a claim about models in general rests on several families and "
+                "sizes, a claim about a phenomenon on enough independent items that "
+                "templates cannot explain it; a handful of development items or one model "
+                "family supports only a correspondingly narrow claim. Otherwise improve the "
+                "method or experiment in the current Experiment stage."
             ),
             evidence_hint="claim-bearing comparisons, controls, and direct raw outputs",
         ),
@@ -144,8 +148,12 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             statement=(
                 "Treat method, experiment, evaluator, and evidence defects as repair work "
                 "inside Experiment. Keep the selected idea and current stage; never request "
-                "a rollback or convert unfinished development into a negative-result paper; a "
-                "negative or boundary thesis earns Paper only with complete evidence for it."
+                "a rollback. When a matched ablation or the strongest same-information "
+                "baseline beats the mechanism on fresh evidence, the repair is to re-derive "
+                "the thesis from what the evidence establishes and confirm it on untouched "
+                "data, not to open another variant of the same objective. Unfinished "
+                "development is not a negative result; a negative or boundary thesis earns "
+                "Paper only with complete evidence for it."
             ),
             evidence_hint="repaired work products and the next decisive comparison",
         ),
@@ -272,8 +280,9 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
             statement=(
                 "Review the complete paper as an independent venue reviewer. Verify the "
                 "contribution, fidelity to the executed code, positive controls, strongest "
-                "same-information baselines, decisive evidence, citations, and whether all "
-                "sections and experiments needed by the thesis are present. Reviewer "
+                "same-information baselines, decisive evidence, citations, whether the "
+                "benchmark's labels, balance, and scoring can carry the claim, and whether "
+                "all sections and experiments needed by the thesis are present. Reviewer "
                 "authority is independent of Engineer or Planner confidence. For narrative "
                 "edits, compare the immutable before/after snapshots and veto only a named "
                 "lost fact, reasoning step, scope boundary, or coverage carrier—not changed "

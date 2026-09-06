@@ -25,6 +25,7 @@ from ..roles.prompts.manager import (
     build_research_target_prompt,
     build_vertical_decision_prompt,
 )
+from ..skills.stage_machine import normalize_stage_for_project
 from ..verticals._data_domain import CANDIDATE_DOMAIN_STAGES
 from .live_view import LiveViewDecision, parse_live_view
 
@@ -150,6 +151,7 @@ _DECISION_KEYS = (
     "NAME",
     "DOMAIN",
     "WORKFLOW_MODE",
+    "START_STAGE",
     "CONFIDENCE",
     "RESEARCH_TARGET_LEVEL",
     "RESEARCH_DIRECTION_MODE",
@@ -202,6 +204,7 @@ def _decision_fields(
         "VERTICAL",
         "NAME",
         "WORKFLOW_MODE",
+        "START_STAGE",
         "RESEARCH_TARGET_LEVEL",
         "RESEARCH_DIRECTION_MODE",
     ):
@@ -523,6 +526,8 @@ class VerticalDecision:
     ambiguities: tuple[str, ...] = ()
     # Raw validated Manager response, applied only when the decision commits.
     rendering_response: str = ""
+    # Initial stage for direct work; never resets an existing stage.
+    start_stage: str = ""
 
 
 @dataclass(frozen=True)
@@ -546,6 +551,7 @@ class FastVerticalRoute:
     precise_constraints: tuple[str, ...] = ()
     exclusions: tuple[str, ...] = ()
     ambiguities: tuple[str, ...] = ()
+    start_stage: str = ""
 
 
 def parse_fast_vertical_decision(
@@ -561,6 +567,7 @@ def parse_fast_vertical_decision(
     persisted_research_target_level: str = "",
     persisted_research_direction_mode: str = "",
     allow_persisted_change: bool = False,
+    project_root: object = None,
 ) -> FastVerticalRoute | None:
     """Parse a tool-free route; invalid output fails closed to grounding."""
     obj = _decision_fields(raw_text)
@@ -644,6 +651,12 @@ def parse_fast_vertical_decision(
         vertical=name,
         domain=domain,
         workflow_mode=workflow_mode,
+        start_stage=(
+            normalize_stage_for_project(
+                project_root, obj.get("start_stage"), vertical=name, require_known=True,
+            )
+            if workflow_mode == "direct" and obj.get("start_stage") else ""
+        ),
         confidence=confidence,
         rationale=rationale,
         research_target_level=target_level,
@@ -888,6 +901,7 @@ def parse_vertical_decision(
     persisted_research_target_level: str = "",
     persisted_research_direction_mode: str = "",
     allow_persisted_change: bool = False,
+    project_root: object = None,
 ) -> VerticalDecision | None:
     """Validate the Manager's vertical-decision JSON; fail-closed to ``None``.
 
@@ -975,6 +989,15 @@ def parse_vertical_decision(
                 vertical=name,
                 domain=domain,
                 workflow_mode=workflow_mode,
+                start_stage=(
+                    normalize_stage_for_project(
+                        project_root,
+                        obj.get("start_stage"),
+                        vertical=name,
+                        require_known=True,
+                    )
+                    if workflow_mode == "direct" and obj.get("start_stage") else ""
+                ),
                 proposal=None,
                 adaptation_reason=str(obj.get("rationale") or "").strip()[:600],
                 live_view=parsed_live_view,
@@ -1005,11 +1028,16 @@ def parse_vertical_decision(
         if proposal is None:
             return None
         stated, exclusions, ambiguities = _stated_requirements(obj)
+        start_stage = str(obj.get("start_stage") or "").strip().lower()
         return VerticalDecision(
             choice="new",
             vertical=proposal.name,
             domain="",
             workflow_mode=workflow_mode,
+            start_stage=(
+                start_stage
+                if workflow_mode == "direct" and start_stage in proposal.stages else ""
+            ),
             proposal=proposal,
             live_view=parsed_live_view,
             live_view_decided=live_view_decided,

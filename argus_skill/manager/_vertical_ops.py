@@ -592,6 +592,8 @@ class _VerticalDecisionMixin:
                     decision.workflow_mode = _repository_workflow_mode(
                         decision.workflow_mode
                     )
+                    if decision.workflow_mode != "direct":
+                        decision.start_stage = ""
                 if (
                     contract.ground_before_handoff
                     and _software_grounding_required(decision.workflow_mode)
@@ -693,6 +695,7 @@ class _VerticalDecisionMixin:
                         persisted_research_direction_mode
                     ),
                     allow_persisted_change=allow_route_contract_change,
+                    project_root=self.project_root,
                 )
                 if (
                     fast_route is not None
@@ -704,6 +707,7 @@ class _VerticalDecisionMixin:
                         vertical=fast_route.vertical,
                         domain=fast_route.domain,
                         workflow_mode=fast_route.workflow_mode,
+                        start_stage=fast_route.start_stage,
                         adaptation_reason=fast_route.rationale,
                         execution_task=task.strip(),
                         research_target_level=fast_route.research_target_level,
@@ -813,6 +817,7 @@ class _VerticalDecisionMixin:
                     persisted_research_direction_mode
                 ),
                 allow_persisted_change=allow_route_contract_change,
+                project_root=self.project_root,
             )
             if route_decision is None:
                 from .classification_contract import STRUCTURED_DECISION_CLAUSE
@@ -1065,6 +1070,7 @@ class _VerticalDecisionMixin:
                     stages=list(proposal.stages),
                     domain="",
                     workflow_mode=decision.workflow_mode,
+                    start_stage=decision.start_stage,
                     execution_task=decision.execution_task,
                     require_independent_review=decision.require_independent_review,
                     proposed_domain=proposal, pending_confirmation=True,
@@ -1077,6 +1083,7 @@ class _VerticalDecisionMixin:
                 _old_vertical=old_vertical,
                 execution_task=decision.execution_task,
                 workflow_mode=decision.workflow_mode,
+                start_stage=decision.start_stage,
             )
             division.require_independent_review = (
                 decision.require_independent_review
@@ -1120,6 +1127,7 @@ class _VerticalDecisionMixin:
                 research_target_level=decision.research_target_level or None,
                 research_direction_mode=decision.research_direction_mode or None,
                 workflow_mode=decision.workflow_mode,
+                start_stage=decision.start_stage,
                 target_venue=decision.target_venue or None,
                 allow_research_direction_change=force_stage_reset,
             )
@@ -1138,6 +1146,7 @@ class _VerticalDecisionMixin:
             kind=self._kind_for(vertical),
             stages=stages,
             workflow_mode=decision.workflow_mode,
+            start_stage=decision.start_stage,
             execution_task=decision.execution_task,
             require_independent_review=decision.require_independent_review,
             learned_vertical_status=(
@@ -1221,6 +1230,7 @@ class _VerticalDecisionMixin:
         _old_vertical: str | None = None,
         execution_task: str = "",
         workflow_mode: str = "staged",
+        start_stage: str = "",
         _lock_held: bool = False,
     ) -> Any:
         """Write the authored data domain to disk and persist it as the active
@@ -1242,6 +1252,7 @@ class _VerticalDecisionMixin:
                 _old_vertical=_old_vertical,
                 execution_task=execution_task,
                 workflow_mode=workflow_mode,
+                start_stage=start_stage,
             )
 
     def _commit_domain_locked(
@@ -1252,6 +1263,7 @@ class _VerticalDecisionMixin:
         _old_vertical: str | None,
         execution_task: str,
         workflow_mode: str,
+        start_stage: str,
     ) -> Any:
         from ..verticals._data_domain import write_data_domain
         from ._core import Division
@@ -1293,6 +1305,7 @@ class _VerticalDecisionMixin:
                 self.project_root,
                 proposal.name,
                 workflow_mode=workflow_mode,
+                start_stage=start_stage,
             )
             vertical_select.reset_stage_for_new_intent(
                 self.project_root,
@@ -1308,6 +1321,7 @@ class _VerticalDecisionMixin:
                 or str(getattr(proposal, "execution_task", "") or "")
             ),
             workflow_mode=workflow_mode,
+            start_stage=start_stage,
             pending_confirmation=False,
             learned_vertical_status="candidate",
         )

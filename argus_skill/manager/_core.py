@@ -43,6 +43,7 @@ class Division:
     proposed_domain: Any = None
     pending_confirmation: bool = False
     learned_vertical_status: str = ""
+    start_stage: str = ""
 
     def headline(self) -> str:
         if self.proposed_domain is not None and self.pending_confirmation:

@@ -79,8 +79,41 @@ prescribe repeated runs across random seeds. Spend the compute on the
 comparisons that decide the claim — stronger baselines, more tasks, larger
 scale — rather than on repeating the same run.
 
+Scale the evidence to the claim, not to the first configuration that ran. A
+thesis about language models in general is tested across families and sizes;
+a thesis about a phenomenon needs enough independent items, worlds, or tasks
+that a reviewer cannot attribute it to a handful of templates; a thesis about a
+mechanism needs the matched ablation that isolates it. The machine's GPUs and
+the checkpoints already cached on it, listed in the stage context, are the
+resources: a comparison that fits on one card today usually runs across
+several cards and more models tomorrow at the same wall-clock cost. A
+development panel sized for quick iteration is not the claim-bearing
+evaluation; once method and evaluation settle, run the comparison at the scale
+the claim needs and say in `HANDOFF.md` why that scale is enough.
+
+When the decisive comparison goes against the mechanism, because a matched
+ablation or the strongest same-information baseline wins on fresh evidence,
+the next move is not another variant of the same objective. Return to the
+evidence and ask what it does establish: often the evaluation built to test
+the mechanism is itself the finding, or the refutation is the result the field
+needs, provided that evaluation is at claim scale. Re-derive the thesis,
+confirm it on untouched data, and hand that to Paper. A further repair round
+on the same mechanism needs a concrete, diagnosed cause; repeated development
+on the same panels is not confirmation, however many cycles it took.
+
+Plan only on resources that are actually in hand. Human participants, ethics
+approval, paid annotation, credentials, external services, or compute the
+operator has not supplied cannot be scheduled as work in an autonomous
+campaign; raise the need once, then design the claim around what can be
+executed here. Never stand in for missing evidence with simulated,
+placeholder, or projected results: not in the runs, not in `HANDOFF.md`, and
+never in a manuscript.
+
 Choose benchmarks that expose the method's mechanism and real advantage rather
-than convenient saturated tasks. Follow surprising positive evidence when it
+than convenient saturated tasks. A benchmark the project builds itself is part
+of the claim: write down where every label comes from, check that a constant
+answer does not already score well, and make sure the targets it is meant to
+separate are separable on its items before any model is scored on it. Follow surprising positive evidence when it
 reveals a stronger contribution, then confirm it on untouched data. Keep
 relevant losses visible internally, but do not let defensive edge-case coverage
 replace the main result.
@@ -91,7 +124,9 @@ redundant guards, fallback chains, reports, wrappers, or abstractions merely to
 make the project look robust.
 
 Do not freeze a global experiment plan, reopen Idea selection, hide relevant
-losses, or convert an unfinished campaign into a negative-result paper.
+losses, or present unfinished development as a negative result; a negative or
+boundary thesis is a paper only when its evidence is as complete as a positive
+one would need.
 
 ## Paper entry
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from argus_skill.domains import BUILTIN_DOMAINS, DOMAIN_PURPOSES
 from argus_skill.manager.domain_author import (
     DomainProposal,
@@ -114,6 +116,47 @@ def test_research_routing_distinguishes_idea_only_from_paper_production() -> Non
     assert "asks only to propose, compare, or review ideas" in prompt
     assert "choose direct research" in prompt
     assert "never expands an idea-only deliverable into a paper" in prompt
+    assert "Figures, plots, diagrams, a Figure 1" in prompt
+    assert "a revision of a research manuscript are `research`" in prompt
+    assert "exactly that part; add no manuscript, experiments, or literature review" in prompt
+    assert "START_STAGE=<stage name or empty>" in prompt
+    assert "`paper` for figures, drafts, sections, and manuscript revisions" in prompt
+
+
+@pytest.mark.parametrize("parse", [parse_fast_vertical_decision, parse_vertical_decision])
+@pytest.mark.parametrize(
+    ("vertical", "workflow_mode", "start_stage", "expected"),
+    [
+        ("research", "direct", "paper", "paper"),
+        ("research", "staged", "paper", ""),
+        ("research", "direct", "  DrAfT  ", "paper"),
+        ("research", "direct", "not_a_stage", ""),
+        ("research", "direct", "", ""),
+        ("research", "direct", None, ""),
+        ("research", "direct", "idea", "idea"),
+        ("research", "direct", "experiment", "experiment"),
+        ("software", "direct", "paper", ""),
+    ],
+)
+def test_vertical_parsers_accept_start_stage_only_in_direct_vertical(
+    parse, vertical, workflow_mode, start_stage, expected,
+) -> None:
+    lines = [
+        "CHOICE=existing",
+        f"VERTICAL={vertical}",
+        f"WORKFLOW_MODE={workflow_mode}",
+        "CONFIDENCE=0.99",
+        "RESEARCH_TARGET_LEVEL=exploratory",
+        "RESEARCH_DIRECTION_MODE=locked",
+        "EXECUTION_TASK=Produce only the requested deliverable.",
+    ]
+    if start_stage is not None:
+        lines.append(f"  start_Stage = {start_stage}  ")
+
+    decision = parse("\n".join(lines), known_verticals=VERTICALS)
+
+    assert decision is not None
+    assert decision.start_stage == expected
 
 
 def test_vertical_prompt_composes_chemistry_with_research() -> None:

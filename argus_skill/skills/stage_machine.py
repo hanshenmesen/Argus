@@ -112,16 +112,26 @@ def normalize_stage_for_project(
     stage: str | None,
     *,
     require_known: bool = False,
+    vertical: str = "",
 ) -> str:
-    """Canonicalize a stage name using the active vertical's aliases."""
+    """Canonicalize a stage using the chosen or active vertical's aliases."""
     normalized = _normalize_stage(stage)
-    aliases = _active_vertical_stage_aliases(project_root)
+    if vertical:
+        from ..verticals._base import load_vertical_contract
+
+        contract = load_vertical_contract(vertical, project_root=project_root)
+        aliases = contract.stage_aliases or {}
+    else:
+        aliases = _active_vertical_stage_aliases(project_root)
     seen: set[str] = set()
     while normalized in aliases and normalized not in seen:
         seen.add(normalized)
         normalized = _normalize_stage(aliases[normalized])
     if require_known:
-        order, _items = _active_vertical_checklist_defs(project_root)
+        if vertical:
+            order = contract.stage_order
+        else:
+            order, _items = _active_vertical_checklist_defs(project_root)
         known = {_normalize_stage(item) for item in order}
         if normalized not in known:
             return ""

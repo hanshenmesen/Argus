@@ -31,7 +31,11 @@ hypothesis.
    feasibility, smoke, or scientific experiments.
 5. Review novelty, mechanism validity, attribution, strongest same-information
    baseline, resource realism, and the decisive future experiment at the depth
-   appropriate to the selected path.
+   appropriate to the selected path. Resource realism means what is actually
+   here: the machine's GPUs and cached weights listed in the stage context,
+   public data, and code that exists. Do not build the decisive experiment on
+   human participants, ethics approval, paid annotation, credentials, or
+   compute the operator has not supplied.
 6. Close Idea search after a portfolio selection or locked-direction
    validation. Later implementation, evaluator,
    experiment, or paper defects are repaired in the current later stage and do
