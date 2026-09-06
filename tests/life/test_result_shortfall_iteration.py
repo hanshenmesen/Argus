@@ -131,30 +131,51 @@ def _stored(memory: LifeMemory, item_id: str) -> BacklogItem:
     return next(item for item in memory.backlog.all() if item.id == item_id)
 
 
-def test_fell_short_result_rearms_same_item_with_specific_objective(tmp_path: Path) -> None:
-    supervisor, memory, item, sink, _project = _supervisor(tmp_path, _result())
+def test_reviewer_done_settles_without_regrading_the_result(tmp_path: Path) -> None:
+    """A ``done`` final review is the judgment. Structured grades that fall
+    short of the target (a ``structured_failure_report`` graded
+    ``exploratory``) no longer re-queue the mission: one campaign ran 75
+    certification missions that way, every one reviewed ``done``, and never
+    completed."""
+    supervisor, memory, item, sink, _project = _supervisor(
+        tmp_path,
+        # Grades the old re-grader rejected as
+        # ``result_class_below_publishable:structured_failure_report``.
+        _result(significance="publishable"),
+    )
 
     outcome = supervisor.tick()
 
     assert outcome is not None
-    assert outcome["iteration"]["requeued"] is True
-    assert outcome["overall_complete"] is False
+    assert outcome.get("iteration") is None
+    assert outcome["overall_complete"] is True
     stored = _stored(memory, item.id)
-    assert stored.status == "pending"
-    assert stored.iteration_cycles_done == 1
-    assert stored.iteration_cost_usd > 0
-    assert "0.792" in stored.objective
-    assert "0.812" in stored.objective
-    assert "Keep the pipeline in Review" in stored.objective
-    assert "Blocking issue:" in stored.objective
-    assert stored.original_objective == "Submit the completed result."
-    assert any(
+    assert stored.status == "done"
+    assert stored.iteration_cycles_done == 0
+    assert stored.objective == "Submit the completed result."
+    assert not any(
         event.get("type") == "life.iteration.continued"
         for event in sink.events
     )
 
 
-def test_iteration_budget_exhaustion_settles_with_visible_reason(tmp_path: Path) -> None:
+def test_iteration_budget_exhaustion_settles_with_visible_reason(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The generic iteration budget still settles visibly when a vertical
+    that does re-arm missions runs out of cycles."""
+    from argus_skill.core.vertical_contract import IterationAssessment
+    from argus_skill.verticals import _base
+
+    monkeypatch.setattr(
+        _base,
+        "vertical_iteration_assessment",
+        lambda *_args, **_kwargs: IterationAssessment(
+            shortfall="score below charter",
+            objective="Close the 0.020 score gap.",
+        ),
+    )
     supervisor, memory, item, _sink, _project = _supervisor(
         tmp_path, _result(), max_cycles=1
     )

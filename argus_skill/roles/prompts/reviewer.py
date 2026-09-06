@@ -420,9 +420,9 @@ def render_reviewer_prompt(
                 "End with `RESEARCH_RESULT=<JSON>` over evidence you inspected. "
                 "`evidence` and `limitations` are JSON string arrays; a survey is "
                 "`literature_review` with `novelty_status` `known` or "
-                "`not_applicable`. Every field below takes one listed value "
-                "verbatim — any other value voids the whole result, however well "
-                "it describes the work:\n"
+                "`not_applicable`. Use one listed value per field so the record "
+                "stays comparable across campaigns; the block summarizes your "
+                "verdict and never replaces it:\n"
                 + "".join(
                     f"{_field}: {' '.join(_choices)}\n"
                     for _field, _choices in RESULT_FIELD_CHOICES

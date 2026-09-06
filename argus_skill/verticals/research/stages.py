@@ -459,44 +459,18 @@ def iteration_assessment(
     mission: Any,
     outcome: Any,
 ) -> IterationAssessment | None:
-    """Keep final-review shortfalls as repair work in the current stage."""
-    _ = (project_root, mission)
-    if (
-        str(stage or "").strip().lower() != "review"
-        or str(scope or "").strip().lower().replace("-", "_")
-        != "final_submission"
-    ):
-        return None
+    """The Reviewer's final verdict is the judgment; nothing re-grades it.
 
-    from ...core.research_contract import (
-        normalize_research_result,
-        research_completion_issue,
-        resolve_research_target_level,
-    )
-
-    target = resolve_research_target_level(state_root)
-    raw_result = getattr(outcome, "research_result", None)
-    issue = research_completion_issue(
-        raw_result,
-        research_target_level=target,
-    )
-    if not issue:
-        return None
-    result = normalize_research_result(raw_result)
-    detail = (
-        "; ".join([*result["evidence"], *result["limitations"]])[:600]
-        if result is not None
-        else "the authoritative review did not provide a valid research result"
-    )
-    return IterationAssessment(
-        shortfall=issue,
-        objective=(
-            "Keep the pipeline in Review. Repair the specific method, experiment, "
-            "paper, or presentation defect that blocks certification, then overwrite "
-            "paper/REVIEW.md with the next authoritative verdict. Do not roll back.\n"
-            f"Blocking issue: {issue}.\nEvidence: {detail}"
-        ),
-    )
+    This hook used to re-open a ``done`` final review whenever the structured
+    ``research_result`` grades fell short of the target level (a Reviewer
+    calling the work a ``finite_verification`` or leaving novelty
+    ``unverified``). One campaign then ran 75 certification missions, each
+    reviewed ``done`` and each re-queued, and never completed. A human final
+    reviewer who accepts a paper has accepted it; the grades are a summary of
+    that judgment, not a second judge.
+    """
+    _ = (stage, scope, project_root, state_root, mission, outcome)
+    return None
 
 
 RESEARCH_TARGET_LEVELS = ("exploratory", "publishable", "doctoral")

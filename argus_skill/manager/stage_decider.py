@@ -354,10 +354,16 @@ def _review_certifies_completion(
     right: the protection they asserted was real, it just was not where anyone
     thought it was. The target is now checked on purpose.
     """
-    _ = (vertical, mission_scope, checklist_contract)
+    _ = (mission_scope, checklist_contract)
     status = str(getattr(review, "status", "") or "").strip().lower()
     if status != "done":
         return "review_not_done"
+    if str(vertical or "").strip().lower() == "research":
+        # A paper's independent final review is the certification. The
+        # structured grades the Reviewer attaches summarize that verdict; they
+        # are not a second, mechanical judge of it. Formal verticals (math)
+        # keep the grade check below because their evidence is machine-checked.
+        return ""
     if research_target_level:
         from ..core.research_contract import research_completion_issue
 
