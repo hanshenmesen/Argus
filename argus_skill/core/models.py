@@ -172,11 +172,6 @@ class RunnerResult:
             return ""
         return self.agent_messages[-1]
 
-    @property
-    def message(self) -> str:
-        """Concatenated agent message text for backend compatibility."""
-        return "\n".join(self.agent_messages)
-
 
 @dataclass
 class ReviewDecision:
@@ -210,6 +205,8 @@ class ReviewDecision:
     backend_fatal_error: str = ""
     backend_exit_code: int | None = None
     backend_stop_kind: StopKind | None = None
+    # Runtime provenance for the pre-Reviewer operator-abort short circuit.
+    engineer_aborted_before_review: bool = False
     research_result: dict[str, Any] | None = None
     manuscript_snapshot: dict[str, str] | None = None
 

@@ -1132,9 +1132,14 @@ class SkillLoopExecuteMixin:
                             manuscript_review_status,
                         )
 
+                        # The Reviewer bound the manuscript it read in the
+                        # execution workdir; compare against that same tree.
+                        # ``_artifact_root`` is the session state root, which
+                        # holds no manuscript and would grade every current
+                        # review as stale.
                         review_freshness = manuscript_review_status(
                             {"manuscript_snapshot": binding},
-                            Path(getattr(self, "_artifact_root", ex_state.workdir)),
+                            Path(ex_state.workdir),
                         )
                     except Exception:  # noqa: BLE001 - certification fails closed
                         review_freshness = {
@@ -1344,7 +1349,18 @@ class SkillLoopExecuteMixin:
         summary_lines = []
         visible_engineer_message = strip_named_lines(
             engineer_message,
-            ("MILESTONE_STATUS", "NEXT_OWNER", "OPERATOR_QUESTION", "OPERATOR_OPTIONS"),
+            (
+                "MILESTONE_STATUS",
+                "NEXT_OWNER",
+                "OPERATOR_QUESTION",
+                "OPERATOR_OPTIONS",
+                "ROLE_DECISION",
+            ),
+        )
+        from ..engineer.external_work import strip_external_wait_footer
+
+        visible_engineer_message = strip_external_wait_footer(
+            visible_engineer_message
         )
         for line in visible_engineer_message.splitlines():
             cleaned = line.strip()
@@ -1362,6 +1378,14 @@ class SkillLoopExecuteMixin:
             last_thread_id=ex_state.new_tid,
             auth_failure=ex_state.auth_fail,
             final_submission_certified=ex_state.final_submission_certified,
+            manuscript_snapshot=(
+                dict(getattr(rounds[-1].review, "manuscript_snapshot", None))
+                if rounds
+                and isinstance(
+                    getattr(rounds[-1].review, "manuscript_snapshot", None), dict
+                )
+                else None
+            ),
             completion_evidence=ex_state.completion_evidence,
             stage_transition=ex_state.stage_transition,
             stage_transition_skipped=ex_state.stage_transition_skipped,
@@ -1374,6 +1398,7 @@ class SkillLoopExecuteMixin:
                 getattr(outcome, "final_review_reason", "") or ""
             ),
             final_review_next_action=ex_state.final_review_next_action,
+            final_message=engineer_message,
             summary=summary,
             research_result=(
                 getattr(

@@ -44,6 +44,64 @@ def test_prompt_uses_minimal_reviewer_verdict() -> None:
         assert removed not in prompt
 
 
+def test_direct_stage_prompt_completes_instead_of_advancing() -> None:
+    prompt = build_stage_decision_prompt(
+        current_stage="idea",
+        next_stage="build",
+        earlier_stages=(),
+        checklist_md="Return one independently reviewed idea.",
+        review=_review(),
+        allow_early_completion=True,
+    )
+
+    assert "COMPLETE at the current stage" in prompt
+    assert "Do not ADVANCE merely because later stages exist" in prompt
+    assert "COMPLETE only at the final stage" not in prompt
+
+
+def test_completion_report_prompt_contains_all_stage_information() -> None:
+    from argus_skill.roles.prompts.manager import (
+        build_project_completion_report_prompt,
+    )
+
+    prompt = build_project_completion_report_prompt(
+        objective="Complete the project.",
+        completion_reason="The final stage is done.",
+        completion_context={
+            "current_stage": "submission",
+            "stages": {
+                "research": {"status": "done"},
+                "submission": {"status": "done"},
+            },
+            "stage_history": [
+                {
+                    "from_stage": "research",
+                    "to_stage": "plan",
+                    "reason": "research accepted",
+                }
+            ],
+            "rollback_history": [
+                {
+                    "from_stage": "submission",
+                    "to_stage": "draft",
+                    "reason": "draft needed repair",
+                }
+            ],
+            "stage_reviews": {
+                "research": {"review_status": "done"},
+                "submission": {"review_status": "done"},
+            },
+        },
+    )
+
+    assert "completion report, not another review" in prompt
+    assert '"research": {' in prompt
+    assert '"submission": {' in prompt
+    assert "research accepted" in prompt
+    assert "draft needed repair" in prompt
+    assert '"stage_reviews"' in prompt
+
+
 def test_parse_advance_immediate_ok() -> None:
     decision = parse_stage_decision(
         '{"action":"advance","target_stage":"plan","reason":"ok"}',
@@ -86,13 +144,17 @@ def test_parse_advance_still_rejects_current_or_earlier_stage() -> None:
         assert decision.diagnostic == "illegal_advance_target"
 
 
-def test_research_survey_can_advance_directly_to_draft(tmp_path) -> None:
+def test_research_advances_from_idea_to_experiment(tmp_path) -> None:
     from argus_skill.manager import Manager
     from argus_skill.skills.vertical_select import persist_vertical
 
     state_root = tmp_path / "state"
     workdir = tmp_path / "worktree"
     workdir.mkdir()
+    (workdir / "HANDOFF.md").write_text(
+        "# HANDOFF — IDEA\n\nSelected idea.",
+        encoding="utf-8",
+    )
     persist_vertical(state_root, "research", workflow_mode="staged")
 
     decision = Manager(
@@ -106,9 +168,8 @@ def test_research_survey_can_advance_directly_to_draft(tmp_path) -> None:
         open_ended=False,
         run_exec=lambda _prompt: SimpleNamespace(
             last_agent_message=(
-                '{"action":"advance","target_stage":"draft",'
-                '"reason":"literature synthesis is certified; this survey has no '
-                'experiment, benchmark, run, or empirical analysis"}'
+                '{"action":"advance","target_stage":"experiment",'
+                '"reason":"the selected idea and handoff are complete"}'
             )
         ),
     )
@@ -117,33 +178,31 @@ def test_research_survey_can_advance_directly_to_draft(tmp_path) -> None:
         (state_root / ".argus" / "PIPELINE_STATE.json").read_text()
     )
     assert decision.action == "advance"
-    assert decision.target_stage == "draft"
+    assert decision.target_stage == "experiment"
     assert decision.source == "manager_llm"
-    assert state["current_stage"] == "draft"
-    assert state["stages"]["research"]["status"] == "done"
-    assert state["stage_history"][-1]["skipped_stages"] == [
-        "plan",
-        "benchmark",
-        "run",
-        "analysis",
-    ]
-    for stage in ("plan", "benchmark", "run", "analysis"):
-        assert state["stages"][stage]["status"] == "skipped"
+    assert state["current_stage"] == "experiment"
+    assert state["stages"]["idea"]["status"] == "done"
 
 
-def test_finite_research_can_complete_and_skip_all_later_stages(tmp_path) -> None:
+def test_direct_idea_only_research_can_complete_at_idea(tmp_path) -> None:
     from argus_skill.manager import Manager
     from argus_skill.skills.vertical_select import persist_vertical
 
     state_root = tmp_path / "state"
     workdir = tmp_path / "worktree"
     workdir.mkdir()
-    persist_vertical(state_root, "research", workflow_mode="direct")
+    persist_vertical(
+        state_root,
+        "research",
+        workflow_mode="direct",
+        research_target_level="exploratory",
+        research_direction_mode="broad",
+    )
     review = _review()
     review.research_result = {
-        "result_class": "literature_review",
+        "result_class": "new_candidate",
         "correctness_status": "verified",
-        "novelty_status": "known",
+        "novelty_status": "verified_new",
         "significance_status": "exploratory",
         "statement_fidelity_status": "verified",
         "evidence": ["independent review"],
@@ -161,7 +220,7 @@ def test_finite_research_can_complete_and_skip_all_later_stages(tmp_path) -> Non
         open_ended=False,
         run_exec=lambda _prompt: SimpleNamespace(
             last_agent_message=(
-                '{"action":"complete","target_stage":"research",'
+                '{"action":"complete","target_stage":"idea",'
                 '"reason":"the finite reviewed objective is complete"}'
             )
         ),
@@ -171,11 +230,56 @@ def test_finite_research_can_complete_and_skip_all_later_stages(tmp_path) -> Non
         (state_root / ".argus" / "PIPELINE_STATE.json").read_text()
     )
     assert decision.action == "complete"
-    assert decision.source == "manager_llm"
-    assert state["current_stage"] == "research"
-    assert state["stages"]["research"]["status"] == "done"
-    for stage in ORDER[1:]:
-        assert state["stages"][stage]["status"] == "skipped"
+    assert state["current_stage"] == "idea"
+    assert state["stages"]["idea"]["status"] == "done"
+
+
+def test_publishable_idea_only_can_complete_without_paper_artifacts(
+    tmp_path,
+) -> None:
+    from argus_skill.manager import Manager
+    from argus_skill.skills.vertical_select import persist_vertical
+
+    state_root = tmp_path / "state"
+    workdir = tmp_path / "worktree"
+    workdir.mkdir()
+    persist_vertical(
+        state_root,
+        "research",
+        workflow_mode="direct",
+        research_target_level="publishable",
+        research_direction_mode="broad",
+    )
+    review = _review()
+    review.research_result = {
+        "result_class": "new_candidate",
+        "correctness_status": "verified",
+        "novelty_status": "verified_new",
+        "significance_status": "publishable",
+        "statement_fidelity_status": "verified",
+        "evidence": ["primary-source novelty review"],
+        "limitations": [],
+    }
+
+    decision = Manager(
+        project_root=state_root,
+        execution_workdir=workdir,
+        runner=object(),
+    ).decide_stage_transition(
+        review=review,
+        project_root=state_root,
+        mission_scope="bounded",
+        open_ended=False,
+        run_exec=lambda _prompt: SimpleNamespace(
+            last_agent_message=(
+                '{"action":"complete","target_stage":"idea",'
+                '"reason":"the requested publication-quality idea is complete"}'
+            )
+        ),
+    )
+
+    assert decision.action == "complete"
+    assert not (workdir / "paper").exists()
 
 
 def test_bounded_stage_mission_cannot_complete_staged_research_project(
@@ -210,8 +314,8 @@ def test_bounded_stage_mission_cannot_complete_staged_research_project(
     state = json.loads(
         (state_root / ".argus" / "PIPELINE_STATE.json").read_text()
     )
-    assert state["current_stage"] == "research"
-    assert state.get("stages", {}).get("research", {}).get("status") != "done"
+    assert state["current_stage"] == "idea"
+    assert state.get("stages", {}).get("idea", {}).get("status") != "done"
 
 
 def test_parse_rollback_requires_earlier_stage() -> None:

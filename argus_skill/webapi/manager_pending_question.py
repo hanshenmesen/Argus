@@ -96,20 +96,28 @@ def _bridge():
     return manager_bridge
 
 
-def _emit_ui_turn(life_dir: Path, role: str, text: str, *, message_id: str) -> None:
+def _emit_ui_turn(
+    life_dir: Path,
+    role: str,
+    text: str,
+    *,
+    message_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     """Persist one operator/Manager turn onto the shared live Activity stream."""
     try:
         from ..life.event_log import JsonlEventSink
 
-        JsonlEventSink(None, life_dir=life_dir).append(
-            {
-                "type": f"ui.{role}",
-                "agent_layer": "manager" if role == "argus" else "operator",
-                "message_id": message_id,
-                "text": text,
-                "ts": time.time(),
-            }
-        )
+        event = {
+            "type": f"ui.{role}",
+            "agent_layer": "manager" if role == "argus" else "operator",
+            "message_id": message_id,
+            "text": text,
+            "ts": time.time(),
+        }
+        if metadata:
+            event.update(metadata)
+        JsonlEventSink(None, life_dir=life_dir).append(event)
     except Exception:  # noqa: BLE001 — Activity mirroring must never break chat
         pass
 
@@ -231,6 +239,7 @@ def _resolved_decision_replay(
             "resume_requested": False,
             "reply": str(card.get("reply") or ""),
             "deployment": dict(card.get("deployment") or {}),
+            "maintenance_cleanup": dict(card.get("maintenance_cleanup") or {}),
         }
     continuation_id = str(card.get("continuation_item_id") or "").strip()
     continuation = next(
@@ -309,9 +318,15 @@ def _apply_framework_deployment_decision(
     """Resolve a reviewed maintenance card without creating another mission."""
     from ..life.event_log import JsonlEventSink
     from ..life.supervisor._mission_execution_runtime import (
+        _maintenance_sidecar_path,
         dispose_maintenance_worktree,
     )
 
+    # The producer writes beneath global memory; keep existing project-scoped
+    # cards readable, and use the same selected path for adoption and cleanup.
+    sidecar = _maintenance_sidecar_path(
+        mem.global_root, item.id, fallback_root=mem.project_root,
+    )
     card = dict(item.operator_decision)
     revision = int(card.get("revision", 1) or 1)
     card.update({
@@ -330,12 +345,6 @@ def _apply_framework_deployment_decision(
         status = "aborted"
         last_error = "operator declined the reviewed framework change"
     else:
-        sidecar = (
-            Path(mem.project_root)
-            / "maintenance"
-            / "pending"
-            / f"{item.id}.json"
-        )
         metadata = json.loads(sidecar.read_text(encoding="utf-8"))
         approval_binding = metadata["approval_binding"]
         from ..maintenance.deploy_boundary import (
@@ -449,11 +458,24 @@ def _apply_framework_deployment_decision(
         pending_question=pending_question,
         operator_decision=stored_card,
     )
-    dispose_maintenance_worktree(
-        mem.project_root,
-        item.id,
-        keep_sidecar=bool(deployment.get("partial_publication")),
-    )
+    cleanup: dict[str, Any] = {"status": "not_found", "sidecar_path": str(sidecar)}
+    had_sidecar = sidecar.is_file()
+    try:
+        dispose_maintenance_worktree(
+            sidecar.parents[2],
+            item.id,
+            keep_sidecar=bool(deployment.get("partial_publication")),
+        )
+    except (OSError, KeyError, RuntimeError, ValueError) as exc:
+        # The decision is already durable. Preserve authoring evidence and
+        # report cleanup separately, rather than failing a resolved decision.
+        cleanup.update(status="retained", reason=str(exc))
+    else:
+        if had_sidecar:
+            cleanup["status"] = "removed"
+    cleanup["sidecar_retained"] = sidecar.is_file()
+    stored_card["maintenance_cleanup"] = cleanup
+    mem.backlog.update(item.id, operator_decision=stored_card)
     JsonlEventSink(None, life_dir=Path(mem.project_root)).append({
         "type": "life.operator_question.answered",
         "item_id": item.id,
@@ -463,6 +485,7 @@ def _apply_framework_deployment_decision(
         "decision_id": decision_id,
         "decision_revision": revision,
         "deployment": deployment,
+        "maintenance_cleanup": cleanup,
     })
     if pending_question:
         from ..life.supervisor.pending_notify import notify_pending_question
@@ -485,6 +508,7 @@ def _apply_framework_deployment_decision(
         "resolution_id": resolution_id,
         "resume_requested": False,
         "reply": reply,
+        "maintenance_cleanup": cleanup,
         "deployment": deployment,
     }
 
@@ -818,7 +842,7 @@ def manager_answer_pending_question(
             or result.get("error")
             or "Manager could not resolve the pending question."
         )
-        if result.get("resolved"):
+        if result.get("resolved") and result.get("resume_requested", True):
             resumed, projection_error = _reconcile_campaign_after_decision(
                 mem,
                 stopped=False,
@@ -882,7 +906,9 @@ def manager_resolve_operator_decision(
             note=note,
         )
         if replay is not None:
-            if replay.get("application_status") == "already_applied":
+            if replay.get("application_status") == "already_applied" and (
+                option_id == "stop" or replay.get("resume_requested", True)
+            ):
                 resumed, projection_error = _reconcile_campaign_after_decision(
                     mem,
                     stopped=option_id == "stop",
@@ -1019,9 +1045,8 @@ def record_task_dispatch_ack(
     persist it durably, publish it on the caller's live UI channel, and set
     ``result["reply"]``.
 
-    Unlike chat turns, transcript write failures are NOT swallowed — the caller
-    must surface them (the operator deserves to know their dispatch was not
-    recorded).
+    Unlike chat turns, transcript write failures are surfaced through the same
+    live UI channel and result payload as the acknowledgement.
 
     Called after ``start_project_daemon`` in both blocking and streaming
     endpoints.
@@ -1060,8 +1085,18 @@ def record_task_dispatch_ack(
         if daemon.get("admission_required"):
             text = "waiting for an executor slot"
         elif int(daemon.get("rc", 0)) != 0:
-            error = daemon.get("error", "unknown error")
-            text = f"executor failed to start: {error}"
+            diagnostic = str(
+                daemon.get("startup_diagnostic")
+                or daemon.get("diagnostic")
+                or daemon.get("error")
+                or "unknown error"
+            )
+            daemon["diagnostic"] = diagnostic
+            daemon["error"] = "The background worker could not start."
+            text = (
+                "The background worker could not start. "
+                "Check its startup details and try again."
+            )
         else:
             text = "executor started"
     else:
@@ -1073,15 +1108,24 @@ def record_task_dispatch_ack(
         root = core_paths.global_root()
     life_dir = core_paths.session_state_root(sid, root=root)
 
-    # Persist transcript — errors propagate (not swallowed).
+    # Persist transcript — write errors become the user-visible acknowledgement.
     # We inline the write because the public append_turn() swallows exceptions
     # by design for chat turns; here we intentionally let I/O errors surface.
     import json as _json
 
-    life_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = life_dir / "transcript.jsonl"
     rec = {"ts": time.time(), "role": "argus", "text": text}
-    with (life_dir / "transcript.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+    try:
+        life_dir.mkdir(parents=True, exist_ok=True)
+        with transcript_path.open("a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        text = (
+            "The mission is queued, but I couldn't save its confirmation. "
+            "It remains in the queue."
+        )
+        result["ack_error"] = text
+        result["ack_diagnostic"] = f"{transcript_path}: {exc}"
 
     if callable(on_fragment):
         try:

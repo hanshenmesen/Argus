@@ -43,6 +43,7 @@ class Division:
     proposed_domain: Any = None
     pending_confirmation: bool = False
     learned_vertical_status: str = ""
+    start_stage: str = ""
 
     def headline(self) -> str:
         if self.proposed_domain is not None and self.pending_confirmation:
@@ -72,8 +73,8 @@ class StageTransition:
     target_stage: str
     reason: str
     current_stage: str = ""
-    # manager_llm | no_review_hold | no_runner_hold | failsafe_hold |
-    # illegal_target_hold
+    # manager_llm | manager_deterministic | no_review_hold | no_runner_hold |
+    # operator_abort_hold | failsafe_hold | illegal_target_hold
     source: str = "manager_llm"
     # Non-secret parser/runtime code for log triage (never raw model output).
     diagnostic: str = ""

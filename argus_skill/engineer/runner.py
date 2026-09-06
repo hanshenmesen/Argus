@@ -1,8 +1,9 @@
 """Reviewer-gated Engineer round orchestration."""
 from __future__ import annotations
 
-import logging
 import itertools
+import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -156,7 +157,11 @@ class SupervisedEngineer(
             getattr(self.engineer_runner, "backend", type(self.engineer_runner).__name__)
         )
         engineer_policy = effective_role_session_policy(
-            supervised_config.role_session_policy,
+            (
+                "fresh"
+                if supervised_config.engineer_operation == "narrative_edit"
+                else supervised_config.role_session_policy
+            ),
             engineer_backend,
             # Pi deliberately uses --no-session in isolated maintenance
             # worktrees, so no persisted thread may be passed there.
@@ -201,6 +206,31 @@ class SupervisedEngineer(
             ),
             mission_context_path=supervised_config.context_packet_path,
         )
+        if supervised_config.engineer_operation == "narrative_edit":
+            try:
+                from ..core.manuscript_narrative_runtime import (
+                    prepare_narrative_snapshot,
+                )
+
+                snapshot_root = prepare_narrative_snapshot(
+                    workdir,
+                    self.reviewer_config.vertical_state_root or workdir,
+                    mission_id=(
+                        supervised_config.narrative_mission_id
+                        or supervised_config.session_id
+                        or revision
+                    ),
+                )
+                supervised_config = replace(
+                    supervised_config,
+                    narrative_snapshot_root=str(snapshot_root),
+                )
+            except Exception as exc:  # noqa: BLE001 - comparison is a hard contract
+                reason = f"Could not preserve the pre-edit paper snapshot: {exc}"
+                return enforce_terminal_question_policy(
+                    ("error", state.rounds, "", reason, None),
+                    supervised_config,
+                )
         round_indices = (
             itertools.count(1)
             if supervised_config.max_rounds <= 0

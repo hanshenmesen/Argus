@@ -198,13 +198,27 @@ def _decision_requires_agent_grounding(
     project_domains: set[str],
 ) -> bool:
     """Whether this decision needs evidence beyond the Host snapshot."""
-    if not bool(snapshot.get("accessible")):
+    if snapshot.get("accessible") is not True:
+        return True
+    entries = snapshot.get("entries")
+    markers = snapshot.get("project_markers")
+    workspace_empty = snapshot.get("workspace_empty")
+    exact_empty = (
+        workspace_empty is True
+        and entries == []
+        and markers == []
+    )
+    consistent_nonempty = (
+        workspace_empty is False
+        and isinstance(entries, list)
+        and bool(entries)
+        and isinstance(markers, list)
+    )
+    if not (exact_empty or consistent_nonempty):
         return True
     if decision.choice != "existing":
-        return True
+        return not exact_empty
     if decision.vertical in project_domains or decision.vertical not in builtin_verticals:
-        return True
-    if decision.adapted_stages:
         return True
     return False
 
@@ -402,13 +416,18 @@ class _VerticalDecisionMixin:
             reset_contract_failures,
         )
 
-        resolved_model_id = _manager_model() or "<backend default>"
+        # Keep the diagnostic streak label separate from the runner option.
+        # For a custom Codex provider an empty model means "use that provider's
+        # configured default"; the human-readable placeholder must never be
+        # passed as a literal model id.
+        manager_model_id = _manager_model()
+        resolved_model_id = manager_model_id or "<backend default>"
         try:
             decision = self._decide_vertical_once(
                 task,
                 root_task_id=root_task_id,
                 allow_route_contract_change=allow_route_contract_change,
-                resolved_model_id=resolved_model_id,
+                resolved_model_id=manager_model_id,
             )
         except ManagerClassificationContractError as exc:
             try:
@@ -573,6 +592,8 @@ class _VerticalDecisionMixin:
                     decision.workflow_mode = _repository_workflow_mode(
                         decision.workflow_mode
                     )
+                    if decision.workflow_mode != "direct":
+                        decision.start_stage = ""
                 if (
                     contract.ground_before_handoff
                     and _software_grounding_required(decision.workflow_mode)
@@ -633,6 +654,12 @@ class _VerticalDecisionMixin:
                                 sandbox_mode="read-only",
                                 force_safe_mode=True,
                                 skip_git_repo_check=True,
+                                disable_tools=True,
+                                extra_args=(
+                                    ["--ephemeral"]
+                                    if backend_name == "codex"
+                                    else None
+                                ),
                             ),
                             run_label="manager-classify-fast",
                         )
@@ -668,6 +695,7 @@ class _VerticalDecisionMixin:
                         persisted_research_direction_mode
                     ),
                     allow_persisted_change=allow_route_contract_change,
+                    project_root=self.project_root,
                 )
                 if (
                     fast_route is not None
@@ -679,6 +707,7 @@ class _VerticalDecisionMixin:
                         vertical=fast_route.vertical,
                         domain=fast_route.domain,
                         workflow_mode=fast_route.workflow_mode,
+                        start_stage=fast_route.start_stage,
                         adaptation_reason=fast_route.rationale,
                         execution_task=task.strip(),
                         research_target_level=fast_route.research_target_level,
@@ -686,6 +715,12 @@ class _VerticalDecisionMixin:
                             fast_route.research_direction_mode
                         ),
                         target_venue=fast_route.target_venue,
+                        require_independent_review=(
+                            fast_route.require_independent_review
+                        ),
+                        precise_constraints=fast_route.precise_constraints,
+                        exclusions=fast_route.exclusions,
+                        ambiguities=fast_route.ambiguities,
                     ))
 
         prompt = build_vertical_decision_prompt(
@@ -719,7 +754,7 @@ class _VerticalDecisionMixin:
                 "default",
             ]
             if backend_name == "copilot"
-            else None
+            else (["--ephemeral"] if backend_name == "codex" else None)
         )
         options = RunnerOptions(
             model=manager_model,
@@ -782,6 +817,7 @@ class _VerticalDecisionMixin:
                     persisted_research_direction_mode
                 ),
                 allow_persisted_change=allow_route_contract_change,
+                project_root=self.project_root,
             )
             if route_decision is None:
                 from .classification_contract import STRUCTURED_DECISION_CLAUSE
@@ -844,8 +880,10 @@ class _VerticalDecisionMixin:
                 result, decision = invoke_grounded_route(
                     prompt
                     + "\n\n## Decision-field correction\n"
-                    "The prior decision event used an invalid capability identity. "
-                    "Record one complete Manager decision event again. If choosing an "
+                    "The prior decision event violated this exact contract field: "
+                    f"{exc.contract_field or 'decision'} — {exc.cause}. "
+                    "Correct it and record one complete Manager decision event again. "
+                    "If choosing an "
                     "existing project domain, put its exact slug in `vertical` and "
                     "leave `domain` empty. `domain` may only name an optional research "
                     "domain listed above.",
@@ -934,7 +972,7 @@ class _VerticalDecisionMixin:
 
     # ---- split into the vertical's Stage template ----
     def plan_stages(self, vertical: str) -> list[str]:
-        """The vertical's Stage list (research → the 8-stage paper pipeline).
+        """Return the selected vertical's own ordered stages.
 
         Reads the validated vertical contract. Missing stages or a broken
         provider fail visibly; substituting another vertical would change the
@@ -1032,6 +1070,7 @@ class _VerticalDecisionMixin:
                     stages=list(proposal.stages),
                     domain="",
                     workflow_mode=decision.workflow_mode,
+                    start_stage=decision.start_stage,
                     execution_task=decision.execution_task,
                     require_independent_review=decision.require_independent_review,
                     proposed_domain=proposal, pending_confirmation=True,
@@ -1044,6 +1083,7 @@ class _VerticalDecisionMixin:
                 _old_vertical=old_vertical,
                 execution_task=decision.execution_task,
                 workflow_mode=decision.workflow_mode,
+                start_stage=decision.start_stage,
             )
             division.require_independent_review = (
                 decision.require_independent_review
@@ -1062,7 +1102,6 @@ class _VerticalDecisionMixin:
         from ..verticals._data_domain import (
             load_data_domain,
             materialize_learned_data_domain,
-            revise_data_domain_stages,
         )
 
         materialize_learned_data_domain(
@@ -1079,25 +1118,7 @@ class _VerticalDecisionMixin:
             primary_pipeline_state_path(self.project_root),
             legacy_pipeline_state_path(self.project_root),
         ]
-        domain_path = (
-            self.project_root / "research" / "DOMAINS" / f"{vertical}.json"
-        )
-        index_path = self.project_root / "research" / "DOMAINS" / "INDEX.json"
-        adapted = bool(
-            decision.adapted_stages
-            and load_data_domain(vertical, self.project_root) is not None
-        )
-        restore_paths = list(pipeline_states)
-        if adapted:
-            restore_paths.extend((domain_path, index_path))
-        with _restore_files_on_error(restore_paths):
-            if adapted:
-                revise_data_domain_stages(
-                    self.project_root,
-                    vertical,
-                    stages=decision.adapted_stages,
-                    reason=decision.adaptation_reason or task,
-                )
+        with _restore_files_on_error(pipeline_states):
             stages = self.plan_stages(vertical)
             persist_vertical(
                 self.project_root,
@@ -1106,13 +1127,15 @@ class _VerticalDecisionMixin:
                 research_target_level=decision.research_target_level or None,
                 research_direction_mode=decision.research_direction_mode or None,
                 workflow_mode=decision.workflow_mode,
+                start_stage=decision.start_stage,
                 target_venue=decision.target_venue or None,
+                allow_research_direction_change=force_stage_reset,
             )
             vertical_select.reset_stage_for_new_intent(
                 self.project_root,
                 old_vertical=old_vertical,
                 new_vertical=vertical,
-                force_replacement=force_stage_reset or adapted,
+                force_replacement=force_stage_reset,
                 evidence_root=self.execution_workdir,
             )
             self._adopt_operator_objective(vertical, decision, task)
@@ -1123,6 +1146,7 @@ class _VerticalDecisionMixin:
             kind=self._kind_for(vertical),
             stages=stages,
             workflow_mode=decision.workflow_mode,
+            start_stage=decision.start_stage,
             execution_task=decision.execution_task,
             require_independent_review=decision.require_independent_review,
             learned_vertical_status=(
@@ -1206,6 +1230,7 @@ class _VerticalDecisionMixin:
         _old_vertical: str | None = None,
         execution_task: str = "",
         workflow_mode: str = "staged",
+        start_stage: str = "",
         _lock_held: bool = False,
     ) -> Any:
         """Write the authored data domain to disk and persist it as the active
@@ -1227,6 +1252,7 @@ class _VerticalDecisionMixin:
                 _old_vertical=_old_vertical,
                 execution_task=execution_task,
                 workflow_mode=workflow_mode,
+                start_stage=start_stage,
             )
 
     def _commit_domain_locked(
@@ -1237,6 +1263,7 @@ class _VerticalDecisionMixin:
         _old_vertical: str | None,
         execution_task: str,
         workflow_mode: str,
+        start_stage: str,
     ) -> Any:
         from ..verticals._data_domain import write_data_domain
         from ._core import Division
@@ -1278,6 +1305,7 @@ class _VerticalDecisionMixin:
                 self.project_root,
                 proposal.name,
                 workflow_mode=workflow_mode,
+                start_stage=start_stage,
             )
             vertical_select.reset_stage_for_new_intent(
                 self.project_root,
@@ -1293,6 +1321,7 @@ class _VerticalDecisionMixin:
                 or str(getattr(proposal, "execution_task", "") or "")
             ),
             workflow_mode=workflow_mode,
+            start_stage=start_stage,
             pending_confirmation=False,
             learned_vertical_status="candidate",
         )

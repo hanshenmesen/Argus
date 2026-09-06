@@ -143,7 +143,7 @@ def test_direct_reviewer_uses_contract_not_stage_pipeline(tmp_path) -> None:
     )
 
     assert reviewer.last_prompt_block_stats["stage_checklist"]["chars"] == 0
-    assert "done` closes a bounded direct task" in prompt
+    assert "done` closes a direct task" in prompt
     assert "## Upstream defects" not in prompt
 
 

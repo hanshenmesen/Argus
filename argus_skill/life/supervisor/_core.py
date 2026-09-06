@@ -122,8 +122,6 @@ _price_for = price_for
 
 
 
-# Compatibility constants re-exported from ``life.supervisor``.
-_PLANNER_RECENT_HISTORY_WINDOW = 20
 # Plan-cycle outcome sentinels returned by ``_plan_next_work`` and consumed
 # by ``run()``. Kept as a small named set (not bare string literals scattered
 # across call sites) so the control flow stays auditable.
@@ -234,6 +232,10 @@ class LifeSupervisor(
         # the moment a real mission runs.
         self._consecutive_idle_planner_cycles = 0
         self._suggested_sleep_s = 0.0
+        # Dependency keys the last planner DAG named that matched no backlog
+        # item or durable job. They were dropped rather than rejecting the
+        # plan; the next planner prompt says so once, then this clears.
+        self._planner_dropped_dependency_keys: list[tuple[str, list[str]]] = []
         self._parallel_plan_fingerprint: tuple[tuple[str, ...], ...] | None = None
         self._parallel_plan_after = 0.0
         # Wall-clock (monotonic) of the first idle pass in the current idle
@@ -724,45 +726,6 @@ class LifeSupervisor(
                 )
                 stopped_by = idle_stop
                 break
-            # Early auto-stop: if this is an EMNLP project and the gate
-            # already passes, stop immediately — don't run any more ticks
-            # or planner cycles.  This prevents the planner from inventing
-            # new work (lint, refactor, etc.) after the paper is done.
-            if (
-                self.config.continuous
-                and self.config.continuous_objective
-                and self._effective_final_certification_gate(self._artifact_root())
-                and self._journal_has_final_certification()
-            ):
-                # This fires before every tick, and the daemon then disables
-                # continuous mode for good, so a campaign that certifies once
-                # can never act again -- including on anything the operator
-                # says afterwards. run-04 certified a 4,176-word paper using
-                # four of its seven figures, and every note sent to it for the
-                # next eight hours went into an inbox nothing would read; it
-                # took hand-editing continuous.json to bring it back.
-                #
-                # Someone writing to a finished campaign is asking for more
-                # work. Consuming that is not second-guessing the
-                # certification, it is the only reading of an operator message
-                # that leaves the operator any say.
-                operator_input = self._drain_user_inbox(max_messages=1)
-                if operator_input:
-                    carryover = getattr(self, "_operator_guidance_carryover", None)
-                    if carryover is None:
-                        carryover = []
-                        self._operator_guidance_carryover = carryover
-                    carryover.extend(operator_input)
-                    self._emit_status(
-                        "certified complete, and the operator has asked for more"
-                    )
-                    self._reset_idle_backoff()
-                else:
-                    self._emit_status(
-                        "auto-stop: EMNLP gate passes, project complete"
-                    )
-                    stopped_by = "project_done"
-                    break
             try:
                 outcome = self.tick()
             except Exception as exc:  # noqa: BLE001
@@ -834,24 +797,21 @@ class LifeSupervisor(
                         self._emit_status(gate_reason)
                         stopped_by = gate_reason
                         break
+                    # A bounded completion certificate is already a persisted
+                    # Manager completion, so no new completion adjudication is
+                    # needed and the Planner must not invent follow-up work.
                     bounded_completion = self._bounded_completion_reason()
                     if bounded_completion:
-                        self._emit_status(
-                            f"auto-stop: {bounded_completion}"
+                        completion = self._emit_bounded_project_completion(
+                            bounded_completion
                         )
-                        stopped_by = "project_done"
-                        break
-                    # Auto-stop: if the EMNLP gate already passes, the
-                    # project is done — don't ask the planner to invent
-                    # more work.
-                    if (
-                        self.config.final_certification_gate
-                        and self._journal_has_final_certification()
-                    ):
-                        self._emit_status(
-                            "planner: project done — EMNLP gate passes"
-                        )
-                        stopped_by = "project_done"
+                        if completion is False:
+                            self._emit_status(
+                                f"manager: project complete — {bounded_completion}"
+                            )
+                            stopped_by = "project_done"
+                        else:
+                            stopped_by = "planner_retry"
                         break
                     planned = self._plan_next_work()
                     if planned == "daemon_handoff":
@@ -910,7 +870,8 @@ class LifeSupervisor(
                     stopped_by = "backlog_empty"
                     break
                 continue
-            results.append(outcome)
+            if outcome.get("status") != "claim_lost":
+                results.append(outcome)
             if outcome.get("status") in {
                 # Nothing ran and the item is still there, so re-selecting it
                 # immediately just loses the claim again. run-07-panel emitted 154
@@ -1340,13 +1301,18 @@ class LifeSupervisor(
         """Promote the last verified mission output only after project_done."""
         latest: dict[str, Any] = {}
         try:
-            for entry in reversed(self.memory.journal.tail(80)):
+            # Settlement-scoped tail: journal chatter (planner cycles, waiting
+            # heartbeats) must not push the winning settlement out of view.
+            # The ``success is True`` check stays literal: the kind projection
+            # defaults a missing ``success`` to complete, and a delivery must
+            # only ever promote an explicitly successful settlement.
+            for entry in reversed(
+                self.memory.journal.tail_settlements(
+                    8, kinds=("mission_complete",)
+                )
+            ):
                 extra = getattr(entry, "extra", None)
-                if (
-                    getattr(entry, "kind", "") == "mission_complete"
-                    and isinstance(extra, dict)
-                    and extra.get("success") is True
-                ):
+                if isinstance(extra, dict) and extra.get("success") is True:
                     latest = extra
                     break
         except Exception:  # noqa: BLE001 - delivery presentation is optional
@@ -1458,6 +1424,20 @@ class LifeSupervisor(
                 "delivery_id": event["delivery_id"],
             })
             return False
+        if details.get("project_done") is True:
+            report_result = self._manager_publish_project_report(reason)
+            if report_result != "reported":
+                self._emit({
+                    "type": EventType.LIFE_PLANNER_ERROR,
+                    "cycle": details.get("cycle", self._planning_cycles),
+                    "error": (
+                        "project completion was recorded, but the post-completion "
+                        "Manager report is still pending"
+                    ),
+                    "reason": reason,
+                    "delivery_id": event["delivery_id"],
+                })
+                return False
         try:
             from ...core.metrics import metrics_root_for_project, record_metric
 
@@ -1543,6 +1523,12 @@ class LifeSupervisor(
                 "delivery_id": delivery_id,
             })
             return True, _PLAN_RETRY
+        if event.get("project_done") is True:
+            report_result = self._manager_publish_project_report(
+                str(event.get("reason") or "")
+            )
+            if report_result != "reported":
+                return True, _PLAN_RETRY
         try:
             mark_planner_verdict_delivered(self.memory.root, record)
         except OSError as exc:
@@ -1571,7 +1557,10 @@ class LifeSupervisor(
             event_type = str(event.get("type") or "")
             if event_type == EventType.LIFE_BUDGET_PAUSE:
                 self._publish_budget_pause_message(event)
-            elif event_type == EventType.LIFE_MISSION_COMPLETED:
+            elif (
+                event_type == EventType.LIFE_MISSION_COMPLETED
+                and event.get("certification_recovered") is not True
+            ):
                 self._publish_mission_completion_message(event)
             elif (
                 event_type == EventType.LIFE_PLANNER_VERDICT
@@ -1705,6 +1694,23 @@ class LifeSupervisor(
             )
             delivery_ready = bool(
                 delivery and isinstance(delivery.get("primary_target"), dict)
+            )
+            primary_target = (
+                delivery.get("primary_target")
+                if isinstance(delivery, dict)
+                else None
+            )
+            delivery_path = (
+                str(primary_target.get("path") or "").strip()
+                if isinstance(primary_target, dict)
+                else ""
+            )
+            delivery_line = (
+                f"交付文件: {delivery_path}"
+                if chinese and delivery_path
+                else f"Deliverable: {delivery_path}"
+                if delivery_path
+                else ""
             )
             overall_complete = bool(
                 success
@@ -1866,6 +1872,7 @@ class LifeSupervisor(
                     for part in (
                         result,
                         summary_line,
+                        delivery_line,
                         continuation,
                     )
                     if part
@@ -1895,9 +1902,7 @@ class LifeSupervisor(
     def _publish_budget_pause_message(self, event: dict[str, Any]) -> None:
         """Surface a durable, deduplicated budget pause in the Manager chat."""
         try:
-            import hashlib
-
-            from ...core.operator_messages import publish_operator_message
+            from ...core.operator_messages import publish_operator_message, uses_cjk
 
             project = getattr(self.memory, "project", None)
             life_dir = getattr(project, "root", None) or getattr(self.memory, "root", None)
@@ -1906,17 +1911,18 @@ class LifeSupervisor(
             item_id = str(event.get("item_id") or "")
             title = str(event.get("title") or "current task").strip()
             reason = str(event.get("reason") or "budget cap reached").strip()
-            signature = hashlib.sha256(f"{item_id}\0{reason}".encode("utf-8")).hexdigest()[:16]
+            chinese = uses_cjk(f"{title}\n{reason}")
             text = (
-                "Budget pause · 预算不足，任务已暂停。\n"
-                f"Task: {title}\n"
-                f"Reason: {reason}\n"
-                "任务状态与 CHECKPOINT.md 已保留；提高项目预算后可以继续。"
+                f"项目已达到预算上限，任务已暂停：{title}。\n"
+                "现有进度已保存；提高项目预算或缩小任务后即可继续。"
+                if chinese
+                else f"Paused because this project reached its budget limit: {title}.\n"
+                "Existing work is saved; raise the project budget or narrow the task to continue."
             )
             publish_operator_message(
                 life_dir,
                 text=text,
-                message_id=f"budget-pause-{signature}",
+                message_id=f"budget-pause-{item_id}-{reason}",
                 event_fields={
                     "budget_pause": True,
                     "item_id": item_id,
@@ -1973,6 +1979,9 @@ class LifeSupervisor(
                 return
             self._parallel_plan_after = now + max(
                 float(self.config.poll_interval_seconds),
+                # Spare-slot planning throttles on idle-poll semantics, so it
+                # deliberately stays on this cap rather than the operator-wait
+                # turn re-grant constant that was split out of it.
                 _IDLE_BACKOFF_CAP_SECONDS,
             )
             self._plan_next_work()

@@ -465,6 +465,13 @@ class EventJournal:
         r'"(?:type|canonical_type)"\s*:\s*"(?:user\.note|'
         r'mission\.(?:started|completed)|life\.(?:mission|planner|budget|lifecycle)\.[^"]+)"'
     )
+    # Mission settlements only. Retained histories carry both the canonical
+    # ``life.mission.completed`` spelling and the legacy ``mission.completed``
+    # alias, so the sparse fast paths must match either.
+    _SETTLEMENT_RAW_MARKERS = (b"mission.completed",)
+    _SETTLEMENT_RG_PATTERN = (
+        r'"(?:type|canonical_type)"\s*:\s*"(?:life\.)?mission\.completed"'
+    )
     _TOTAL_COST_CACHE_MAX_ENTRIES = 32
 
     def __init__(self, path: Path) -> None:
@@ -589,7 +596,7 @@ class EventJournal:
     def all(self) -> list[JournalEntry]:
         return [JournalEntry.from_jsonable(r) for r in self._rows()]
 
-    def tail(self, n: int = 20) -> list[JournalEntry]:
+    def tail(self, n: int) -> list[JournalEntry]:
         if n <= 0:
             return []
         events = _read_jsonl_tail_history(
@@ -599,6 +606,143 @@ class EventJournal:
             raw_predicate=self._might_be_journal_event,
             raw_markers=self._RAW_EVENT_MARKERS,
             rg_pattern=self._RG_PATTERN,
+        )
+        return [
+            entry for row in events
+            if (entry := self._entry_from_event(row)) is not None
+        ]
+
+    def tail_kinds(self, n: int, *, kinds: Iterable[str]) -> list[JournalEntry]:
+        """Last ``n`` journal entries whose projected ``kind`` is in ``kinds``.
+
+        Only matching entries occupy window slots, so journal-level chatter
+        (planner cycles, waiting heartbeats) landing in between cannot shrink
+        the window — a plain ``tail(n)`` + post-filter systematically loses
+        older matches to that noise. Unlike :meth:`tail_settlements`, this
+        spans the full journal projection, so kinds with non-settlement event
+        sources (e.g. ``budget_pause`` from ``life.budget.pause``) still
+        qualify. Spans every retained rollover generation.
+        """
+        if n <= 0:
+            return []
+        wanted = frozenset(kinds)
+
+        def _is_wanted_kind(row: dict[str, Any]) -> bool:
+            # Derive the same kind projection the returned entries carry, so
+            # the filter and the caller reason about identical labels.
+            entry = self._entry_from_event(row)
+            return entry is not None and entry.kind in wanted
+
+        events = _read_jsonl_tail_history(
+            self.path,
+            n,
+            predicate=_is_wanted_kind,
+            raw_predicate=self._might_be_journal_event,
+            raw_markers=self._RAW_EVENT_MARKERS,
+            rg_pattern=self._RG_PATTERN,
+        )
+        return [
+            entry for row in events
+            if (entry := self._entry_from_event(row)) is not None
+        ]
+
+    def tail_settlements(
+        self,
+        n: int,
+        *,
+        kinds: Iterable[str] | None = None,
+    ) -> list[JournalEntry]:
+        """Last ``n`` mission-settlement entries across the whole journal.
+
+        Only ``life.mission.completed`` events occupy window slots: the
+        planner failure quarantine reasons over mission settlements, and its
+        lookback must not shrink because journal-level chatter (planner
+        cycles, waiting heartbeats) landed in between. When ``kinds`` is
+        given, only settlements whose projected :class:`JournalEntry` ``kind``
+        is in it occupy window slots — the failure quarantine passes exactly
+        its quarantine-or-release kinds so neutral settlements (budget or
+        provider pauses, iteration requeues) cannot evict an older failure
+        out of a threshold-sized window. Spans every retained rollover
+        generation and covers both the canonical spelling and the legacy
+        ``mission.completed`` alias.
+        """
+        if n <= 0:
+            return []
+        wanted = None if kinds is None else frozenset(kinds)
+
+        def _is_settlement(row: dict[str, Any]) -> bool:
+            etype = canonical_event_type(
+                row.get("canonical_type") or row.get("type")
+            )
+            if etype != EventType.LIFE_MISSION_COMPLETED:
+                return False
+            if wanted is None:
+                return True
+            # Derive the same kind projection the returned entries carry, so
+            # the filter and the caller reason about identical labels.
+            entry = self._entry_from_event(row)
+            return entry is not None and entry.kind in wanted
+
+        events = _read_jsonl_tail_history(
+            self.path,
+            n,
+            predicate=_is_settlement,
+            raw_markers=self._SETTLEMENT_RAW_MARKERS,
+            rg_pattern=self._SETTLEMENT_RG_PATTERN,
+        )
+        return [
+            entry for row in events
+            if (entry := self._entry_from_event(row)) is not None
+        ]
+
+    def tail_for_item(
+        self,
+        item_id: str,
+        n: int,
+        *,
+        kinds: Iterable[str] | None = None,
+    ) -> list[JournalEntry]:
+        """Last ``n`` mission-settlement entries journaled for one backlog item.
+
+        Only ``life.mission.completed`` events count: those are the entries the
+        replan-streak guard reasons about, and a per-item tail must not shrink
+        just because unrelated journal-level traffic (planner cycles, parallel
+        missions) landed in between. When ``kinds`` is given, only settlements
+        whose projected :class:`JournalEntry` ``kind`` is in it occupy window
+        slots — the replan-streak guard passes exactly its count-or-break kinds
+        so neutral settlements (budget/provider/research pauses) cannot evict
+        an older replan out of a threshold-sized window. Spans every retained
+        rollover generation.
+        """
+        item_id = str(item_id or "")
+        if n <= 0 or not item_id:
+            return []
+        raw_marker = item_id.encode("utf-8")
+        wanted = None if kinds is None else frozenset(kinds)
+
+        def _is_item_settlement(row: dict[str, Any]) -> bool:
+            etype = canonical_event_type(
+                row.get("canonical_type") or row.get("type")
+            )
+            if etype != EventType.LIFE_MISSION_COMPLETED:
+                return False
+            if str(row.get("item_id") or row.get("id") or "") != item_id:
+                return False
+            if wanted is None:
+                return True
+            # Derive the same kind projection the returned entries carry, so
+            # the filter and the caller reason about identical labels.
+            entry = self._entry_from_event(row)
+            return entry is not None and entry.kind in wanted
+
+        events = _read_jsonl_tail_history(
+            self.path,
+            n,
+            predicate=_is_item_settlement,
+            raw_predicate=lambda raw: raw_marker in raw,
+            # Item ids are plain uuid hex (``BacklogItem.new_id``), so the id
+            # itself is a regex-safe ripgrep pattern for sparse per-item rows.
+            rg_pattern=item_id,
         )
         return [
             entry for row in events
@@ -914,7 +1058,7 @@ class BacklogItem:
             status = "pending"
         objective = str(row.get("objective", ""))
         return cls(
-            id=str(row.get("id", uuid.uuid4().hex[:12])),
+            id=str(row["id"] if "id" in row else cls.new_id()),
             ts=float(row.get("ts", time.time())),
             title=str(row.get("title", "")),
             objective=objective,
@@ -1269,6 +1413,10 @@ class Backlog:
     def add(self, item: BacklogItem) -> BacklogItem:
         with self._locked():
             items = self._load()
+            # A freshly enqueued item has no journal history to migrate, so
+            # its zero streak is authoritative from the start. The dataclass
+            # default stays False: it marks pre-upgrade rows loaded from disk.
+            item.replan_streak_tracked = True
             items.append(item)
             self._validate_no_dependency_cycles(items)
             self._save(items)
@@ -1289,6 +1437,9 @@ class Backlog:
             duplicate = next((item_id for item_id in ids if item_id in existing), None)
             if duplicate is not None:
                 raise ValueError(f"backlog item already exists: {duplicate}")
+            for item in batch:
+                # Same as add(): new rows never need journal migration.
+                item.replan_streak_tracked = True
             items.extend(batch)
             self._validate_no_dependency_cycles(items)
             self._save(items)
@@ -1319,6 +1470,35 @@ class Backlog:
                 item.status = "superseded"
                 item.finished_ts = now
                 item.superseded_by_plan_id = replacement_id
+                item.superseded_reason = reason
+                superseded.append(item.id)
+            if superseded:
+                self._save(items)
+        return tuple(superseded)
+
+    def supersede_items(
+        self,
+        *,
+        item_ids: Iterable[str],
+        reason: str,
+        superseded_by_plan_id: str,
+    ) -> tuple[str, ...]:
+        """Atomically retire named items, leaving running and terminal work alone."""
+        selected = set(item_ids)
+        superseded: list[str] = []
+        with self._locked():
+            items = self._load()
+            now = time.time()
+            for item in items:
+                if (
+                    item.id not in selected
+                    or item.status in _TERMINAL_STATUSES
+                    or item.status == "running"
+                ):
+                    continue
+                item.status = "superseded"
+                item.finished_ts = now
+                item.superseded_by_plan_id = superseded_by_plan_id
                 item.superseded_reason = reason
                 superseded.append(item.id)
             if superseded:
@@ -1474,6 +1654,11 @@ class Backlog:
                 archived.superseded_reason = reason
                 terminal_updates.append(archived)
             items.extend(terminal_updates)
+            for item in replacements:
+                # Same as Backlog.add(): a freshly inserted replacement row has
+                # no journal history to migrate, so its zero replan streak is
+                # authoritative and the first settlement skips the journal scan.
+                item.replan_streak_tracked = True
             items.extend(replacements)
             self._save(items)
 
@@ -1778,6 +1963,10 @@ class Backlog:
                 # Append the resolved terminal revision; history() selects the
                 # latest row for this stable id.
                 items.append(blocked)
+            # Same as Backlog.add(): the continuation is a brand-new row with
+            # no journal history, so its zero replan streak is authoritative
+            # and the first settlement skips the journal migration scan.
+            continuation.replan_streak_tracked = True
             items.append(continuation)
             self._validate_no_dependency_cycles(items)
             self._save(items)
@@ -1893,12 +2082,8 @@ class Backlog:
                     self._save(items)
                 return None
             ready.sort(key=lambda it: (it.priority, it.ts))
-            head = (
-                next((item for item in ready if item.id == expected_id), None)
-                if expected_id
-                else ready[0]
-            )
-            if head is None:
+            head = ready[0]
+            if expected_id and head.id != expected_id:
                 return None
             head.status = "running"
             head.started_ts = time.time()
@@ -1990,6 +2175,11 @@ class Backlog:
                     it.started_ts = None
                     it.finished_ts = None
                     it.last_error = ""
+                    # An accepted cycle re-armed the item, which the settlement
+                    # journals as mission_iterated — forward progress, so the
+                    # replan streak restarts from an authoritative zero.
+                    it.consecutive_replans = 0
+                    it.replan_streak_tracked = True
                     out = it
                     break
             if out is not None:
@@ -2356,14 +2546,9 @@ class LifeMemory:
         self,
         *,
         max_entries: int = 3,
-        recency_n: int = 30,
     ) -> list[JournalEntry]:
         """Return the newest journal entries as non-authoritative context."""
-        return _recent_journal(
-            self.journal,
-            max_entries=max_entries,
-            recency_n=recency_n,
-        )
+        return _recent_journal(self.journal, max_entries=max_entries)
 
     @property
     def failure_experiences(self):
@@ -2742,13 +2927,8 @@ class ProjectMemory:
         self,
         *,
         max_entries: int = 3,
-        recency_n: int = 30,
     ) -> list[JournalEntry]:
-        return _recent_journal(
-            self.memory,
-            max_entries=max_entries,
-            recency_n=recency_n,
-        )
+        return _recent_journal(self.memory, max_entries=max_entries)
 
     @property
     def failure_experiences(self):
@@ -2925,13 +3105,10 @@ def _recent_journal(
     journal: EventJournal,
     *,
     max_entries: int,
-    recency_n: int,
 ) -> list[JournalEntry]:
-    # Return the most recent entries (newest first), bounded by both
-    # ``recency_n`` (how far back to look) and ``max_entries`` (how many to
-    # surface).
-    recent = journal.tail(recency_n)
+    # Return the most recent ``max_entries`` entries, newest first.
+    recent = journal.tail(max_entries)
     if not recent:
         return []
     # tail() yields oldest→newest; surface newest first.
-    return list(reversed(recent))[:max_entries]
+    return list(reversed(recent))

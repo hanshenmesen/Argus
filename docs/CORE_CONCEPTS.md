@@ -6,6 +6,9 @@ at commit `ae2daa1fbc2c918b4e7126151fe55eb68fd0cb98`
 `plugins/argus/CONTEXT.md` glossary, which can link here for this runtime model.
 Chosen model: `Operator -> Projects -> Missions -> Roles -> role/provider sessions or turns`.
 
+The OperatorContext storage-root clarification below was updated against main
+on 2026-09-06; the original source references retain their baseline revision.
+
 ```
 Operator
   -> Projects
@@ -84,15 +87,19 @@ authority.
 
 ## OperatorContext boundary
 
-`OperatorContextStore` is physically instantiated with one `life_dir` and writes
+`OperatorContextStore` is instantiated with one caller-selected root and writes
 `operator_context.jsonl`, `operator_context.json`, and `operator_context.lock`
 under that directory. Records carry `mission`, `project`, or `global` labels, and
 projections sort by scope precedence, filter by role, and bind bounded
 directives to the current mission
-[`argus_skill/core/operator_context.py:15-476`]. In the current implementation,
-`global` affects precedence and visibility within that project state directory;
-it does not automatically create one Operator-level record shared across all
-Projects. That is an implementation boundary, not a criticism of the concept.
+[`argus_skill/core/operator_context.py`]. The label `global` does not replicate
+a record between stores. However, the caller can select the shared global root:
+`MemoryBundle.root` returns `global_mem.root`, and mission preludes use that root
+when building operator context
+[`argus_skill/life/memory.py`,
+`argus_skill/life/supervisor/_mission_execution_runtime.py`]. Therefore the store
+is not always project-local, and a shared-root directive can affect multiple
+projects that consume it.
 
 ## Concept-to-storage mapping
 
@@ -104,4 +111,4 @@ Projects. That is an implementation boundary, not a criticism of the concept.
 | Events | `events.jsonl` and retained rollovers under `life_dir`; this is the durable replay surface for supervisor/runtime events. |
 | Handoffs | `handoffs/<mission-id>/` contains `mission.json`, `CHECKPOINT.md`, `frontier.json`, `latest.json`, and round handoffs [`argus_skill/life/context_packet.py:17-344`]. |
 | Role sessions | `role-sessions/<role>.json` capsules, including Planner, Engineer, Reviewer, and teammate state where a role has a durable provider context. |
-| Operator context | `operator_context.jsonl` ledger plus `operator_context.json` projection and lock in the same project state directory. |
+| Operator context | `operator_context.jsonl` ledger plus `operator_context.json` projection and lock under the caller-selected project or shared global root. |

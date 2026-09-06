@@ -21,7 +21,7 @@ Every role may discover this Skill, but it does not erase role boundaries:
 - Self may explain or route Team work, but does not execute it unless it is
   explicitly acting as the mission's Engineer/lead.
 
-## Admission gate
+## When a team is worth it
 Form a team only when all of these hold:
 
 - At least two tasks can make useful progress concurrently.
@@ -37,7 +37,7 @@ Use `python -m argus_skill.tools.team`.
 1. Write one JSON object per line in `tasks.jsonl`:
    `{task_id, title, objective, acceptance_check, owns_paths, deps?, priority?, timeout_s?, target?, lower_is_better?, cwd?}`.
    Lower `priority` runs first. Prefix task IDs with the team ID. A task-specific `cwd` wins; otherwise the campaign `--cwd` is used. Set `cwd` only for a task that is its own project tree — a task working inside the campaign tree keeps the campaign `cwd` and takes its private directory through `owns_paths`, or it is cut off from the project state the campaign shares.
-   Use `timeout_s` for genuinely bounded work; the Curator and teammate runner
+   Use `timeout_s` for work with a known finite duration; the Curator and teammate runner
    both enforce it, while omitted/zero retains the campaign default.
 2. Run:
    `form --root <team_root> --team-id <tid> --cwd <workspace> --mission "<objective>" --tasks tasks.jsonl`.
@@ -57,9 +57,9 @@ The lead never manually spawns, claims, waits for, reassigns, or kills teammates
 ## Task-objective contract
 Every task must state:
 
-- the bounded objective, and the separately checkable done condition as the task's `acceptance_check`, naming exactly once the single subject the task must move (the claim, kernel, or artifact id): a vertical's per-mission context block is resolved from the first task field that names exactly one, and a field naming two resolves to none;
+- the objective, and the separately checkable done condition as the task's `acceptance_check`, naming exactly once the single subject the task must move (the claim, kernel, or artifact id): a vertical's per-mission context block is resolved from the first task field that names exactly one, and a field naming two resolves to none;
 - the only paths it may modify;
-- the required artifact/result-shard handoff;
+- the required result shard or output file;
 - the real measurement or verification command;
 - anti-fraud and resource constraints relevant to the task.
 

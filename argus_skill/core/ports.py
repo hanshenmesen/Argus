@@ -6,7 +6,7 @@ seam where ArgusBot's hard-coded ``AgentCliRunner`` used to be, and where
 skill-agent's ``codex_exec(...)`` callable used to be. By making it a
 ``Protocol`` we can plug in:
 
-  * ``AgentCliBackend`` — drives the codex / claude / copilot / opencode / pi /
+  * ``AgentCliBackend`` — drives the codex / claude / copilot / cursor / opencode / pi /
     grok/dsh CLIs.
   * ``MemoryBackend`` — deterministic stub for tests / CI.
 """
@@ -22,7 +22,11 @@ from .models import RunnerOptions, RunnerResult
 # ---------------------------------------------------------------------------
 
 class RunnerBackend(Protocol):
-    """One LLM-CLI invocation. Both engineer and reviewer call this."""
+    """One LLM-CLI invocation with independent handles for parallel review."""
+
+    def fork(self) -> "RunnerBackend":
+        """Create an independent execution handle with the same configuration."""
+        ...
 
     def run_exec(
         self,

@@ -50,7 +50,7 @@ class BudgetCaps:
 
 
 BUDGET_KNOB_DEFAULTS: dict[str, str] = {
-    "ARGUS_SKILL_GLOBAL_DAILY_CAP_USD": "20000.0",
+    "ARGUS_SKILL_GLOBAL_DAILY_CAP_USD": "1000.0",
 }
 
 # Daemon count is not provider concurrency: every backend still obeys its own
@@ -95,7 +95,6 @@ KNOBS: tuple[Knob, ...] = (
     # --- team Curator (resident pool + leaderboard strategy) ---
     Knob("ARGUS_SKILL_CURATOR_BACKEND", "(=RUNNER_BACKEND)", "per-role backend override for the team Curator", "backend"),
     Knob("ARGUS_SKILL_CURATOR_RUNNER_BIN", "(=RUNNER_BIN)", "per-role CLI binary for the team Curator", "backend"),
-    Knob("ARGUS_SKILL_IDEA_PANEL", "(off)", "opt-in cross-lab ideation: models that propose research ideas in parallel, cross-examine each other, then each name the one to run. Set 'backend' or 'backend:model', comma separated (e.g. 'codex,claude' or 'copilot:gpt-5.5,copilot:gemini-3.1-pro-preview' on a single subscription). Blind scoring over 32 candidates found a panel buys spread, not level: the best candidate of the batch and twice the weak ones. Unset, or with fewer than two usable seats, ideation is unchanged", "models", cockpit=True),
     Knob("ARGUS_SKILL_CURATOR_MODEL", "auto", "model for Curator strategy distillation; auto uses the selected backend's default", "models"),
     Knob("ARGUS_SKILL_CURATOR_REASONING_EFFORT", "high", "Curator distillation reasoning effort", "reasoning"),
     Knob("ARGUS_SKILL_CURATOR_DISTILL_INTERVAL_S", "1260", "minimum seconds between Curator strategy updates", "team"),
@@ -183,6 +182,7 @@ KNOBS: tuple[Knob, ...] = (
     Knob("ARGUS_SKILL_MEASURED_MODE", "off", "measured-mode evaluation gating", "lifecycle"),
     Knob("ARGUS_SKILL_SKIP_VAULT_PREFLIGHT", "off", "bypass the capability-vault preflight on daemon start", "lifecycle"),
     Knob("ARGUS_SKILL_REQUIRE_RELEASE_MATCH", "off", "refuse daemon/WebAPI startup when source and built release artifacts differ", "lifecycle"),
+    Knob("ARGUS_SKILL_SOURCE_ROOT", "(unset)", "expected deployment source root: when set, daemon/WebAPI startup refuses a process whose loaded package resolves to a different checkout (rewritten-launcher guard)", "lifecycle"),
     # --- telemetry / notify ---
     Knob("ARGUS_SKILL_ENABLE_TELEGRAM", "off", "enable the Telegram inbound/outbound bridge", "telemetry", cockpit=True),
     Knob("ARGUS_SKILL_TELEGRAM_BOT_TOKEN", "(unset)", "Telegram bot token", "telemetry"),
@@ -255,6 +255,13 @@ _NON_NEGATIVE_INT_KNOBS = frozenset(
 _NON_NEGATIVE_FLOAT_KNOBS = frozenset({
     "ARGUS_SKILL_COPILOT_DAILY_PREMIUM_CAP",
 })
+# A path knob names one absolute filesystem location. ``~`` expands at persist
+# time; a relative path would silently depend on whichever cwd the reading
+# process was started from. Existence is deliberately NOT required: the
+# source-root preflight compares resolved paths and fail-closes, so a
+# configured root that never materializes can only refuse startup, never
+# admit the wrong checkout.
+_PATH_KNOBS = frozenset({"ARGUS_SKILL_SOURCE_ROOT"})
 _SENSITIVE_MARKERS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH")
 _TRUE_VALUES = frozenset(
     {"1", "true", "yes", "on", "enable", "enabled", "开", "开启", "打开", "启用"}
@@ -294,10 +301,11 @@ def resolve_knob(
 def resolve_runner_bin_setting(
     role: str | None = None,
     *,
+    backend: str | None = None,
     env: Mapping[str, str] | None = None,
     persisted: Mapping[str, str] | None = None,
 ) -> str:
-    """Resolve role/shared runner paths with env-before-persisted precedence."""
+    """Resolve a runner path without crossing persisted backend bindings."""
     env_map = env if env is not None else os.environ
     if persisted is None:
         from .knob_store import read_persisted_knobs
@@ -305,16 +313,49 @@ def resolve_runner_bin_setting(
         persisted = read_persisted_knobs()
     role_name = str(role or "").strip().upper()
     role_key = f"ARGUS_SKILL_{role_name}_RUNNER_BIN" if role_name else ""
-    for source, key in (
-        (env_map, role_key),
-        (env_map, "ARGUS_SKILL_RUNNER_BIN"),
-        (persisted, role_key),
-        (persisted, "ARGUS_SKILL_RUNNER_BIN"),
+    for key in (role_key, "ARGUS_SKILL_RUNNER_BIN"):
+        if not key:
+            continue
+        value = str(env_map.get(key, "") or "").strip()
+        if value:
+            return value
+
+    from ..agent_cli.runner_backend import normalize_runner_backend
+
+    def normalized(value: object) -> str:
+        text = str(value or "").strip()
+        return normalize_runner_backend(text) if text else ""
+
+    requested_backend = normalized(backend)
+    if not requested_backend:
+        for key in (
+            f"ARGUS_SKILL_{role_name}_BACKEND" if role_name else "",
+            "ARGUS_SKILL_RUNNER_BACKEND",
+            "ARGUS_SKILL_LIFE_BACKEND",
+        ):
+            requested_backend = normalized(env_map.get(key))
+            if requested_backend:
+                break
+
+    shared_backend = normalized(
+        persisted.get("ARGUS_SKILL_RUNNER_BACKEND")
+        or persisted.get("ARGUS_SKILL_LIFE_BACKEND")
+    )
+    role_backend = normalized(
+        persisted.get(f"ARGUS_SKILL_{role_name}_BACKEND")
+        if role_name
+        else ""
+    ) or shared_backend
+    for key, configured_backend in (
+        (role_key, role_backend),
+        ("ARGUS_SKILL_RUNNER_BIN", shared_backend),
     ):
         if not key:
             continue
-        value = str(source.get(key, "") or "").strip()
-        if value:
+        value = str(persisted.get(key, "") or "").strip()
+        if value and (
+            not requested_backend or requested_backend == configured_backend
+        ):
             return value
     return ""
 
@@ -444,6 +485,13 @@ def normalize_cockpit_knob_value(name: str, value: str) -> str:
     if name in _NON_NEGATIVE_FLOAT_KNOBS:
         number = _parse_budget_value(name, raw)
         return f"{number:g}"
+    if name in _PATH_KNOBS:
+        from pathlib import Path
+
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise ValueError(f"{name} must be an absolute path; got {raw!r}")
+        return str(path)
     if name in _BACKEND_KNOBS:
         backend = raw.lower()
         if backend == "opencod":
@@ -452,6 +500,7 @@ def normalize_cockpit_knob_value(name: str, value: str) -> str:
             "codex",
             "claude",
             "copilot",
+            "cursor",
             "opencode",
             "pi",
             "grok",
@@ -459,7 +508,7 @@ def normalize_cockpit_knob_value(name: str, value: str) -> str:
             "dsh",
         }:
             raise ValueError(
-                f"{name} must be codex, claude, copilot, opencode, pi, grok, qoder, or dsh"
+                f"{name} must be " + ", ".join(SUPPORTED_BACKENDS)
             )
         return backend
     if name in _EFFORT_KNOBS:
@@ -611,7 +660,7 @@ def resolve_role_model(
         # agent-CLI backend, so normalize_runner_backend rejects it.
         return ""
     backend_name = normalize_runner_backend(requested)
-    if backend_name not in _OPENAI_CATALOG_BACKENDS:
+    if not backend_uses_openai_catalog(backend_name, env=env_map):
         return ""
     from ..tools.capability_vault import resolve_route_model
 
@@ -722,7 +771,7 @@ def resolve_role_backend(
     default: str | None = None,
 ) -> str:
     """Resolve a role's agent-CLI backend
-    (codex / claude / copilot / opencode / pi / grok / memory)
+    (codex / claude / copilot / cursor / opencode / pi / grok / memory)
     using Argus's runtime precedence.
 
     Thin wrapper over :func:`resolve_role_backend_with_source` for the callers
@@ -740,11 +789,25 @@ def resolve_manager_reply_model(
 ) -> str:
     """Resolve the high-quality operator-facing Manager SELF model."""
     env_map = env if env is not None else os.environ
-    configured = resolve_knob(
+    resolved = resolve_knob(
         "ARGUS_SKILL_MANAGER_REPLY_MODEL",
         "inherit",
         env=env_map,
-    ).value.strip()
+    )
+    configured = resolved.value.strip()
+    if (
+        resolved.source == "persisted"
+        and any(
+            str(env_map.get(name, "") or "").strip()
+            for name in ("ARGUS_SKILL_MANAGER_MODEL", "ARGUS_SKILL_MODEL")
+        )
+    ):
+        return resolve_role_model(
+            "manager",
+            role_env="ARGUS_SKILL_MANAGER_MODEL",
+            backend=backend,
+            env=env_map,
+        )
     if configured.lower() not in {"", "auto", "inherit", "default"}:
         return configured
     return resolve_role_model(
@@ -757,11 +820,45 @@ def resolve_manager_reply_model(
 
 #: Backends whose model catalog IS the OpenAI catalog, so Argus may name a
 #: specific OpenAI id for its cheap control-plane routes without asking the
-#: operator. ``codex`` and ``copilot`` qualify by construction. ``pi`` /
-#: ``opencode`` / ``claude`` deliberately do NOT: they are provider-agnostic
-#: fronts whose catalog is whatever the operator authenticated (DeepSeek,
-#: Anthropic, a local vLLM), so naming an OpenAI id there misses on every call.
+#: operator. ``copilot`` qualifies by construction.  Codex normally does too,
+#: except when its own config selects a non-OpenAI custom provider such as
+#: DeepSeek; :func:`backend_uses_openai_catalog` handles that exception.
 _OPENAI_CATALOG_BACKENDS = frozenset({"codex", "copilot"})
+
+
+def backend_uses_openai_catalog(
+    backend: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether Argus may safely force an OpenAI model id for ``backend``.
+
+    Codex CLI is also a generic OpenAI-compatible client.  A user can point it
+    at a named custom provider in ``~/.codex/config.toml`` (for example
+    ``model_provider = \"deepseek\"``).  In that mode forcing Argus's
+    ``gpt-5.4-mini``/``gpt-5.5`` defaults makes every turn fail before the
+    Manager can classify it.  Leave the model unset instead, allowing Codex to
+    use its own configured default.  Explicit Argus model knobs still win in
+    the callers above.
+    """
+    normalized = str(backend or "").strip().casefold()
+    if normalized not in _OPENAI_CATALOG_BACKENDS:
+        return False
+    if normalized != "codex":
+        return True
+    try:
+        from ..tools.capability_vault import read_codex_provider_config
+
+        provider = read_codex_provider_config(env)
+    except Exception:  # noqa: BLE001 — preserve legacy Codex behavior on unreadable config
+        return True
+    if provider is None:
+        return True
+    # ``codex`` is Codex's built-in OpenAI provider; ``openai`` is a common
+    # equivalent spelling.  Any other named table has an operator-defined
+    # catalog and must retain its configured default model.
+    return provider.name.strip().casefold() in {"codex", "openai"}
+
 
 #: Knob values that mean "decide for me" rather than naming a model.
 _AUTO_MODEL_SENTINELS = frozenset({"", "auto", "inherit", "default"})
@@ -795,7 +892,22 @@ def resolve_cheap_route_model(
     OpenAI 目录后端；此处统一规则，非 OpenAI 目录的后端回落到角色 model。
     """
     env_map = env if env is not None else os.environ
-    configured = resolve_knob(knob, "auto", env=env_map).value.strip()
+    resolved = resolve_knob(knob, "auto", env=env_map)
+    configured = resolved.value.strip()
+    if (
+        resolved.source == "persisted"
+        and any(
+            str(env_map.get(name, "") or "").strip()
+            for name in (role_env, "ARGUS_SKILL_MODEL")
+            if name
+        )
+    ):
+        return resolve_role_model(
+            role,
+            role_env=role_env,
+            backend=backend,
+            env=env_map,
+        )
     if configured.lower() not in _AUTO_MODEL_SENTINELS:
         return configured
     from ..agent_cli.runner_backend import BACKEND_MEMORY, normalize_runner_backend
@@ -810,7 +922,7 @@ def resolve_cheap_route_model(
         if str(requested).strip().lower() == BACKEND_MEMORY
         else normalize_runner_backend(requested)
     )
-    if backend_name in _OPENAI_CATALOG_BACKENDS:
+    if backend_uses_openai_catalog(backend_name, env=env_map):
         return catalog_default
     return resolve_role_model(
         role,

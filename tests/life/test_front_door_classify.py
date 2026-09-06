@@ -89,7 +89,7 @@ def test_front_door_prompt_has_a_strict_token_efficiency_budget(tmp_path) -> Non
     assert "Ambiguity defaults to no control" in prompt
     assert "FORBID only for an explicit command" in prompt
     assert "ALLOW only when explicitly re-enabled" in prompt
-    assert "conversation, status, bounded inspection" in prompt
+    assert "conversation, status, a quick inspection" in prompt
     assert "finite local task" in prompt
     assert "IMPLEMENT" in prompt
     assert "DEBUG" in prompt
@@ -638,7 +638,7 @@ def test_nonzero_exit_is_safe_default() -> None:
     assert failures == ["Forced restart after hard idle timeout (120s)"]
 
 
-def test_oversized_fast_reply_emits_delivery_diagnostic() -> None:
+def test_oversized_fast_reply_is_delivered() -> None:
     replies: list[str] = []
     diagnostics: list[str] = []
     oversized = "x" * 1601
@@ -654,13 +654,11 @@ def test_oversized_fast_reply_emits_delivery_diagnostic() -> None:
     )
 
     assert (intent, control, route) == (None, None, "simple")
-    assert replies == []
-    assert diagnostics == [
-        "reply exceeded 1600 chars; not delivered (length=1601)"
-    ]
+    assert replies == [oversized]
+    assert diagnostics == []
 
 
-def test_oversized_steer_directive_emits_delivery_diagnostic() -> None:
+def test_oversized_steer_directive_is_delivered() -> None:
     directives: list[str] = []
     diagnostics: list[str] = []
     oversized = "x" * 1601
@@ -678,10 +676,51 @@ def test_oversized_steer_directive_emits_delivery_diagnostic() -> None:
     )
 
     assert (intent, control, route) == (None, "steer", "simple")
-    assert directives == []
-    assert diagnostics == [
-        "steer_directive exceeded 1600 chars; not delivered (length=1601)"
-    ]
+    assert directives == [oversized]
+    assert diagnostics == []
+
+
+def test_sink_exception_records_routing_diagnostic() -> None:
+    diagnostics: list[str] = []
+
+    def _boom_reply(_reply: str) -> None:
+        raise RuntimeError("reply pipe closed")
+
+    def _boom_steer(_directive: str) -> None:
+        raise RuntimeError("steer pipe closed")
+
+    intent, control, route = classify_front_door(
+        "say hello",
+        run_exec=_exec(
+            "CONFIG: NONE\nCONTROL: NONE\nROUTE: SELF\n"
+            "SELF_MODE: REPLY\nREPLY: hello"
+        ),
+        reply_sink=_boom_reply,
+        failure_sink=diagnostics.append,
+    )
+    assert (intent, control, route) == (None, None, "simple")
+    assert any(
+        "reply sink failed" in entry and "reply pipe closed" in entry
+        for entry in diagnostics
+    )
+
+    diagnostics.clear()
+    intent, control, route = classify_front_door(
+        "change the active mission",
+        run_exec=_exec_sequence(
+            "CONFIG: NONE\nCONTROL: STEER\nROUTE: SELF\n"
+            "STEER_DIRECTIVE: focus on the docs",
+            "STEER",
+        ),
+        steering_sink=_boom_steer,
+        failure_sink=diagnostics.append,
+        active_mission=True,
+    )
+    assert (intent, control, route) == (None, "steer", "simple")
+    assert any(
+        "steering sink failed" in entry and "steer pipe closed" in entry
+        for entry in diagnostics
+    )
 
 
 def test_invalid_route_token_preserves_parsed_control() -> None:
@@ -698,6 +737,30 @@ def test_invalid_route_token_preserves_parsed_control() -> None:
     assert diagnostics and diagnostics[0].startswith(
         "route token invalid; control preserved"
     )
+
+
+def test_nonzero_exit_preserves_redacted_runner_diagnostic(monkeypatch) -> None:
+    result = _FakeResult("", exit_code=1)
+    result.fatal_error = ""
+    result.stderr_lines = [
+        '"node" is not recognized as an internal or external command.',
+        "OPENAI_API_KEY=super-secret-value",
+    ]
+    failures: list[str] = []
+    monkeypatch.setenv("OPENAI_API_KEY", "super-secret-value")
+
+    decision = classify_front_door(
+        "hello",
+        run_exec=lambda _prompt: result,
+        failure_sink=failures.append,
+    )
+
+    assert decision == (None, None, "complex")
+    assert len(failures) == 1
+    assert "exit 1" in failures[0]
+    assert "node" in failures[0]
+    assert "super-secret-value" not in failures[0]
+    assert "<REDACTED" in failures[0]
 
 
 def test_prefixes_are_case_insensitive() -> None:

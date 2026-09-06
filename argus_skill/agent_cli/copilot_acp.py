@@ -33,7 +33,9 @@ from ._idle_watchdog import (
     WARNING_STAGE,
     IdleEscalation,
 )
+from ._process_control import background_subprocess_kwargs
 from .models import AgentRunResult, InactivitySnapshot
+from .runner_backend import runner_child_environment
 
 # Prompt inactivity caps are opt-in; a live role turn may think indefinitely.
 _DEFAULT_TIMEOUT_S = 0.0
@@ -281,6 +283,8 @@ class CopilotAcpClient:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=runner_child_environment(self._agent_bin),
+            **background_subprocess_kwargs(),
         )
         self._alive = True
         with self._pending_lock:
@@ -750,6 +754,11 @@ class CopilotAcpClient:
                 allow_persistent=bool(getattr(options, "dangerous_yolo", False)),
             )
             self._active_turn = turn
+            # Expose the parent identity before the first request so live
+            # budget accounting can include this ACP session's nested agents.
+            self._emit_turn_event(turn, {
+                "type": "session.start", "data": {"sessionId": sid},
+            })
             cancelled = {"v": False}
             cancel_reason = {"v": ""}
             cancel_event = threading.Event()

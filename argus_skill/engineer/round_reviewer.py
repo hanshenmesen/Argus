@@ -171,9 +171,59 @@ class RoundReviewerMixin:
             )
             if part
         )
+        from ..reviewer._core import _parallel_final_review_passes
+
+        preliminary_review = _parallel_final_review_passes(
+            getattr(self.reviewer, "runner", self.reviewer),
+            replace(
+                self.reviewer_config,
+                working_dir=str(workdir),
+                artifact_root=str(workdir),
+                narrative_snapshot_root=(
+                    supervised_config.narrative_snapshot_root or None
+                ),
+                review_policy_context="\n".join(
+                    (objective, original_objective or objective, scope, *operator_messages)
+                ),
+            ),
+        )
+        if preliminary_review is not None:
+            enforcement = supervised_config.narrative_review_enforcement
+            if preliminary_review.backend_unavailable and enforcement == "blocking":
+                return preliminary_review
+            authority_note = (
+                "Shadow calibration only: these new semantic-loss and cold-read signals "
+                "cannot be the sole reason for a blocking verdict. Independently verify a "
+                "finding under the existing scientific, visual, language, or venue contract "
+                "before using it to continue the round."
+                if enforcement != "blocking"
+                else (
+                    "Enforcement is enabled: a substantiated scientific loss or reject-level "
+                    "cold-read failure may block certification."
+                )
+            )
+            reviewer_background_context = "\n\n".join(
+                part
+                for part in (
+                    reviewer_background_context,
+                    "## Independent final-paper passes\n"
+                    "These current host-provided read-only assessments are evidence for your integrated "
+                    "verdict. Resolve conflicts yourself; only your verdict controls the "
+                    "round and is persisted to paper/REVIEW.md. The host reuses PDF-only "
+                    "assessments only when their exact rendered input and policy match. "
+                    "Do not launch duplicate specialist passes or repeat a complete PDF "
+                    "inspection; use targeted checks for a concrete contradiction. Always "
+                    "independently check material changes to code, raw evidence, and claims. "
+                    + authority_note
+                    + "\n"
+                    + preliminary_review.reason,
+                )
+                if part
+            )
         started_at = time.monotonic()
         try:
             review = self.reviewer.evaluate(
+                operation="evaluate",
                 objective=objective,
                 original_objective=original_objective or objective,
                 operator_messages=operator_messages,
@@ -182,7 +232,11 @@ class RoundReviewerMixin:
                 session_id=supervised_config.session_id,
                 main_summary=engineer_message or "(no message)",
                 main_error=safe_fatal_error,
-                config=replace(self.reviewer_config, working_dir=str(workdir)),
+                config=replace(
+                    self.reviewer_config,
+                    working_dir=str(workdir),
+                    artifact_root=str(workdir),
+                ),
                 prev_review_summary=_previous_review_summary(state),
                 scope=scope,
                 checkpoint_path=str(checkpoint_path or ""),

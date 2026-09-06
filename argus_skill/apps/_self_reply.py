@@ -424,8 +424,9 @@ class SelfReplyMixin:
                 seed_thread_id=seed_thread_id,
                 lean=mode == "reply",
                 execute_mode=mode if mode in _SELF_EXECUTION_CONTRACTS else "",
+                root_task_id=root_task_id,
             )
-        _phase("Handing off to Planner / Engineer / Reviewer…")
+        _phase("Handing off to the Argus execution pipeline…")
         return None
 
 
@@ -651,6 +652,7 @@ class SelfReplyMixin:
         seed_thread_id: str | None = None,
         lean: bool = False,
         execute_mode: str = "",
+        root_task_id: str | None = None,
     ) -> _Outcome:
         from ..core.role_config import runner_backend_label
         from ..roles.prompts.manager import (
@@ -708,12 +710,11 @@ class SelfReplyMixin:
             prompt = build_simple_prompt(
                 objective=objective,
                 identity_card=memory_prelude,
+                skill_library=libraries.block,
                 mission_status=self._live_mission_status_block(),
                 runtime_context=self._manager_reply_runtime_context("simple-1"),
                 operator_workspace=str(workdir),
             )
-            if libraries.block:
-                prompt = libraries.block + "\n\n" + prompt
             native_skill_paths = [str(path) for path in libraries.native_paths]
             session_root = getattr(self, "_manager_session_root", None)
             read_dirs = (
@@ -923,6 +924,48 @@ class SelfReplyMixin:
             )
         )
         auth_failure = self._consume_auth_failure()
+        delivery = None
+        if success and executing:
+            from ..core.secret_guard import known_secret_values, redact_secrets_text
+            from ..life.delivery import (
+                build_delivery_receipt,
+                referenced_delivery_paths,
+            )
+
+            safe_last_msg = redact_secrets_text(
+                last_msg,
+                known_values=known_secret_values(),
+            )
+            started_at = float(getattr(result, "started_at", 0.0) or 0.0)
+            paths = [
+                path
+                for path in referenced_delivery_paths(workdir, [safe_last_msg])
+                if started_at > 0
+                and (workdir / path).stat().st_mtime >= started_at
+            ]
+            if paths:
+                delivery = build_delivery_receipt(
+                    item_id=str(
+                        getattr(result, "call_id", "")
+                        or root_task_id
+                        or reply_message_id
+                    ),
+                    title=Path(paths[0]).name,
+                    summary=safe_last_msg,
+                    success=True,
+                    overall_complete=True,
+                    status="done",
+                    review_status="not_assessed",
+                    final_submission_certified=False,
+                    workspace=workdir,
+                    state_root=(
+                        Path(self._manager_session_root)
+                        if getattr(self, "_manager_session_root", None)
+                        else workdir
+                    ),
+                    reviewer_artifacts=paths,
+                    artifact_source="solo_output",
+                )
         sink.handle_event({
             "type": "loop.done",
             "text": f"status={status} rounds=1 (simple)",
@@ -935,6 +978,7 @@ class SelfReplyMixin:
             last_thread_id=new_thread_id,
             chat_mode=False,
             auth_failure=auth_failure,
+            delivery=delivery,
         )
 
     def _schedule_self_learning_review(

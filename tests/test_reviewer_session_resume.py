@@ -131,6 +131,37 @@ def test_matching_resume_request_sends_delta_only() -> None:
     assert resumes == [None, "rv1"]
 
 
+def test_review_artifact_changes_keep_session_and_refresh_delta(tmp_path: Path) -> None:
+    from argus_skill.core.pipeline_state import read_pipeline_state, write_pipeline_state
+    from argus_skill.skills.vertical_select import persist_vertical
+
+    persist_vertical(tmp_path, "research")
+    state = read_pipeline_state(tmp_path)
+    state["current_stage"] = "review"
+    write_pipeline_state(tmp_path, state)
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    review_path = paper / "REVIEW.md"
+    review_path.write_text("PRIOR REVIEW CONTENT", encoding="utf-8")
+    backend = MemoryBackend()
+    backend.queue("reviewer", CannedResponse(message=_review_json(), thread_id="rv1"))
+    backend.queue("reviewer", CannedResponse(message=_review_json("done"), thread_id="rv1"))
+    reviewer = Reviewer(backend)
+    config = ReviewerConfig(working_dir=str(tmp_path), active_vertical="research")
+    first = _evaluate(reviewer, config=config)
+    review_path.write_text("CURRENT REVIEW CONTENT HAS CHANGED", encoding="utf-8")
+    _evaluate(
+        reviewer, config=config, round_index=2, resume_thread_id="rv1",
+        prior_static_fingerprint=first.static_fingerprint,
+    )
+    prompts = [p for label, p, _ in backend.history if label == "reviewer"]
+    assert "PRIOR REVIEW CONTENT" in prompts[0]
+    assert "CURRENT REVIEW CONTENT HAS CHANGED" in prompts[1]
+    assert "PRIOR REVIEW CONTENT" not in prompts[1]
+    assert _STATIC_MARKER not in prompts[1]
+    assert [tid for label, tid in backend.resume_history if label == "reviewer"] == [None, "rv1"]
+
+
 def test_stage_change_still_uses_a_fresh_full_prompt() -> None:
     backend = MemoryBackend()
     backend.queue("reviewer", CannedResponse(message=_review_json(), thread_id="rv1"))
