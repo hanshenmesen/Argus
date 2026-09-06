@@ -1378,6 +1378,14 @@ class SkillLoopExecuteMixin:
             last_thread_id=ex_state.new_tid,
             auth_failure=ex_state.auth_fail,
             final_submission_certified=ex_state.final_submission_certified,
+            manuscript_snapshot=(
+                dict(getattr(rounds[-1].review, "manuscript_snapshot", None))
+                if rounds
+                and isinstance(
+                    getattr(rounds[-1].review, "manuscript_snapshot", None), dict
+                )
+                else None
+            ),
             completion_evidence=ex_state.completion_evidence,
             stage_transition=ex_state.stage_transition,
             stage_transition_skipped=ex_state.stage_transition_skipped,

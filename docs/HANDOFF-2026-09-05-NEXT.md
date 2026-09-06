@@ -291,3 +291,16 @@ final_submission 任务 `完成正式重跑并进行最终独立认证` 的 Revi
 LEMP-LI 慢 6.56×，24+12 作为自适应诊断 1.41× [1.02, 2.05] 不算独立确认。
 当日部署链：1ab0a3449（写作标准）→ b3874b30e（去机器味）→ 25d4700a5（新鲜度根目录）
 → 8ff4280fd（辅助检查不阻断）。当前 FuseHead 进程 pid 3994354，revision 8ff4280fd。
+
+## 2026-09-06 · 认证过的终稿在 Planner 完成检查里永远"缺认证"（已修）
+
+Manager 已 complete、PIPELINE_STATE certified 之后，Planner 报 project_done 被 host 拒绝：
+`missing_publishable_reviewer_certification`。复现 `_research_project_done_issue`：journal 里
+那条 final_submission 记录 `final_submission_certified=true`、签名一致，但 `manuscript_snapshot`
+为 None 而 paper/main.tex 存在 → 被跳过。根因：daemon 返回给 supervisor 的 `_Outcome.rounds`
+是轮数（int），结算里 `rounds[-1].review.manuscript_snapshot` 永远取不到。这意味着生产路径下
+任何 research campaign 的完成检查都过不了（测试用的是带 round 记录的假 outcome）。
+修法：`_Outcome` 新增 `manuscript_snapshot`，由 `_runtime_execute` 从最终评审填入；结算改用
+`outcome_manuscript_binding()` 先取该字段再回退到 round 记录。加 tests/life/test_outcome_manuscript_binding.py。
+副作用：拒绝之后 Planner 为满足"再认证前必须有实质修复"排了一条摘要末段改写任务，这本身
+是合理的写作改进，但动机是框架卡住。

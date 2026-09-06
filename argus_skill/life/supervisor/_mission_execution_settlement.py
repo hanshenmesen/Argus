@@ -51,6 +51,25 @@ _REPLAN_STREAK_SETTLEMENT_KINDS = frozenset({
 })
 
 
+def outcome_manuscript_binding(outcome: object) -> dict[str, str] | None:
+    """The manuscript the final Reviewer read, from whichever outcome shape we got.
+
+    The daemon's ``_Outcome`` carries it as ``manuscript_snapshot`` (its
+    ``rounds`` is a count); in-process outcomes carry a list of round records
+    whose last review holds it.
+    """
+    direct = getattr(outcome, "manuscript_snapshot", None)
+    if isinstance(direct, dict) and str(direct.get("sha256") or "").strip():
+        return dict(direct)
+    rounds = getattr(outcome, "rounds", None) or []
+    if isinstance(rounds, (list, tuple)) and rounds:
+        final_review = getattr(rounds[-1], "review", None)
+        candidate = getattr(final_review, "manuscript_snapshot", None)
+        if isinstance(candidate, dict) and str(candidate.get("sha256") or "").strip():
+            return dict(candidate)
+    return None
+
+
 class MissionExecutionSettlementMixin:
     """Repair settlement, stage guard, final status, and journal emission."""
 
@@ -229,15 +248,7 @@ class MissionExecutionSettlementMixin:
             and review_status == "done"
             and state.pipeline_stage_at_start
         ):
-            review_manuscript_binding = None
-            review_rounds = getattr(outcome, "rounds", None) or []
-            if isinstance(review_rounds, (list, tuple)) and review_rounds:
-                final_round_review = getattr(review_rounds[-1], "review", None)
-                candidate_binding = getattr(
-                    final_round_review, "manuscript_snapshot", None
-                )
-                if isinstance(candidate_binding, dict):
-                    review_manuscript_binding = dict(candidate_binding)
+            review_manuscript_binding = outcome_manuscript_binding(outcome)
             try:
                 from ...core.stage_certificate import record_stage_review
 
@@ -1127,14 +1138,9 @@ class MissionExecutionSettlementMixin:
             if final_submission_certified
             else ""
         )
-        final_submission_manuscript_snapshot: dict[str, str] | None = None
-        if final_submission_certified:
-            rounds = getattr(outcome, "rounds", None) or []
-            if isinstance(rounds, (list, tuple)) and rounds:
-                final_review = getattr(rounds[-1], "review", None)
-                candidate = getattr(final_review, "manuscript_snapshot", None)
-                if isinstance(candidate, dict):
-                    final_submission_manuscript_snapshot = dict(candidate)
+        final_submission_manuscript_snapshot: dict[str, str] | None = (
+            outcome_manuscript_binding(outcome) if final_submission_certified else None
+        )
         try:
             remaining_work = any(
                 row.id != item.id

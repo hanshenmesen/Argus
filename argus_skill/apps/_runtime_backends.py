@@ -36,6 +36,12 @@ class _Outcome:
     delivery: dict[str, Any] | None = None
     # Set only when a final-submission mission receives Reviewer ``done``.
     final_submission_certified: bool = False
+    # The manuscript the final Reviewer actually read (path/sha256/recorded_at).
+    # ``rounds`` above is only a count, so the supervisor cannot recover this
+    # from the outcome otherwise; without it the journal records a certified
+    # final submission with no manuscript binding and the research completion
+    # check can never accept it.
+    manuscript_snapshot: dict | None = None
     completion_evidence: str = ""
     # The Manager's stage-transition verdict for this mission completion (the
     # Manager is the sole writer of current_stage). Shape:
