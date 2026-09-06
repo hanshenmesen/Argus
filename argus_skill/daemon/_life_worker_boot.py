@@ -401,6 +401,14 @@ class LifeWorkerBootMixin:
             rf_state.init_continuous = True
             rf_state.init_objective = rf_state.cfg.continuous_objective or rf_state.init_objective
 
+        # The runner was built before this reconciliation, with the launch
+        # default (open-ended unless --bounded). The Manager stage hook reads
+        # that namespace on every mission, so a bounded campaign whose runner
+        # still says open-ended can never complete early: it is advanced stage
+        # by stage into a manuscript it was never asked to write. idea-01
+        # (s-0b1c7fa1) re-ran one ideation mission 144 times in Paper that way.
+        self._rf_sync_runner_campaign_lifetime(rf_state)
+
         # ``resume_continuous`` adopts a campaign only when its objective and
         # vertical match a durable Manager handoff identity. This avoids a fresh
         # provider dependency on every crash recovery / upgrade without trusting
@@ -420,6 +428,17 @@ class LifeWorkerBootMixin:
                 "daemon boot: adopting persisted Manager handoff for continuous generation %d",
                 rf_state.init_source_state.generation,
             )
+
+    @staticmethod
+    def _rf_sync_runner_campaign_lifetime(rf_state: _RunForeverState) -> None:
+        """Give the mission runner the reconciled campaign lifetime."""
+        args = getattr(rf_state.runner, "_args", None)
+        if args is None:
+            return
+        args.open_ended = bool(rf_state.cfg.continuous_open_ended)
+        objective = str(rf_state.init_objective or "").strip()
+        if objective:
+            args.continuous_objective = objective
 
     def _rf_manager_divide_on_boot(self, rf_state: _RunForeverState) -> None:
         """Reset the Manager's codex session, then classify + persist the
