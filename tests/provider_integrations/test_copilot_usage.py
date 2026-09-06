@@ -15,6 +15,7 @@ from argus_skill.core.usage import UsageLedger, build_usage_record
 from argus_skill.provider_integrations.copilot_usage import (
     NANO_AIU_PER_USD,
     capture_copilot_usage_cursor,
+    copilot_store_supports_token_billing,
     find_copilot_usage_near,
     read_copilot_usage_since,
 )
@@ -422,3 +423,9 @@ def test_legacy_premium_only_cli_without_token_store_still_settles(
     assert result.pricing_status == "priced"
     assert result.cost_usd == pytest.approx(0.04)
     assert UsageLedger(project).records()[0].cost_basis == "premium_request"
+
+
+def test_unreadable_existing_store_does_not_establish_premium_only_billing(tmp_path: Path) -> None:
+    db = tmp_path / "session-store.db"
+    db.write_bytes(b"incomplete SQLite file")
+    assert copilot_store_supports_token_billing(db)
