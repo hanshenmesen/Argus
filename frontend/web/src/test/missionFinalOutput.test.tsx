@@ -109,7 +109,10 @@ describe('mission final output', () => {
     const markup = renderToStaticMarkup(
       <MissionControl
         view={view}
-        artifacts={[{ path: 'report.md', name: 'report.md', kind: 'file', exists: true }]}
+        artifacts={[{
+          path: 'report.md', name: 'report.md', kind: 'markdown', exists: true,
+          why: 'Verified report', mime: 'text/markdown', size: body.length, mtime: 6,
+        }]}
         onOpenArtifact={() => {}}
       />,
     );
