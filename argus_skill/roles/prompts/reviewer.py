@@ -365,12 +365,22 @@ def render_reviewer_prompt(
             matched_review_skill_block = review_libraries.block + "\n\n"
     stage = prompt_context.stage
     research_context_block = ""
-    if prompt_context.vertical == "research" and operation == EVALUATE:
-        from ...verticals.research.prompt_policy import active_research_context
+    if prompt_context.vertical and operation == EVALUATE:
+        from ...verticals._base import load_vertical_contract
 
-        research_context_block = active_research_context(
-            stage, resolve_project_root(working_dir) if working_dir else _proot
-        )
+        context_provider = load_vertical_contract(
+            prompt_context.vertical, project_root=_proot
+        ).role_prompt_context
+        if context_provider is not None:
+            research_context_block = context_provider(
+                role="reviewer",
+                operation=operation,
+                stage=stage,
+                scope=scope_normalized,
+                project_root=(
+                    resolve_project_root(working_dir) if working_dir else _proot
+                ),
+            )
     direct_workflow = resolve_workflow_mode(_proot) == "direct"
     _measured = not _requires_engineering_audit and os.environ.get(
         "ARGUS_SKILL_MEASURED_MODE", ""

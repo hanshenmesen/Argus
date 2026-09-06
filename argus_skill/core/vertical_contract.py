@@ -164,6 +164,7 @@ class VerticalContract:
     ground_before_handoff: bool = False
     role_guidance: Callable[[str], str] | None = None
     role_prompt_fragment: RolePromptFragment | None = None
+    role_prompt_context: RolePromptFragment | None = None
     evidence_schema: Any = None
     requires_independent_review: bool = False
     completion_contract_version: int = 0
@@ -570,6 +571,11 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
         for source, target in aliases.items()
         if str(source).strip() and str(target).strip()
     } if isinstance(aliases, dict) else {}
+    role_prompt_context = getattr(provider, "render_role_prompt_context", None)
+    if role_prompt_context is not None and not callable(role_prompt_context):
+        raise VerticalContractError(
+            f"vertical {name!r} has a non-callable role prompt context"
+        )
     stage_completion_validator = getattr(provider, "stage_completion_issues", None)
     if stage_completion_validator is not None and not callable(stage_completion_validator):
         raise VerticalContractError(
@@ -705,6 +711,7 @@ def vertical_contract(name: str, provider: Any) -> VerticalContract:
             if callable(getattr(provider, "render_role_prompt_fragment", None))
             else None
         ),
+        role_prompt_context=role_prompt_context,
         evidence_schema=getattr(provider, "EVIDENCE_SCHEMA", None),
         requires_independent_review=bool(
             getattr(provider, "REQUIRE_INDEPENDENT_REVIEW", True)
