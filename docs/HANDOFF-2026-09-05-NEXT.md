@@ -304,3 +304,12 @@ Manager 已 complete、PIPELINE_STATE certified 之后，Planner 报 project_don
 `outcome_manuscript_binding()` 先取该字段再回退到 round 记录。加 tests/life/test_outcome_manuscript_binding.py。
 副作用：拒绝之后 Planner 为满足"再认证前必须有实质修复"排了一条摘要末段改写任务，这本身
 是合理的写作改进，但动机是框架卡住。
+
+## 2026-09-06 10:59 UTC · FuseHead 在框架自己的完成检查下收官
+
+27645d873 部署后，Planner 排了唯一一次 `完成 publishable 级最终独立认证`（e9dca2adcf8f，
+final_submission）。Reviewer 10:58 done、无阻断缺陷；结算记录 `manuscript_snapshot`
+sha e88207a7…（与当前 main.tex 一致）、`overall_complete=true`、`campaign_continues=false`；
+Manager complete；10:59 Planner 判决 `completed: bounded research vertical has a current
+completion certificate`，UI 显示 "Submission certified"。此后 daemon 空闲，无新的模型调用。
+FuseHead 进程 pid 4020364，revision 27645d873，保持运行等操作员决定是否开第二篇。
