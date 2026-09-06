@@ -137,12 +137,14 @@ def _structured_result(result: Any) -> Any:
     return None
 
 
-def _find_mcp_error(exc: BaseException) -> dict[str, Any] | None:
+def _find_adapter_error(exc: BaseException) -> JacobianAdapterError | None:
+    if isinstance(exc, JacobianAdapterError):
+        return exc
     if isinstance(exc, McpError):
-        return exc.error.model_dump(mode="json")
+        return JacobianMcpError(exc.error.model_dump(mode="json"))
     if isinstance(exc, BaseExceptionGroup):
         for child in exc.exceptions:
-            found = _find_mcp_error(child)
+            found = _find_adapter_error(child)
             if found is not None:
                 return found
     return None
@@ -224,10 +226,10 @@ def _call_mcp(
         )
     except JacobianAdapterError:
         raise
-    except BaseException as exc:
-        structured = _find_mcp_error(exc)
-        if structured is not None:
-            raise JacobianMcpError(structured) from exc
+    except Exception as exc:
+        adapter_error = _find_adapter_error(exc)
+        if adapter_error is not None:
+            raise adapter_error from exc
         raise JacobianAdapterError(
             f"Jacobian MCP sidecar failed: {str(exc) or type(exc).__name__}"
         ) from exc
@@ -376,7 +378,7 @@ def _payload_file(path_value: str) -> dict[str, Any]:
         )
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise JacobianAdapterError(f"payload file is not valid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise JacobianAdapterError("payload must be a JSON object")

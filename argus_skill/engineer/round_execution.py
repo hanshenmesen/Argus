@@ -366,15 +366,23 @@ class RoundExecutionMixin:
                     text="review: skipped (model unavailable)",
                     review_skipped=True,
                 ))
+            # "Model X is not available" is usually the provider having a bad
+            # minute, not a misconfiguration: one such outage on 2026-09-05
+            # marked eight queued missions blocked inside two minutes. Pause
+            # the mission like any provider cooldown so the daemon backs off
+            # and retries it, instead of consuming the backlog. The operator
+            # alert above still fires on every attempt, so a real typo in the
+            # model name stays visible.
             state.rounds.append(RoundRecord(
                 round_index=round_index,
                 engineer_message=engineer_message,
                 engineer_exit_code=engineer_result.exit_code,
                 review=review,
                 fatal_error=engineer_result.fatal_error,
+                stop_kind="provider_cooldown",
             ))
             return control_return((
-                "blocked",
+                "paused_provider_cooldown",
                 state.rounds,
                 state.last_engineer_message,
                 review.reason,

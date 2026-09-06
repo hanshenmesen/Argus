@@ -1,25 +1,21 @@
 # 反例实验室与 Jacobian 配置
 
-这套扩展发布在 `feature/counterexample-lab-jacobian-update` 分支，包含三项
+这套集成包含三项
 互相独立的能力，并且不携带任何私有猜想或战役数据：
 
 - 科研工作台中的只读“反例实验室”；
 - 通过隔离 sidecar 调用 Jacobian 的 `math.find` 与 `math.run` MCP 契约；
 - 跟随当前已发布分支的源码更新按钮；工作树不干净、detached 或无法快进时拒绝更新。
 
-## 安装 Preview 分支
+## 从源码安装
 
-在现有 Python 3.11+ 环境中执行：
+先按照主 README 的说明准备包含此集成的源码 checkout 和虚拟环境，然后在该环境中执行：
 
 ```bash
-python -m pip install --upgrade --force-reinstall \
-  "argus-skill @ git+https://github.com/lbx154/Argus.git@feature/counterexample-lab-jacobian-update"
+python -m pip install -e .
 argus --version
 argus doctor --advisor none --verify
 ```
-
-源码开发时，直接 clone 这个分支，创建虚拟环境，再按照主 README 的普通源码安装步骤
-执行 editable install。
 
 ## 启用 Jacobian
 
@@ -27,11 +23,10 @@ Argus 不会把 Jacobian import 到自身进程，而是把已发布的 `jacobia
 作为受限 stdio sidecar 启动，只传递必要的进程环境，并保留 operation id、请求、
 类型化输出、协议版本和结构化错误。
 
-单独安装 Jacobian 并暴露可执行文件：
+按照 Jacobian 自身的安装说明在独立环境中安装，再配置该环境内可执行文件的绝对路径：
 
 ```bash
-python -m pip install --upgrade jacobian
-export ARGUS_SKILL_JACOBIAN_MCP_BIN="$(command -v jacobian-mcp)"
+export ARGUS_SKILL_JACOBIAN_MCP_BIN="/path/to/jacobian-environment/bin/jacobian-mcp"
 python -m argus_skill.tools.jacobian status
 python -m argus_skill.tools.jacobian find --query "exact determinant"
 ```
@@ -56,6 +51,8 @@ research/MATH_STATE.json
 `来源等级` 和 `验证级别`。进入 `results.csv` 的条目显示为已验证；进入
 `rejected.csv` 的条目显示为已拒绝；`parallel/<ID>` 与 `evidence/<ID>` 中的文件
 会推进实时构造和证据状态。API 全程只读，并限制文件大小、候选数量、ID 格式和递归扫描量。
+扫描上限也包含空目录；解析后越出工作区的路径不会被读取。这些标签只是已有文件的投影，
+不代表 Reviewer 已经验收，也不会将 Argus 任务标记为完成。
 
 ## 在工作台内安全更新
 
@@ -63,3 +60,7 @@ research/MATH_STATE.json
 拉取同名分支并使用 `--ff-only`，版本变化后重新安装 editable checkout，然后提示在安全
 边界重启工作台和 daemon。工作树有本地修改、detached、分支未发布或历史分叉时都会
 失败关闭，不会覆盖本地工作。
+
+版本检查不会清除尚未重启的提示；更新进程意外退出后会显示失败，而不是一直显示忙碌。
+如果源码已经成功快进、但安装步骤失败，状态会显示实际变更后的版本和安装错误，
+不会声称工作树未发生变化。

@@ -602,9 +602,10 @@ def test_acp_tool_updates_are_forwarded_as_progress_events(monkeypatch) -> None:
 
     structured = [json.loads(line) for line in emitted if line.startswith("{")]
     assert result.turn_completed
-    assert [event["type"] for event in structured] == ["tool.call", "tool.result"]
-    assert structured[0]["data"]["name"] == "Reading state.json"
-    assert structured[1]["data"]["content"] == "Reading state.json (completed)"
+    assert [event["type"] for event in structured] == ["session.start", "tool.call", "tool.result"]
+    assert structured[0]["data"]["sessionId"] == result.thread_id
+    assert structured[1]["data"]["name"] == "Reading state.json"
+    assert structured[2]["data"]["content"] == "Reading state.json (completed)"
     assert result.tool_activity_observed is True
 
 

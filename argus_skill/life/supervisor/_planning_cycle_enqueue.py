@@ -27,6 +27,7 @@ from ._constants import (
     PLANNER_DEDUP_STATUSES,
     PLANNER_SCOPE_BOUNDED,
     PLANNER_SCOPE_FINAL_SUBMISSION,
+    PLANNER_TASKS_FILTERED_DIAGNOSTIC,
     REPLAN_FILTER_REJECTION_LIMIT,
 )
 from ._helpers import (
@@ -43,6 +44,40 @@ from ._planning_cycle_helpers import _PlanCycleState, _revision_reason
 log = logging.getLogger(__name__)
 
 
+def _record_filtered_task(
+    state: _PlanCycleState,
+    *,
+    title: str,
+    category: str,
+    reason: str,
+) -> None:
+    state.skipped_task_feedback.append({
+        "title": str(title or "proposed task").strip(),
+        "category": str(category or "filtered").strip(),
+        "reason": str(reason or "filtered by Supervisor policy").strip(),
+    })
+
+
+def _render_filtered_task_feedback(state: _PlanCycleState) -> str:
+    rows = state.skipped_task_feedback
+    if not rows:
+        return ""
+    lines = ["Supervisor filtered every task in the previous Planner proposal:"]
+    for row in rows[:8]:
+        lines.append(
+            f"- [{row['category']}] {row['title']}: {row['reason']}"
+        )
+    if len(rows) > 8:
+        lines.append(f"- ... and {len(rows) - 8} additional filtered task(s)")
+    lines.append(
+        "Return a materially different executable plan that addresses these "
+        "reasons; do not repeat an unchanged filtered proposal. If nothing is "
+        "startable because pending tasks depend on in-flight work, return "
+        "waiting=true with a waiting contract naming that work and no new tasks."
+    )
+    return "\n".join(lines)
+
+
 def _latest_planner_forward_progress(
     memory: Any,
     revision_request: dict[str, Any] | None,
@@ -54,18 +89,21 @@ def _latest_planner_forward_progress(
         if isinstance(value, bool):
             return value
     try:
-        entries = memory.journal.tail(32)
+        # The single most recent terminal settlement: journal chatter (planner
+        # cycles, waiting heartbeats) must not hide it behind a fixed window.
+        entries = memory.journal.tail_settlements(
+            1,
+            kinds=(
+                "mission_complete",
+                "mission_failed",
+                "mission_replan_requested",
+            ),
+        )
     except Exception:  # noqa: BLE001 - backoff remains conservative on read failure
         return False
-    for entry in reversed(entries):
-        if str(getattr(entry, "kind", "") or "") not in {
-            "mission_complete",
-            "mission_failed",
-            "mission_replan_requested",
-        }:
-            continue
-        return _forward_progress(entry) is True
-    return False
+    if not entries:
+        return False
+    return _forward_progress(entries[-1]) is True
 
 
 def _independent_review_forced() -> bool:
@@ -85,34 +123,32 @@ def _research_stage_ready_for_close(
     state_root: Path,
     evidence_root: Path,
 ) -> bool:
-    """Promote the next single task when deterministic research blockers are gone."""
+    """Promote the research vertical's first stage when its blockers are gone."""
     try:
         from ...core.pipeline_state import read_pipeline_state
         from ...verticals._base import (
             load_vertical,
+            vertical_checklist_stage_order,
             vertical_stage_completion_issues,
         )
 
         pipeline = read_pipeline_state(state_root)
         if not isinstance(pipeline, dict):
             return False
-        if (
-            str(pipeline.get("vertical") or "").strip() != "research"
-            or str(pipeline.get("current_stage") or "").strip() != "research"
-        ):
-            return False
-        selection = evidence_root / "research" / "IDEA_SELECTION.json"
-        positioning = evidence_root / "paper" / "novelty_audit.md"
-        grounding = evidence_root / "research" / "LITERATURE_GROUNDING.json"
-        if not selection.is_file() or not (
-            positioning.is_file() or grounding.is_file()
-        ):
+        if str(pipeline.get("vertical") or "").strip() != "research":
             return False
         definition = load_vertical("research", project_root=state_root)
+        order = tuple(vertical_checklist_stage_order(definition))
+        if (
+            len(order) < 2
+            or str(pipeline.get("current_stage") or "").strip() != order[0]
+        ):
+            return False
         return not vertical_stage_completion_issues(
             definition,
-            stage="research",
+            stage=order[0],
             project_root=evidence_root,
+            state_root=state_root,
         )
     except Exception:  # noqa: BLE001 - automatic closing is fail-open to normal planning
         return False
@@ -125,15 +161,36 @@ def _apply_planner_stage_request(
     reason: str,
     evidence_root: Path,
 ) -> None:
-    """Apply a Manager-owned Planner stage request in either valid direction."""
+    """Apply a Manager-owned Planner stage request."""
     from ...skills.stage_machine import (
         advance_stage,
         current_stage,
         rollback_stage,
     )
+    from ...skills.vertical_select import resolve_vertical
+    from ...verticals._base import (
+        load_vertical,
+        vertical_checklist_stage_order,
+    )
 
-    if requested_stage == current_stage(state_root):
+    current = current_stage(state_root)
+    if requested_stage == current:
         return
+    if resolve_vertical(state_root) == "research":
+        order = tuple(
+            vertical_checklist_stage_order(
+                load_vertical("research", project_root=state_root)
+            )
+        )
+        if (
+            current in order
+            and requested_stage in order
+            and order.index(requested_stage) < order.index(current)
+        ):
+            raise ValueError(
+                "research stages are forward-only; schedule the repair in the "
+                "current stage"
+            )
     try:
         advance_stage(
             state_root,
@@ -437,16 +494,25 @@ class PlanningCycleEnqueueMixin:
         if auto_close_research:
             try:
                 from ...skills.stage_machine import advance_stage
+                from ...verticals._base import (
+                    load_vertical,
+                    vertical_checklist_stage_order,
+                )
+
+                order = tuple(
+                    vertical_checklist_stage_order(
+                        load_vertical("research", project_root=state_root)
+                    )
+                )
 
                 advance_stage(
                     state_root,
-                    target_stage="plan",
-                    reason="selected research target and positioning are complete",
+                    target_stage=order[1],
+                    reason="the research vertical's first stage is complete",
                     advanced_by="manager:auto_completion",
                     evidence_root=Path(context_root).resolve(),
                 )
-                # The tasks were authored under the old research-stage context.
-                # Replan immediately so they cannot become stale closeout work in plan.
+                # Tasks were authored under the prior stage context.
                 return PLAN_RETRY
             except Exception:  # noqa: BLE001 - normal Manager planning remains available
                 log.debug("automatic research stage advance failed", exc_info=True)
@@ -564,6 +630,12 @@ class PlanningCycleEnqueueMixin:
                     project_root=state_root,
                 )
             except LookupError:
+                _record_filtered_task(
+                    state,
+                    title=task.title,
+                    category="unknown_task_vertical",
+                    reason=f"unknown Planner task vertical: {policy_vertical}",
+                )
                 self._emit({
                     "type": EventType.LIFE_PLANNER_TASK_SKIPPED,
                     "cycle": self._planning_cycles,
@@ -579,6 +651,12 @@ class PlanningCycleEnqueueMixin:
                 task,
             )
             if policy_issues:
+                _record_filtered_task(
+                    state,
+                    title=task.title,
+                    category="vertical_task_policy",
+                    reason="; ".join(policy_issues),
+                )
                 self._emit({
                     "type": EventType.LIFE_PLANNER_TASK_SKIPPED,
                     "cycle": self._planning_cycles,
@@ -644,6 +722,12 @@ class PlanningCycleEnqueueMixin:
                 prior_item, blocker_reason, _reviewed_at = certification_blocker
                 state.skipped_certification_reproposal_titles.append(task.title)
                 state.skipped_certification_reproposal_reasons.append(blocker_reason)
+                _record_filtered_task(
+                    state,
+                    title=task.title,
+                    category="stage_closing_requires_intervening_repair",
+                    reason=blocker_reason,
+                )
                 self._emit(
                     {
                         "type": EventType.LIFE_PLANNER_TASK_SKIPPED,
@@ -676,6 +760,12 @@ class PlanningCycleEnqueueMixin:
                 state.skipped_certification_reproposal_reasons.append(
                     review_purchase_reason
                 )
+                _record_filtered_task(
+                    state,
+                    title=task.title,
+                    category="paper_review_purchase_deferred",
+                    reason=review_purchase_reason,
+                )
                 self._emit({
                     "type": EventType.LIFE_PLANNER_TASK_SKIPPED,
                     "cycle": self._planning_cycles,
@@ -705,6 +795,12 @@ class PlanningCycleEnqueueMixin:
                     if self._terminal_blocker_is_dedupable(duplicate_item)
                     else "duplicate pending/running task"
                 )
+                _record_filtered_task(
+                    state,
+                    title=task.title,
+                    category="duplicate_task",
+                    reason=duplicate_reason,
+                )
                 self._emit(
                     {
                         "type": EventType.LIFE_PLANNER_TASK_SKIPPED,
@@ -725,6 +821,12 @@ class PlanningCycleEnqueueMixin:
                 state.skipped_recent_failure_titles.append(task.title)
                 failure_extra = getattr(recent_failure, "extra", {}) or {}
                 failure_signature = _entry_task_signature(recent_failure)
+                _record_filtered_task(
+                    state,
+                    title=task.title,
+                    category="recent_no_progress_failure",
+                    reason="recent no_progress failure",
+                )
                 self._emit(
                     {
                         "type": EventType.LIFE_PLANNER_TASK_SKIPPED,
@@ -763,6 +865,16 @@ class PlanningCycleEnqueueMixin:
             )
             if family_failure is not None:
                 state.skipped_subagent_family_failure_titles.append(task.title)
+                family_reason = (
+                    f"subagent family {family_failure.family!r} has failed "
+                    f"{family_failure.streak} times in a row unresolved"
+                )
+                _record_filtered_task(
+                    state,
+                    title=task.title,
+                    category="recent_subagent_family_failure",
+                    reason=family_reason,
+                )
                 self._emit(
                     {
                         "type": EventType.LIFE_PLANNER_TASK_SKIPPED,
@@ -778,10 +890,7 @@ class PlanningCycleEnqueueMixin:
                         "matched_last_state": family_failure.last_state,
                         "matched_last_reason": family_failure.last_reason,
                         "skip_category": "recent_subagent_family_failure",
-                        "reason": (
-                            f"subagent family {family_failure.family!r} has failed "
-                            f"{family_failure.streak} times in a row unresolved"
-                        ),
+                        "reason": family_reason,
                     }
                 )
                 continue
@@ -789,6 +898,12 @@ class PlanningCycleEnqueueMixin:
             try:
                 authorization_id, authorization_action = self._validated_task_authorization(task)
             except (OSError, TypeError, ValueError) as exc:
+                _record_filtered_task(
+                    state,
+                    title=task.title,
+                    category="invalid_authorization",
+                    reason=str(exc),
+                )
                 self._emit(
                     {
                         "type": EventType.LIFE_PLANNER_TASK_SKIPPED,
@@ -993,6 +1108,53 @@ class PlanningCycleEnqueueMixin:
             return PLAN_TERMINAL_IDLE
         return nonterminal_result
 
+    def _pc_split_external_work_deps(
+        self, keys: list[str]
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """Partition unresolved dep keys against the external-work registry.
+
+        A planner may legitimately name a durable background job as a task
+        dependency: the job outlives daemon restarts and never appears in the
+        backlog, so plain key resolution cannot see it. Returns
+        ``(unknown, external)`` where ``external`` pairs each recognized job
+        id with a short description of its current state. Recognized jobs are
+        not backlog dependencies at all — the depending task is enqueued
+        without them and the mission coordinates with the job directly
+        through the external-work protocol, which already handles durable
+        waiting, health checks, and resumption. Any failure to consult the
+        registry fails closed: every key is reported unknown so the existing
+        whole-batch rejection still applies.
+        """
+        try:
+            from ...engineer.external_work import inspect_external_work
+
+            workdir = self._project_workdir()
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "external-work registry unavailable while resolving planner deps",
+                exc_info=True,
+            )
+            return list(keys), []
+        unknown: list[str] = []
+        external: list[tuple[str, str]] = []
+        for key in keys:
+            try:
+                status = inspect_external_work(workdir, key)
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "external-work lookup failed for planner dependency %r",
+                    key,
+                    exc_info=True,
+                )
+                status = None
+            if status is None:
+                unknown.append(key)
+            elif status.waitable:
+                external.append((key, "still running"))
+            else:
+                external.append((key, "already settled"))
+        return unknown, external
+
     def _pc_commit_pending_items(self, state: _PlanCycleState) -> Any | None:
         revision_request = state.revision_request
         expected_plan_id = state.expected_plan_id
@@ -1018,56 +1180,78 @@ class PlanningCycleEnqueueMixin:
             + [(str(key), str(item_id)) for key, item_id in state.key_map.items()]
         )
         unresolved: list[tuple[str, list[str]]] = []
+        released_external: dict[str, list[str]] = {}
         for task, item in state.pending_items:
             task_deps = list(getattr(task, "deps", []) or [])
-            if task_deps:
-                resolved_ids, unresolved_keys = _resolve_task_dep_ids(
-                    task_deps,
-                    known_key_map,
-                    normalized_key_map,
+            if not task_deps:
+                continue
+            resolved_ids, unresolved_keys = _resolve_task_dep_ids(
+                task_deps,
+                known_key_map,
+                normalized_key_map,
+            )
+            item.deps = resolved_ids
+            normalized_deps = [
+                dep
+                for dep in task_deps
+                if dep not in known_key_map
+                and dep not in unresolved_keys
+            ]
+            if normalized_deps:
+                log.info(
+                    "planner dependency keys normalized",
+                    extra={
+                        "task_title": item.title,
+                        "dependency_keys": normalized_deps,
+                    },
                 )
-                item.deps = resolved_ids
-                normalized_deps = [
-                    dep
-                    for dep in task_deps
-                    if dep not in known_key_map
-                    and dep not in unresolved_keys
+            if not unresolved_keys:
+                continue
+            # A dep key the backlog cannot resolve may still name a durable
+            # background job. Such a job is not a backlog dependency: the
+            # task is enqueued without it and its mission coordinates with
+            # the job directly through the external-work protocol, which
+            # already knows how to wait durably, watch health, and resume.
+            unknown_keys, external_deps = self._pc_split_external_work_deps(
+                unresolved_keys
+            )
+            if unknown_keys:
+                # The planner named something that is neither a backlog node
+                # nor a durable job: usually a team id, a task label it saw in
+                # evidence, or a node it meant to create. Rejecting the whole
+                # plan over it used to stall campaigns for dozens of identical
+                # cycles. Drop the key, enqueue the task, and tell the planner.
+                unresolved.append((item.title, unknown_keys))
+                self._emit(
+                    {
+                        "type": EventType.LIFE_PLANNER_DEPENDENCY_DROPPED,
+                        "item_id": str(item.id),
+                        "title": item.title,
+                        "dependency_keys": list(unknown_keys),
+                        "text": (
+                            "planner dependency keys matched no backlog item or "
+                            "durable job and were dropped; the task is enqueued "
+                            "without them"
+                        ),
+                    }
+                )
+            if external_deps:
+                released_external[str(item.id)] = [
+                    key for key, _state_desc in external_deps
                 ]
-                if normalized_deps:
-                    log.info(
-                        "planner dependency keys normalized",
-                        extra={
-                            "task_title": item.title,
-                            "dependency_keys": normalized_deps,
-                        },
-                    )
-                if unresolved_keys:
-                    unresolved.append((item.title, unresolved_keys))
-        if unresolved:
-            details = "; ".join(
-                f"{title!r}: {keys}" for title, keys in unresolved
-            )
-            self._emit(
-                {
-                    "type": EventType.LIFE_PLANNER_ERROR,
-                    "cycle": self._planning_cycles,
-                    "error": f"planner DAG has unresolved dependencies: {details}",
-                }
-            )
-            self._emit_status(
-                "planner DAG rejected because dependencies became unresolved"
-            )
-            self._enter_idle_backoff()
-            if revision_request is not None:
-                return self._pc_record_revision_rejection(
-                    state,
-                    reason=(
-                        "replacement DAG rejected because dependencies became "
-                        f"unresolved: {details}"
-                    ),
-                    nonterminal_result=PLAN_ERROR,
+                log.info(
+                    "planner dependencies resolved to durable background "
+                    "jobs; the mission will coordinate with them directly",
+                    extra={
+                        "task_title": item.title,
+                        "background_jobs": [
+                            f"{key} ({state_desc})"
+                            for key, state_desc in external_deps
+                        ],
+                    },
                 )
-            return PLAN_ERROR
+        if unresolved:
+            self._planner_dropped_dependency_keys = list(unresolved)
         if revision_request is None and state.pending_items:
             try:
                 self.memory.backlog.add_many([item for _task, item in state.pending_items])
@@ -1101,6 +1285,9 @@ class PlanningCycleEnqueueMixin:
                         "plan_id": item.plan_id,
                         "plan_version": item.plan_version,
                         "node_key": item.node_key,
+                        "external_work_deps": released_external.get(
+                            str(item.id), []
+                        ),
                     }
                 )
 
@@ -1166,6 +1353,9 @@ class PlanningCycleEnqueueMixin:
                         "plan_id": item.plan_id,
                         "plan_version": item.plan_version,
                         "node_key": item.node_key,
+                        "external_work_deps": released_external.get(
+                            str(item.id), []
+                        ),
                     }
                 )
             challenge = revision_request.get("plan_challenge")
@@ -1197,6 +1387,35 @@ class PlanningCycleEnqueueMixin:
                 nonterminal_result=None,
             )
         return None
+
+    def _pc_retire_tasks(self, state: _PlanCycleState) -> None:
+        """Apply retirement even when the cycle returns without enqueueing work."""
+        if not state.verdict.retire_tasks:
+            return
+        if not state.new_plan_id:
+            state.new_plan_id = state.expected_plan_id or f"plan-{BacklogItem.new_id()}"
+        skipped: list[str] = []
+        for item_id, reason in state.verdict.retire_tasks:
+            superseded = self.memory.backlog.supersede_items(
+                item_ids=(item_id,),
+                reason=reason,
+                superseded_by_plan_id=state.new_plan_id,
+            )
+            for retired_id in superseded:
+                self._emit({
+                    "type": EventType.LIFE_PLAN_NODE_SUPERSEDED,
+                    "item_id": retired_id,
+                    "superseded_by_plan_id": state.new_plan_id,
+                    "reason": reason,
+                    "source": "planner",
+                })
+            if not superseded:
+                skipped.append(item_id)
+        if skipped:
+            log.info(
+                "planner retirement skipped unknown, running or terminal items: %s",
+                ", ".join(skipped),
+            )
 
     def _pc_emit_final_verdict(self, state: _PlanCycleState) -> Any:
         verdict = state.verdict
@@ -1234,12 +1453,26 @@ class PlanningCycleEnqueueMixin:
         if not delivered:
             return PLAN_RETRY
         if not state.added_titles:
+            filter_feedback = _render_filtered_task_feedback(state)
+            if filter_feedback and state.revision_request is None:
+                stage = str(self._current_pipeline_stage() or "")
+                if not self._persist_manager_planner_feedback(
+                    stage=stage,
+                    reason=filter_feedback,
+                    diagnostic=PLANNER_TASKS_FILTERED_DIAGNOSTIC,
+                ):
+                    self._emit_status(
+                        "failed to persist filtered-task feedback; retry later"
+                    )
+                    return PLAN_ERROR
             self._enter_idle_backoff()
             if state.skipped_certification_reproposal_reasons:
                 self._emit_status(
                     "planner: repeated stage certification rejected; a substantive "
                     "same-stage repair must complete before recertification"
                 )
+            elif verdict.retire_tasks and not verdict.new_tasks:
+                self._emit_status("planner: processed task retirements; retrying after backoff")
             else:
                 self._emit_status(
                     "planner: all proposed tasks were filtered; retrying after backoff"

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from argus_skill.core.event_catalog import EventType
 from argus_skill.core.models import RunnerResult
 from argus_skill.daemon.state import write_continuous_config
 from argus_skill.life.event_log import JsonlEventSink
@@ -159,6 +160,81 @@ def test_planner_require_independent_review_survives_enqueue(
     ]
     assert "review:required" in pending[0].tags
     assert PlanningContextMixin._item_requires_independent_review(pending[0]) is True
+
+
+@pytest.mark.parametrize("outcome", ["new_task", "retire_only", "waiting", "done"])
+def test_planner_retires_pending_tasks_without_requiring_new_work(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+    outcome: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    planner = _PlannerBackend([])
+    supervisor = _supervisor(project, tmp_path / "life", planner)
+    backlog = supervisor.memory.backlog
+    pending = backlog.add(BacklogItem.new(title="Repair the refuted mechanism", objective="a"))
+    running = backlog.add(BacklogItem.new(title="Work already running", objective="b"))
+    backlog.mark_running(running.id)
+    done = backlog.add(BacklogItem.new(title="Completed work", objective="c"))
+    backlog.mark_done(done.id)
+    reason = "The experiment refuted this mechanism family."
+    lines = [
+        f"PROJECT_DONE={'true' if outcome == 'done' else 'false'}",
+        "REASON=Close the refuted line of work.",
+        f"RETIRE_TASK={pending.id} | {reason}",
+        f"RETIRE_TASK={running.id} | This work already started.",
+        f"RETIRE_TASK={done.id} | This work already finished.",
+        "RETIRE_TASK=unknown | This item no longer exists.",
+    ]
+    if outcome == "new_task":
+        lines.extend([
+            "TASK_KEY=distinct",
+            "TASK_TITLE=Test a distinct mechanism",
+            "TASK_OBJECTIVE=Run an experiment on the untested alternative.",
+        ])
+    elif outcome == "waiting":
+        lines.extend([
+            "WAITING=true",
+            "WAITING_REASON=Await the operator's new evidence.",
+            "BLOCKER_FINGERPRINT=operator-evidence",
+            "RECHECK_CONDITION=The operator supplies new evidence.",
+            "RECHECK_TOKEN=evidence-needed",
+            "OPERATOR_ACTION_REQUIRED=true",
+        ])
+    planner.replies.append("\n".join(lines))
+
+    with caplog.at_level("INFO", logger="argus_skill.life.supervisor._planning_cycle_enqueue"):
+        supervisor._plan_next_work()
+
+    rows = {item.id: item for item in backlog.history()}
+    assert rows[pending.id].status == "superseded"
+    assert rows[pending.id].superseded_reason == reason
+    assert rows[pending.id].superseded_by_plan_id
+    assert rows[running.id].status == "running"
+    assert rows[done.id].status == "done"
+    events = [
+        json.loads(line)
+        for line in (supervisor.memory.root / "events.jsonl").read_text().splitlines()
+    ]
+    retired = [event for event in events if event["type"] == EventType.LIFE_PLAN_NODE_SUPERSEDED]
+    assert len(retired) == 1
+    assert retired[0]["item_id"] == pending.id
+    assert retired[0]["reason"] == reason
+    assert retired[0]["source"] == "planner"
+    assert retired[0]["superseded_by_plan_id"] == rows[pending.id].superseded_by_plan_id
+    skipped = [record for record in caplog.records if "retirement skipped" in record.message]
+    assert len(skipped) == 1
+    assert all(item_id in skipped[0].message for item_id in (running.id, done.id, "unknown"))
+    assert f"{pending.id}: {pending.title}" in planner.calls[0]["prompt"]
+    if outcome == "new_task":
+        new_item, = backlog.pending()
+        assert new_item.title == "Test a distinct mechanism"
+        assert rows[pending.id].superseded_by_plan_id == new_item.plan_id
+    else:
+        assert backlog.pending() == []
 
 
 def test_planner_reuses_front_door_route_without_manager_reclassification(

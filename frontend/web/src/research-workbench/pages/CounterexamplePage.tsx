@@ -77,13 +77,15 @@ function buildEvidence(candidate: CounterexampleCandidate): CounterexampleEviden
 
 export function CounterexamplePage(props: WorkspacePageProps) {
   const { text } = useWorkbenchText();
+  const mission = props.snapshot.mission_view?.mission;
+  const missionActive = mission && ['working', 'running', 'in_progress', 'claimed'].includes(mission.status);
   const activeText = [
-    props.snapshot.mission_view?.mission.title,
-    props.snapshot.mission_view?.mission.objective,
+    ...(missionActive ? [mission.title, mission.objective] : []),
     ...(props.snapshot.backlog ?? [])
       .filter((item) => ['running', 'in_progress', 'claimed'].includes(item.status))
       .flatMap((item) => [item.title, item.objective]),
   ].filter(Boolean).join(' ');
+  const activeIds = new Set(activeText.match(/[A-Za-z0-9_-]+/g) ?? []);
   const labels: Record<StageId, string> = {
     scope: text('命题对齐', 'Scope'),
     source: text('原始来源', 'Primary source'),
@@ -94,7 +96,8 @@ export function CounterexamplePage(props: WorkspacePageProps) {
   const conjectures: CounterexampleConjecture[] = (
     props.counterexamples?.candidates ?? []
   ).map((candidate) => {
-    const active = activeText.includes(candidate.id);
+    const active = !['verified', 'rejected'].includes(candidate.status)
+      && activeIds.has(candidate.id);
     const stages = buildStages(candidate, labels);
     return {
       id: candidate.id,

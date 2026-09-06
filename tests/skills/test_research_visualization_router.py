@@ -28,25 +28,24 @@ def test_research_vertical_bundles_visual_router_and_renderer() -> None:
     front, body = _front_and_body(texts["engineer/research-visualization-router.md"])
     assert set(front) == {"name", "description"}
     assert front["name"] == "Research Visualization Router"
-    assert "FIGURE_PROVENANCE.json" in body
     assert "image-2" in body
-    assert "ECharts" in body
-    assert "Recharts" in body
     assert "PPT Master" in body
     assert "Paper Framework Figure Studio" in body
+    assert "manifest" not in body.lower()
+    assert "hash" not in body.lower()
     assert "engineer/paper-framework-figure-studio.md" in texts
     assert "engineer/research_visual_scripts/browser_render.py" in texts
 
 
-def test_router_makes_image2_capability_conditional() -> None:
+def test_router_keeps_image2_optional_and_non_semantic() -> None:
     texts = dict(iter_vertical_skill_texts("research"))
     _front, body = _front_and_body(texts["engineer/research-visualization-router.md"])
     content = body.lower()
     assert "when configured" in content
-    assert "unavailable image route is\nnot a project blocker" in content
-    assert "never fake image-2 provenance" in content
-    assert "--ppt-master-status" in content
-    assert "independent of model api status" in content
+    assert "non-claim-bearing" in content
+    image2 = texts["engineer/paper-illustration-image2.md"].lower()
+    assert "absence never blocks the paper" in image2
+    assert "registration files" in image2
 
 
 def test_router_requires_real_deterministic_figure1_fallback() -> None:
@@ -56,15 +55,20 @@ def test_router_requires_real_deterministic_figure1_fallback() -> None:
 
     assert "figure 1 is a paper deliverable" in content
     assert "ppt master" in content
-    assert "browser-rendered html" in content
-    assert "hand-authoring raw svg is not on this table" in content
-    assert "a latex table" in content
+    assert "browser svg" in content
+    assert "boxed\nparagraph or table" in content
     assert "\\includegraphics" in body
     studio = texts["engineer/paper-framework-figure-studio.md"]
-    assert "S0" in studio and "S7" in studio
-    assert "Renderer-neutral design system" in studio
+    studio_flat = " ".join(studio.split())
+    assert "source, target, direction, boundary port" in studio_flat
+    assert "connectors terminate at explicit node boundaries" in studio_flat
+    assert "no shaft or arrowhead enters an unrelated node" in studio_flat
+    assert "final single- or double-column width" in studio_flat
     assert "PPT Master" in studio
-    assert "image-2 only when configured" in studio
+    assert (
+        "Strict page-by-page visual acceptance happens once, in Review"
+        in studio_flat
+    )
 
 
 def test_results_figures_keep_claim_checks_agent_owned_and_risk_based() -> None:
@@ -130,12 +134,28 @@ def test_figure_spec_renderer_is_reachable() -> None:
     assert (skills / "figure_spec_scripts/figure_renderer.py").is_file()
 
 
-def test_figure_one_never_takes_the_flat_route() -> None:
-    """A flat-fill renderer draws the boxes the paper's opening figure is judged
-    on, so Figure 1 must not qualify for the simple-topology row."""
-    router = dict(iter_vertical_skill_texts("research"))[
+def test_figure_one_prioritizes_exact_topology_over_decorative_richness() -> None:
+    texts = dict(iter_vertical_skill_texts("research"))
+    router = texts[
         "engineer/research-visualization-router.md"
     ].lower()
+    normalized = " ".join(router.split())
 
-    assert "a paper's figure 1 never qualifies as the simple row" in router
-    assert "simple exact topology in a supporting figure" in router
+    assert "exact load-bearing topology" in router
+    assert "topology fidelity takes priority over decorative richness" in normalized
+    assert "polished figure 1 does not need depth, icons" in normalized
+    assert "connector penetration" in router
+    assert "figurespec" in router
+
+
+def test_concept_figures_leave_strict_acceptance_to_review() -> None:
+    texts = dict(iter_vertical_skill_texts("research"))
+    router = texts["engineer/research-visualization-router.md"]
+    studio = texts["engineer/paper-framework-figure-studio.md"]
+
+    assert "editable native PPTX through PPT Master" in router
+    assert "source and final included export" in router
+    assert "not a separate visual check" in router
+    assert "Create only the editable figure source and the final" in studio
+    assert "Strict page-by-page visual acceptance happens once, in Review" in studio
+    assert "visual-review\nfiles" in studio

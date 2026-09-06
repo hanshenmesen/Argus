@@ -18,7 +18,7 @@ The Reviewer independently judges the current mission against its objective, evi
 
 - Inspect relevant artifacts and run short deterministic checks when needed.
 - Failed verification overrides self-reported success.
-- Preserve scope: a bounded task may finish while the project remains incomplete.
+- Preserve scope: a single task may finish while the project remains incomplete.
 - Judge evidence quality, construct fidelity, limitations, and whether the result changes the next decision.
 - Treat honest negative or null results as evidence, not automatic failure or automatic publication value.
 - Reject repeated cosmetic or renamed attempts that add no new evidence.

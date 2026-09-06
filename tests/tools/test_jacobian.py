@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,8 @@ def test_capability_note_names_the_mcp_bridge(tmp_path: Path, monkeypatch) -> No
     note = jacobian.jacobian_capability_note()
     source_interpreter = Path(jacobian.__file__).resolve().parents[2] / ".venv/bin/python"
     assert str(binary.resolve()) in note
-    assert str(source_interpreter) in note
+    interpreter = source_interpreter if source_interpreter.is_file() else Path(sys.executable)
+    assert str(interpreter) in note
     assert "argus_skill.tools.jacobian find" in note
     assert "import Jacobian" not in note
 
@@ -127,3 +129,50 @@ def test_payload_file_rejects_non_json_extension(tmp_path: Path) -> None:
 def test_invalid_operation_id_is_rejected_before_sidecar_start(tmp_path: Path) -> None:
     with pytest.raises(jacobian.JacobianAdapterError, match="invalid"):
         jacobian.run_operation("../../shell", {}, executable=_binary(tmp_path))
+
+
+def test_payload_file_rejects_invalid_encoding(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.json"
+    payload.write_bytes(b"\xff")
+    with pytest.raises(jacobian.JacobianAdapterError, match="not valid JSON"):
+        jacobian._payload_file(str(payload))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX executable fixture")
+def test_stdio_sidecar_smoke_preserves_contract_and_isolates_credentials(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    binary = tmp_path / "jacobian-mcp"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import math, os\n"
+        "from mcp.server.fastmcp import FastMCP\n"
+        "server = FastMCP('jacobian-test')\n"
+        "@server.tool(name='math.find')\n"
+        "def find(request: dict) -> dict:\n"
+        "    return {'kind': 'discovery', 'request': request}\n"
+        "@server.tool(name='math.run')\n"
+        "def run(operation_id: str, payload: dict) -> dict:\n"
+        "    if operation_id != 'integer.compute.gcd':\n"
+        "        raise ValueError('unsupported operation')\n"
+        "    return {'output': {'gcd': str(math.gcd(int(payload['left']), int(payload['right'])))},\n"
+        "            'credential_forwarded': 'OPENAI_API_KEY' in os.environ}\n"
+        "server.run()\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-credential")
+
+    status = jacobian.status(executable=binary)
+    assert status["transport"] == "mcp-stdio"
+    assert status["server"]["name"] == "jacobian-test"
+    assert status["tools"] == ["math.find", "math.run"]
+    found = jacobian.find_operations("exact gcd", executable=binary)
+    assert found["result"]["request"] == {"op": "search", "query": "exact gcd", "limit": 5}
+    result = jacobian.run_operation(
+        "integer.compute.gcd", {"left": "84", "right": "30"}, executable=binary,
+    )
+    assert result["result"] == {"output": {"gcd": "6"}, "credential_forwarded": False}
+    with pytest.raises(jacobian.JacobianMcpError) as caught:
+        jacobian.run_operation("unknown.operation", {}, executable=binary)
+    assert "unsupported operation" in str(caught.value.payload["content"])

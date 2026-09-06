@@ -264,6 +264,127 @@ def test_clean_concern_treats_nothing_phrases_as_empty() -> None:
     assert _clean_concern("  clipped_ratio  is  1.0 ") == "clipped_ratio is 1.0"
 
 
+def test_clean_concern_keeps_real_anomaly_after_reassuring_opener() -> None:
+    # A calm opener followed by a substantive anomaly, with NO contrast/alarm
+    # token, must survive verbatim — only a note that IS the reassurance clears.
+    note = (
+        "No anomalies in the harness; training is stable. Reward has stayed "
+        "at 0.0 for the last 4000 steps and entropy is flat at its floor."
+    )
+    assert _clean_concern(note) == note
+
+
+def test_clean_concern_clause_review_clears_pure_reassurance() -> None:
+    # Multi-clause notes clear ONLY when every clause is itself a recognized
+    # reassurance.
+    assert _clean_concern("No anomalies. All good.") == ""
+    assert _clean_concern("no issues; none") == ""
+    # Trailing exclamation marks split into empty clauses, which never veto.
+    assert _clean_concern("No anomalies!!") == ""
+    # A decimal point is NOT a sentence boundary: this is one reassuring clause.
+    assert _clean_concern("No anomalies detected in epoch 1.5") == ""
+
+
+def test_clean_concern_clause_review_keeps_unrecognized_clauses() -> None:
+    # Any clause that is not a recognized reassurance keeps the WHOLE note,
+    # even without a contrast/alarm token (fail-safe toward review).
+    pivot = (
+        "No anomalies in the harness; training is stable. Reward has stayed "
+        "at 0.0 for the last 4000 steps."
+    )
+    assert _clean_concern(pivot) == pivot
+    # A newline is a clause boundary even without terminal punctuation; the
+    # kept note is whitespace-normalized as usual.
+    newline_note = "No anomalies in harness\nreward flat since step 4000"
+    assert _clean_concern(newline_note) == (
+        "No anomalies in harness reward flat since step 4000"
+    )
+
+
+def _do_one_check(monkeypatch, tmp_path, checks):
+    """Drive ``_supervised_do_one_check`` through a scripted check sequence."""
+    results = list(checks)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        _sub._supervised_run,
+        "_supervisor_check_with_usage",
+        lambda *a, **k: results.pop(0),
+    )
+
+    class _Stream:
+        def flush(self) -> None:
+            pass
+
+    return _sub._supervised_run._supervised_do_one_check(
+        task_id="sup-confirm",
+        command="python train.py",
+        description="demo",
+        out=_Stream(),
+        err=_Stream(),
+        check_number=1,
+        model="gpt-5.5",
+        cwd=str(tmp_path),
+        resolved_run_dir=None,
+        start_time=time.time(),
+        stdout_path=tmp_path / "out.log",
+        stderr_path=tmp_path / "err.log",
+        supervisor_log=tmp_path / "supervisor.jsonl",
+        supervisor_thread_id=None,
+        supervisor_usage_totals=(0, 0, 0, 0),
+    )
+
+
+def test_reconfirmed_concern_on_healthy_run_does_not_stop(
+    monkeypatch, tmp_path
+) -> None:
+    # Two rounds of reassurance phrasing that slipped past _clean_concern must
+    # not kill a run the supervisor itself still calls healthy: the confirming
+    # read has to corroborate with degraded health or decide early_stop.
+    def _check(concern: str) -> object:
+        return _sub._supervised_run.SupervisorCheck(
+            decision="continue", health="healthy", concern=concern,
+            thread_id="t1", usage=(1, 0, 1, 0), error=None,
+        )
+
+    (check_number, decision, health, concern, _thread, _totals, stop_now) = (
+        _do_one_check(monkeypatch, tmp_path, [
+            _check("Run looks nominal overall, will keep watching"),
+            _check("Everything still looks nominal overall"),
+        ])
+    )
+
+    assert stop_now is False
+    assert decision == "continue"
+    assert health == "healthy"
+    assert concern == ""  # cleared so status does not show a phantom anomaly
+    assert check_number == 2  # the confirmation re-check did run
+
+
+def test_reconfirmed_concern_with_degraded_health_stops(
+    monkeypatch, tmp_path
+) -> None:
+    # A real anomaly re-affirmed with degraded health stops the run even when
+    # the supervisor never says early_stop outright.
+    def _check(concern: str) -> object:
+        return _sub._supervised_run.SupervisorCheck(
+            decision="continue", health="stuck", concern=concern,
+            thread_id="t1", usage=(1, 0, 1, 0), error=None,
+        )
+
+    (check_number, decision, health, concern, _thread, _totals, stop_now) = (
+        _do_one_check(monkeypatch, tmp_path, [
+            _check("reward flat at 0.0 for the last 4000 steps"),
+            _check("reward is still flat at 0.0; no learning signal"),
+        ])
+    )
+
+    assert stop_now is True
+    assert decision == "early_stop"
+    assert health == "stuck"
+    assert concern == "reward is still flat at 0.0; no learning signal"
+    assert check_number == 2
+
+
 def test_live_codex_boundary_guard_blocks_unfaked_calls() -> None:
     with pytest.raises(AssertionError, match="live subagent backend turn"):
         _sub._llm._run_backend_turn("", "", ".", None, 1, "test")
@@ -387,6 +508,23 @@ def test_direct_report_never_calls_llm(monkeypatch) -> None:
         },
     )
     assert "plain background command" in report
+
+
+def test_timeout_report_does_not_misclassify_timeout_as_failure() -> None:
+    report = _build_report(
+        "bounded-search",
+        "TIMEOUT",
+        {
+            "description": "bounded solver run",
+            "command": "solver problem.cnf",
+            "mode": "direct",
+            "elapsed_seconds": 3600,
+        },
+    )
+
+    assert "treat the result as inconclusive" in report
+    assert "Do not infer a workload failure from the timeout alone" in report
+    assert "inspect stderr for root cause" not in report
 
 
 def test_supervisor_authors_report_grounded_in_diagnosis(monkeypatch) -> None:
@@ -960,8 +1098,11 @@ def test_backend_turn_uses_accounted_agent_backend(monkeypatch, tmp_path) -> Non
     assert run_call["options"].working_dir == str(tmp_path)
 
 
-def test_supervisor_backend_inherits_configured_runner(monkeypatch) -> None:
+def test_supervisor_role_backend_does_not_inherit_shared_runner(monkeypatch) -> None:
+    from argus_skill.core import knob_store
+
     constructed: dict[str, object] = {}
+    resolved: list[tuple[str, str | None]] = []
 
     class _Backend:
         def __init__(self, **kwargs) -> None:
@@ -969,20 +1110,28 @@ def test_supervisor_backend_inherits_configured_runner(monkeypatch) -> None:
 
     monkeypatch.setattr(_sub._llm, "_SUPERVISOR_BACKENDS", {})
     monkeypatch.setattr(_sub._llm, "AgentCliBackend", _Backend)
+    monkeypatch.setenv("ARGUS_SKILL_SUPERVISOR_BACKEND", "copilot")
+    monkeypatch.delenv("ARGUS_SKILL_SUPERVISOR_RUNNER_BIN", raising=False)
+    monkeypatch.delenv("ARGUS_SKILL_RUNNER_BACKEND", raising=False)
+    monkeypatch.delenv("ARGUS_SKILL_LIFE_BACKEND", raising=False)
+    monkeypatch.delenv("ARGUS_SKILL_RUNNER_BIN", raising=False)
     monkeypatch.setattr(
-        _sub._llm,
-        "resolve_role_backend",
-        lambda role: "copilot" if role == "supervisor" else "codex",
+        knob_store,
+        "read_persisted_knobs",
+        lambda: {
+            "ARGUS_SKILL_RUNNER_BACKEND": "dsh",
+            "ARGUS_SKILL_RUNNER_BIN": "/opt/dsh",
+        },
     )
-    monkeypatch.setattr(
-        _sub._llm,
-        "resolve_runner_bin_setting",
-        lambda role: "/opt/copilot" if role == "supervisor" else "",
-    )
+
+    def resolve(backend: str, configured: str | None):
+        resolved.append((backend, configured))
+        return backend, configured or "/opt/copilot"
+
     monkeypatch.setattr(
         _sub._llm,
         "resolve_available_runner",
-        lambda backend, configured: (backend, configured),
+        resolve,
     )
 
     backend = _sub._llm._supervisor_backend()
@@ -990,6 +1139,7 @@ def test_supervisor_backend_inherits_configured_runner(monkeypatch) -> None:
     assert isinstance(backend, _Backend)
     assert constructed["backend"] == "copilot"
     assert constructed["runner_bin"] == "/opt/copilot"
+    assert resolved == [("copilot", None)]
 
 
 def test_run_supervised_persists_supervisor_usage_totals(monkeypatch, tmp_path) -> None:
@@ -1029,7 +1179,7 @@ def test_run_supervised_persists_supervisor_usage_totals(monkeypatch, tmp_path) 
 
     _sub._run_supervised(
         "train-1",
-        "python -c pass",
+        f"{shlex.quote(sys.executable)} -c pass",
         "demo",
         timeout=999,
         monitor_interval=1,
@@ -1486,7 +1636,7 @@ def test_submit_without_timeout_survives_past_old_default(
     running = next(row for row in writes if row.get("state") == "running")
     assert running["timeout_seconds"] is None
     assert running["timeout_defaulted"] is False
-    assert "start_time_ticks" in running["process_identity"]
+    assert running["process_identity"]["pid"] == proc.pid
     assert record is not None and record["state"] == "done"
     assert record["elapsed_seconds"] == 7201.0
     assert alerts == ["COMPLETED"]

@@ -192,9 +192,10 @@ export function deriveCounterexampleProgress(
   const progress = conjecture.progress == null
     ? derivedStageProgress(stages)
     : clampCounterexampleProgress(conjecture.progress);
-  const active = Boolean(conjecture.active)
-    || conjecture.status === 'active'
-    || stages.some((stage) => isCounterexampleStageActive(stage.status));
+  const active = conjecture.active ?? (
+    conjecture.status === 'active'
+    || stages.some((stage) => isCounterexampleStageActive(stage.status))
+  );
   const fresh = latestUpdatedAt == null || nowMs - latestUpdatedAt <= staleAfterMs;
 
   return {

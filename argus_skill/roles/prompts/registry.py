@@ -74,7 +74,13 @@ class RolePromptCatalog:
         from ...verticals._base import load_vertical_contract
 
         contract = load_vertical_contract(vertical, project_root=root)
-        vertical_banner = contract.banner(banner_role)
+        # Specialist assessments do not own the integrated Reviewer's writeback.
+        vertical_banner = (
+            ""
+            if request.role is RoleName.REVIEWER
+            and request.operation in {reviewer.COLD_READ, reviewer.SCIENCE_LOSS_CHECK}
+            else contract.banner(banner_role)
+        )
         domain = ""
         domain_banner = ""
         if root is not None and not str(request.vertical or "").strip():
@@ -130,6 +136,7 @@ class RolePromptCatalog:
                 ChecklistMode.FULL_PIPELINE
                 if request.role is RoleName.REVIEWER
                 and scope == "final_submission"
+                and vertical != "research"
                 else ChecklistMode.STAGE
             )
 

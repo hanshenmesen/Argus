@@ -16,11 +16,12 @@ from ...core.planner_verdict import PlannerVerdictStatus
 from ...core.wake_sources import normalize_wake_sources
 from ..memory import BacklogItem
 from ._constants import (
-    IDLE_BACKOFF_CAP_SECONDS,
+    OPERATOR_WAIT_TURN_REGRANT_SECONDS,
     PLAN_AWAITING,
     PLAN_RETRY,
     PLANNER_SCOPE_BOUNDED,
     PLANNER_SCOPE_FINAL_SUBMISSION,
+    PLANNER_TASKS_FILTERED_DIAGNOSTIC,
     STALL_ESCALATION_AFTER_NO_PROGRESS_MISSIONS,
     VERIFICATION_PROBE_AFTER_IDLE_CYCLES,
     VERIFICATION_PROBE_COOLDOWN_SECONDS,
@@ -284,7 +285,7 @@ class PlanningContextMixin:
         elif scope == PLANNER_SCOPE_BOUNDED:
             if is_paper_long_horizon:
                 lines.append(
-                    "- paper_optimization_task: this is a bounded mission, but it is "
+                    "- paper_optimization_task: this is a single task, but it is "
                     "part of a long-horizon paper objective. Complete the requested "
                     "scientific or writing increment without expanding it into "
                     "paperwork for unrelated stages."
@@ -292,8 +293,8 @@ class PlanningContextMixin:
             else:
                 lines.append(
                     "- bounded_task: judge this item against its own acceptance criteria; "
-                    "do not require the project-final EMNLP gate unless the objective "
-                    "explicitly asks for it."
+                    "do not hold it to the project-final publication standard unless "
+                    "the objective explicitly asks for that."
                 )
         if context_refs:
             lines.append("")
@@ -850,6 +851,27 @@ class PlanningContextMixin:
             except FileNotFoundError:
                 pass
 
+    def _backlog_planning_signature(self) -> str:
+        """Digest of live backlog item ids and statuses.
+
+        Feedback recorded because every proposed task duplicated existing
+        backlog work stays true exactly as long as those items keep their
+        status. Project files rewritten by live background jobs are not new
+        planning evidence for that kind of feedback — judging it by the
+        whole-tree signature made the feedback evaporate every cycle and the
+        planner replan blind at the base backoff indefinitely.
+        """
+        rows = sorted(
+            f"{item.id}:{item.status}" for item in self.memory.backlog.active()
+        )
+        digest = hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+        return f"backlog:{digest}"
+
+    def _manager_feedback_signature_for(self, diagnostic: str) -> str:
+        if diagnostic == PLANNER_TASKS_FILTERED_DIAGNOSTIC:
+            return self._backlog_planning_signature()
+        return self._manager_feedback_evidence_signature()
+
     def _persist_manager_planner_feedback(
         self,
         *,
@@ -860,14 +882,21 @@ class PlanningContextMixin:
         stage = str(stage or "").strip()
         reason = str(reason or "").strip()
         diagnostic = str(diagnostic or "").strip()
-        evidence_signature = self._manager_feedback_evidence_signature()
+        evidence_signature = self._manager_feedback_signature_for(diagnostic)
         previous = self._load_manager_planner_feedback()
+        # For filtered-task feedback the reason text embeds the planner's own
+        # phrasing of the rejected titles, which shifts between otherwise
+        # identical verdicts — an exact-reason match would restart the attempt
+        # count every cycle, so the repeat limit could never engage.
         same_feedback = bool(
             previous is not None
             and str(previous.get("stage") or "") == stage
-            and str(previous.get("reason") or "") == reason
             and str(previous.get("diagnostic") or "") == diagnostic
             and str(previous.get("evidence_signature") or "") == evidence_signature
+            and (
+                diagnostic == PLANNER_TASKS_FILTERED_DIAGNOSTIC
+                or str(previous.get("reason") or "") == reason
+            )
         )
         attempts = int(previous.get("attempts") or 0) + 1 if same_feedback else 1
         created_at = (
@@ -898,6 +927,25 @@ class PlanningContextMixin:
         state["resolved_at"] = time.time()
         self._write_manager_planner_feedback(state)
 
+    def _planner_dropped_dependency_runtime_note(self) -> str:
+        """Tell the planner once which dependency keys its last DAG got wrong."""
+        dropped = list(getattr(self, "_planner_dropped_dependency_keys", []) or [])
+        if not dropped:
+            return ""
+        self._planner_dropped_dependency_keys = []
+        lines = "\n".join(
+            f"- {title!r} named {', '.join(repr(key) for key in keys)}"
+            for title, keys in dropped
+        )
+        return (
+            "DEPENDENCY KEYS DROPPED FROM YOUR LAST PLAN:\n"
+            f"{lines}\n"
+            "Those keys matched no backlog node and no durable background job, so "
+            "the tasks were enqueued without them. Team ids, task labels quoted "
+            "in evidence, and nodes you have not created are not dependencies. "
+            "Depend only on node keys from this plan or on existing backlog items."
+        )
+
     def _manager_planner_feedback_runtime_note(self) -> str:
         state = self._load_manager_planner_feedback()
         if state is None:
@@ -919,7 +967,7 @@ class PlanningContextMixin:
             )
         elif prescribes_stage_closing:
             task_instruction = (
-                "The missing invariant is the current stage Goal Gate. Describe the "
+                "The missing invariant is the current stage's certified completion. Describe the "
                 "next executable verification task naturally; the Host will record "
                 "it as stage-closing work requiring independent review."
             )
@@ -1111,6 +1159,31 @@ class PlanningContextMixin:
         except Exception:  # noqa: BLE001 - visibility must not break planning
             return False
 
+    @staticmethod
+    def _external_work_state_rows(project_root: Path) -> list[dict[str, str]]:
+        """Registered background jobs as (work_id, run_id, state) rows.
+
+        This is the wait-relevant view of the external-work registry: it moves
+        when a job starts, completes, or fails, and stays put while a healthy
+        job merely appends to its own logs. An unreadable registry contributes
+        a stable empty view rather than churn.
+        """
+        try:
+            from ...engineer.external_work import scan_external_work
+
+            return [
+                {
+                    "work_id": status.work_id,
+                    "run_id": status.run_id,
+                    "state": status.state.value,
+                }
+                for status in scan_external_work(project_root)
+                if status.source == "subagent"
+            ]
+        except Exception:  # noqa: BLE001 - wait evaluation must stay stable
+            log.debug("external-work registry scan failed", exc_info=True)
+            return []
+
     def _planner_waiting_observed_revision(
         self,
         *,
@@ -1144,9 +1217,26 @@ class PlanningContextMixin:
                 pipeline_state_path(project_root)
             )
         if "artifact_revision" in wake_sources:
-            revision["artifacts"] = [
-                self._waiting_revision_file(project_root / relative) for relative in watched_paths
-            ]
+            artifacts: list[dict[str, Any]] = []
+            registry_paths = False
+            for relative in watched_paths:
+                rel = str(relative).strip().lstrip("/")
+                parts = Path(rel).parts
+                if parts and parts[0] == ".argus_subagents":
+                    # A watched path inside the external-work registry points
+                    # at a job's own bookkeeping (logs, heartbeats), which is
+                    # rewritten for as long as the job runs. Stat-digesting it
+                    # woke the planner every cycle of a live job; what the
+                    # contract actually waits for is the job's registered
+                    # state, which moves exactly at real transitions.
+                    registry_paths = True
+                    continue
+                artifacts.append(self._waiting_revision_file(project_root / rel))
+            revision["artifacts"] = artifacts
+            if registry_paths and "subagent_state" not in wake_sources:
+                revision["registry_jobs"] = self._external_work_state_rows(
+                    project_root
+                )
         if "subagent_terminal" in wake_sources:
             terminal_rows: list[dict[str, str]] = []
             registry = project_root / ".argus_subagents"
@@ -1179,17 +1269,9 @@ class PlanningContextMixin:
                 )
             revision["subagent_terminal"] = terminal_rows
         if "subagent_state" in wake_sources:
-            from ...engineer.external_work import scan_external_work
-
-            revision["subagent_state"] = [
-                {
-                    "work_id": status.work_id,
-                    "run_id": status.run_id,
-                    "state": status.state.value,
-                }
-                for status in scan_external_work(project_root)
-                if status.source == "subagent"
-            ]
+            revision["subagent_state"] = self._external_work_state_rows(
+                project_root
+            )
         blob = json.dumps(revision, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -1252,9 +1334,12 @@ class PlanningContextMixin:
         # its paper sat finished-looking at 8,107 words with four of its
         # thirty-one figures used. run-05 parked the same way on an
         # authentication decision. So for those, and only those, the turn is
-        # re-granted on the idle cadence the supervisor already backs off to --
-        # the same rate this short circuit is willing to wake for anyway, not a
-        # new poll.
+        # re-granted on OPERATOR_WAIT_TURN_REGRANT_SECONDS. That timer is only
+        # the backstop behind the three wake paths that already exist -- the
+        # first per-contract grant, a backlog revision change, and the
+        # authorization event itself -- and each re-grant is a full Planner LLM
+        # call, so its cadence is an LLM-call-rate policy, deliberately not
+        # tied to the idle sleep cap.
         if self._planner_turn_available_during_wait(state):
             state["idle_capacity_turn_used"] = True
             state["idle_capacity_turn_ts"] = time.time()
@@ -1343,7 +1428,7 @@ class PlanningContextMixin:
         if not state.get("operator_action_required"):
             return False
         granted = float(state.get("idle_capacity_turn_ts") or 0.0)
-        return time.time() - granted >= IDLE_BACKOFF_CAP_SECONDS
+        return time.time() - granted >= OPERATOR_WAIT_TURN_REGRANT_SECONDS
 
     def _confined_planner_wait_paths(self, values: list[str]) -> list[str]:
         """Validate watched paths before they can influence revision reads."""

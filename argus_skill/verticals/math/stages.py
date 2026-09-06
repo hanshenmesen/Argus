@@ -487,18 +487,6 @@ def _lean_workspace_note() -> str:
     )
 
 
-def _jacobian_note() -> str:
-    """Expose the optional exact-operation adapter without importing Jacobian."""
-    try:
-        from ...tools.jacobian import jacobian_capability_note
-    except Exception:  # noqa: BLE001 - an optional capability never blocks a role
-        return ""
-    try:
-        return jacobian_capability_note()
-    except Exception:  # noqa: BLE001 - detection is advisory, execution is explicit
-        return ""
-
-
 def role_banner(role: str) -> str:
     """Load Math context as a Skill for the generic role implementation."""
     role_name = (role or "").strip().lower()
@@ -523,8 +511,10 @@ def role_banner(role: str) -> str:
     # Manager picks a stage; neither runs Lean, and a host fact they cannot act
     # on is prompt weight spent for nothing.
     if role_name in {"engineer", "reviewer"}:
+        from ...tools.jacobian import jacobian_capability_note
+
         banner += _lean_workspace_note()
-        banner += _jacobian_note()
+        banner += jacobian_capability_note()
     return banner
 
 

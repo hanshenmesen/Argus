@@ -149,7 +149,7 @@ class WaitingContract:
 
 @dataclass(frozen=True)
 class PlannerVerdict:
-    """Result of a planner evaluation — new work or project done."""
+    """Planner decision: new work, task retirements, a wait, or project done."""
 
     project_done: bool
     reason: str
@@ -169,6 +169,7 @@ class PlannerVerdict:
     # separately so malformed formality fields never masquerade as a failed
     # planning round.
     diagnostics: tuple[str, ...] = ()
+    retire_tasks: tuple[tuple[str, str], ...] = ()
 
 
 class Planner:
@@ -547,6 +548,7 @@ _GLOBAL_KEY_VALUE_KEYS = (
     "REASON",
     "SUMMARY",
     "ADVANCE_TO_STAGE",
+    "RETIRE_TASK",
     "WAITING",
     "WAITING_REASON",
     "BLOCKER_FINGERPRINT",
@@ -596,12 +598,15 @@ _NUMBERED_TASK_KEY = re.compile(
 )
 
 
-def _planner_key_values(text: str) -> tuple[dict[str, str], list[dict[str, str]]]:
-    """Parse global fields and optional repeated ``TASK_*`` key-value blocks."""
+def _planner_key_values(
+    text: str,
+) -> tuple[dict[str, str], list[dict[str, str]], tuple[tuple[str, str], ...]]:
+    """Parse global fields, repeated task blocks, and task retirements."""
     from ..core.role_reply import decision_footer_text
 
     values: dict[str, str] = {}
     tasks: list[dict[str, str]] = []
+    retire_tasks: list[tuple[str, str]] = []
     numbered_tasks: dict[str, dict[str, str]] = {}
     current_task: dict[str, str] | None = None
     for raw_line in decision_footer_text(text).splitlines():
@@ -616,6 +621,11 @@ def _planner_key_values(text: str) -> tuple[dict[str, str], list[dict[str, str]]
         # heading or evidence line inside it may impersonate task metadata.
         if key == "PLAN_UPDATE":
             break
+        if key == "RETIRE_TASK":
+            item_id, separator, reason = value.partition("|")
+            if separator and item_id.strip() and reason.strip():
+                retire_tasks.append((item_id.strip(), reason.strip()))
+            continue
         numbered_match = _NUMBERED_TASK_KEY.match(key)
         if numbered_match is not None:
             index = numbered_match.group("index")
@@ -635,7 +645,7 @@ def _planner_key_values(text: str) -> tuple[dict[str, str], list[dict[str, str]]
     if current_task is not None:
         tasks.append(current_task)
     tasks.extend(numbered_tasks.values())
-    return values, tasks
+    return values, tasks, tuple(retire_tasks)
 
 
 def _key_value_bool(raw: str, default: bool = False) -> bool:
@@ -792,10 +802,15 @@ def _build_no_task_repair_prompt(
         "- Re-inspect current project reality as needed; do not fabricate tasks or "
         "scientific work.\n"
         f"{completion_rule}"
-        "- If work remains, include concrete tasks; repeat only for independent "
+        "- If work can start now, include concrete tasks; repeat only for independent "
         "actions. Parallel tasks require disjoint owns_paths.\n"
         "- If the project is intentionally blocked on a live external condition, "
-        "use `waiting` with a durable blocker fingerprint and recheck condition.\n"
+        "including background work launched by Argus, return `PROJECT_DONE=false`, "
+        "`WAITING=true` and no `TASK_*` blocks. Blocker fields alone do not declare "
+        "waiting. Keep the durable blocker fingerprint, recheck condition and run "
+        "token; use `WAIT_MODE=event`, `WAKE_ON=subagent_state` and "
+        "`WAIT_ID=<live subagent id>` for in-flight subagent work. Do not invent "
+        "dependent tasks while waiting for that work.\n"
         "- Do not repeat the rejected launch slogan. Say what failed, why, and what "
         "should happen next.\n\n"
         + decision_footer_instruction(
@@ -1050,14 +1065,15 @@ def parse_planner_text(text: str) -> PlannerVerdict:
     payload = _planner_payload_from_text(text)
     if payload is not None:
         return replace(parse_planner_payload(payload), raw_text=text)
-    values, task_rows = _planner_key_values(text)
-    return _planner_verdict_from_fields(text, values, task_rows)
+    values, task_rows, retire_tasks = _planner_key_values(text)
+    return _planner_verdict_from_fields(text, values, task_rows, retire_tasks)
 
 
 def _planner_verdict_from_fields(
     text: str,
     values: dict[str, str],
     task_rows: list[dict[str, str]],
+    retire_tasks: tuple[tuple[str, str], ...],
 ) -> PlannerVerdict:
     diagnostics: list[str] = []
     project_done = _parse_completion_bool(values)
@@ -1198,6 +1214,7 @@ def _planner_verdict_from_fields(
         waiting_contract=waiting_contract,
         new_tasks=new_tasks,
         diagnostics=tuple(diagnostics),
+        retire_tasks=retire_tasks,
     )
 
 
@@ -1212,6 +1229,7 @@ def _finish_planner_verdict(
     waiting_contract: WaitingContract | None,
     new_tasks: list[TaskSpec],
     diagnostics: tuple[str, ...] = (),
+    retire_tasks: tuple[tuple[str, str], ...] = (),
 ) -> PlannerVerdict:
     if waiting and not project_done and new_tasks:
         return PlannerVerdict(
@@ -1223,6 +1241,7 @@ def _finish_planner_verdict(
             waiting_reason=waiting_reason or reason,
             waiting_contract=waiting_contract,
             advance_to_stage=advance_to_stage,
+            retire_tasks=retire_tasks,
             diagnostics=(
                 *diagnostics,
                 "waiting declared with tasks; preserving both for Supervisor handling",
@@ -1255,8 +1274,9 @@ def _finish_planner_verdict(
             waiting_reason=waiting_reason or reason,
             waiting_contract=waiting_contract,
             diagnostics=diagnostics,
+            retire_tasks=retire_tasks,
         )
-    if not project_done and not new_tasks:
+    if not project_done and not new_tasks and not retire_tasks:
         return PlannerVerdict(
             project_done=False,
             reason=reason or "planner reported direct execution incomplete",
@@ -1273,6 +1293,7 @@ def _finish_planner_verdict(
             raw_text=text,
             advance_to_stage=advance_to_stage,
             diagnostics=diagnostics,
+            retire_tasks=retire_tasks,
         )
     return PlannerVerdict(
         project_done=True,
@@ -1280,4 +1301,5 @@ def _finish_planner_verdict(
         new_tasks=[],
         raw_text=text,
         diagnostics=diagnostics,
+        retire_tasks=retire_tasks,
     )

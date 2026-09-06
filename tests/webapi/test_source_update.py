@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import threading
+
 from fastapi.testclient import TestClient
 
-from argus_skill.apps.update import UpdateCheck, UpdateResult
+from argus_skill.apps.update import UpdateCheck, UpdateError, UpdateResult
 from argus_skill.webapi import server, source_update
 
 
@@ -96,3 +98,87 @@ def test_noop_source_update_finishes_without_duplicate_status_fields(
     assert status["upstream_revision"] == revision
     assert status["changed"] is False
     assert status["error"] == ""
+
+
+def test_source_update_recovers_interrupted_worker_status(tmp_path, monkeypatch) -> None:
+    source_update._write_status(tmp_path, _status(
+        state="updating", running=True, worker_pid=12345,
+    ))
+    monkeypatch.setattr(source_update, "is_pid_running", lambda _pid: False)
+
+    status = source_update.read_source_update_status(tmp_path)
+    assert status["state"] == "failed"
+    assert status["phase"] == "interrupted"
+    assert status["running"] is False
+    assert "worker exited" in status["error"]
+
+
+def test_source_check_preserves_pending_restart(tmp_path, monkeypatch) -> None:
+    source_update._write_status(tmp_path, _status(restart_required=True, changed=True))
+    monkeypatch.setattr(source_update, "inspect_source_checkout", lambda _root: UpdateCheck(
+        root=tmp_path, upstream="lbx154/Argus/main",
+        current_revision="new", upstream_revision="new", branch="main", dirty=False,
+    ))
+
+    source_update._run_source_update(tmp_path, "check", checkout=tmp_path)
+    status = source_update.read_source_update_status(tmp_path)
+    assert status["restart_required"] is True
+    assert status["changed"] is True
+
+
+def test_source_update_install_failure_does_not_claim_source_unchanged(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(source_update, "inspect_source_checkout", lambda _root: UpdateCheck(
+        root=tmp_path, upstream="lbx154/Argus/main",
+        current_revision="old", upstream_revision="new", branch="main", dirty=False,
+    ))
+    def fail_install(_root, *, python_executable, on_progress):
+        on_progress("installing")
+        raise UpdateError(
+            "pip install failed after source fast-forward",
+            result=UpdateResult(
+                root=tmp_path, upstream="lbx154/Argus/main",
+                before_revision="old", after_revision="new",
+            ),
+        )
+    monkeypatch.setattr(source_update, "update_source_checkout", fail_install)
+
+    source_update._run_source_update(tmp_path, "apply", checkout=tmp_path)
+    status = source_update.read_source_update_status(tmp_path)
+    assert status["state"] == "failed"
+    assert "pip install failed" in status["error"]
+    assert "did not change" not in status["message"]
+    assert status["current_revision"] == "new"
+    assert status["changed"] is True
+    assert status["restart_required"] is True
+
+
+def test_source_update_thread_smoke_serializes_requests_and_persists_result(
+    tmp_path, monkeypatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    def check(_root):
+        started.set()
+        assert release.wait(5)
+        return UpdateCheck(
+            root=tmp_path, upstream="lbx154/Argus/main",
+            current_revision="old", upstream_revision="new", branch="main", dirty=False,
+        )
+    monkeypatch.setattr(source_update, "source_root", lambda: tmp_path)
+    monkeypatch.setattr(source_update, "inspect_source_checkout", check)
+
+    status = source_update.start_source_update(tmp_path, action="check")
+    thread = source_update._THREADS[str(source_update._status_path(tmp_path))]
+    try:
+        assert started.wait(5)
+        assert status["running"] is True
+        duplicate = source_update.start_source_update(tmp_path, action="apply")
+        assert duplicate["running"] is True
+        assert source_update._THREADS[str(source_update._status_path(tmp_path))] is thread
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    result = source_update.read_source_update_status(tmp_path)
+    assert result["state"] == "available"
+    assert result["running"] is False

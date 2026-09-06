@@ -49,6 +49,58 @@ def test_planner_uses_only_the_explicit_final_footer() -> None:
     assert [task.title for task in verdict.new_tasks] == ["Run benchmark"]
 
 
+@pytest.mark.parametrize(
+    ("lines", "expected"),
+    [
+        (
+            "RETIRE_TASK=item-a | The experiment refuted the hypothesis.",
+            (("item-a", "The experiment refuted the hypothesis."),),
+        ),
+        (
+            "RETIRE_TASK=item-a | The experiment refuted the hypothesis.\n"
+            "RETIRE_TASK=item-b | This repair belongs to the same closed family.",
+            (
+                ("item-a", "The experiment refuted the hypothesis."),
+                ("item-b", "This repair belongs to the same closed family."),
+            ),
+        ),
+    ],
+)
+def test_parse_retire_tasks(lines: str, expected: tuple) -> None:
+    verdict = parse_planner_text(
+        "PROJECT_DONE=false\nREASON=Retire the refuted line of work.\n" + lines
+    )
+
+    assert verdict.error == ""
+    assert verdict.new_tasks == []
+    assert verdict.retire_tasks == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["RETIRE_TASK=item-a", "RETIRE_TASK=item-a | ", "RETIRE_TASK= | No item.", "RETIRE_TASK="],
+)
+def test_parse_retire_task_ignores_malformed_line(line: str) -> None:
+    verdict = parse_planner_text("PROJECT_DONE=true\nREASON=Work is complete.\n" + line)
+
+    assert verdict.error == ""
+    assert verdict.retire_tasks == ()
+
+
+def test_retire_tasks_use_only_the_footer_before_plan_update() -> None:
+    verdict = parse_planner_text(
+        "RETIRE_TASK=quoted | Discard this earlier thought.\n"
+        "Decision:\nPROJECT_DONE=false\nWAITING=true\nREASON=Await new evidence.\n"
+        "RETIRE_TASK=item-a | The hypothesis was refuted.\n"
+        "PLAN_UPDATE=# Research plan\n"
+        "RETIRE_TASK=plan-text | This is document content."
+    )
+
+    assert verdict.error == ""
+    assert verdict.waiting
+    assert verdict.retire_tasks == (("item-a", "The hypothesis was refuted."),)
+
+
 def test_structured_planner_payload_preserves_list_item_text() -> None:
     verdict = parse_planner_payload({
         "project_done": False,
@@ -321,10 +373,16 @@ def test_planner_prompt_requires_read_only_delegation_and_minimal_footer() -> No
     assert "ARGUS_ROLE_DECISION=" not in _PLANNER_CORE_CONTRACT
     assert "PROJECT_DONE=false" in _PLANNER_CORE_CONTRACT
     assert "TASK_KEY=k1" in _PLANNER_CORE_CONTRACT
+    assert "RETIRE_TASK=<item id> | <one-sentence reason>" in _PLANNER_CORE_CONTRACT
+    assert "running work and done work cannot be retired" in _PLANNER_CORE_CONTRACT
     assert "`wake_on`" in _PLANNER_CORE_CONTRACT
     assert "semantically" in _PLANNER_CORE_CONTRACT
     assert "synonyms/combined sources" in _PLANNER_CORE_CONTRACT
-    assert "bounded poll" in _PLANNER_CORE_CONTRACT
+    assert "a timed recheck" in _PLANNER_CORE_CONTRACT
+    assert "In-flight background work launched by Argus is a valid external wait" in _PLANNER_CORE_CONTRACT
+    assert "`WAITING=true`" in _PLANNER_CORE_CONTRACT
+    assert "`WAIT_ID=<live subagent id>`" in _PLANNER_CORE_CONTRACT
+    assert "no `TASK_*` blocks" in _PLANNER_CORE_CONTRACT
     for field in ("`TASK_TITLE`", "`TASK_OBJECTIVE`", "`TASK_ACCEPTANCE_CHECK`"):
         assert field in _PLANNER_CORE_CONTRACT
     for field in (
@@ -824,13 +882,49 @@ def test_plan_next_repairs_not_done_empty_task_response(monkeypatch) -> None:
     assert "Do not use tools" in runner.calls[1]["prompt"]
     assert NO_CONCRETE_TASKS_ERROR in runner.calls[1]["prompt"]
     assert "PROJECT_DONE=false" in runner.calls[1]["prompt"]
-    assert "If work remains, include concrete tasks" in runner.calls[1]["prompt"]
+    assert "If work can start now, include concrete tasks" in runner.calls[1]["prompt"]
     assert "TASK_TITLE=Run the next decisive check" in runner.calls[1]["prompt"]
     assert (
         "TASK_OBJECTIVE=execute the concrete check required by current evidence"
         in runner.calls[1]["prompt"]
     )
     assert runner.calls[1]["options"].working_dir == "/tmp/project"
+
+
+def test_repair_missing_waiting_marker_preserves_in_flight_wait(monkeypatch) -> None:
+    # The production response named the blocker but omitted WAITING=true.
+    fields = (
+        "PROJECT_DONE=false\n"
+        "REASON=Wait for the existing blind test to finish.\n"
+        "BLOCKER_FINGERPRINT=blind-test\n"
+        "RECHECK_CONDITION=blind-test finishes\n"
+        "RECHECK_TOKEN=blind-test-run-1\n"
+    )
+    runner = _SequenceRunner([
+        fields,
+        fields + "WAITING=true\nWAIT_MODE=event\nWAKE_ON=subagent_state\nWAIT_ID=blind-test",
+    ])
+    monkeypatch.setattr(
+        Planner, "_build_planner_prompt", staticmethod(lambda **kwargs: "planner prompt")
+    )
+
+    verdict = Planner(runner).plan_next(
+        continuous_objective="assess the blind test",
+        config=PlannerConfig(working_dir="/tmp/project"),
+    )
+
+    assert len(runner.calls) == 2
+    repair = runner.calls[1]["prompt"]
+    assert "Blocker fields alone do not declare waiting" in repair
+    assert "`WAITING=true` and no `TASK_*` blocks" in repair
+    assert "background work launched by Argus" in repair
+    assert verdict.error == ""
+    assert verdict.waiting is True
+    assert verdict.project_done is False
+    assert verdict.new_tasks == []
+    assert verdict.waiting_contract is not None
+    assert verdict.waiting_contract.wait_id == "blind-test"
+    assert verdict.waiting_contract.wake_on == ("subagent_state",)
 
 
 def test_plan_next_accepts_structured_decision_with_redundant_brace(monkeypatch) -> None:

@@ -12,7 +12,7 @@ Commands:
 * ``/status`` — daemon / active queue / history / cost summary
 * ``/config [key=val ...]`` — view/change session defaults
 * ``/identity`` / ``/identity set <text>`` — view or update the identity card
-* ``/backend [codex|claude|copilot|opencode|pi|grok|qoder|dsh|memory]`` — show or change backend
+* ``/backend [codex|claude|copilot|cursor|opencode|pi|grok|qoder|dsh|memory]`` — show or change backend
 * ``/reset`` — drop the current codex session id
 * ``/skills [ls|promote <name>]`` — inspect or promote skills
 * ``/backlog [all]`` — list pending tasks or the full backlog
@@ -103,7 +103,7 @@ def help_text(channel_name: str = "") -> str:
 /config [key=val ...] — 调整会话默认值
 /identity — 查看身份卡
 /identity set <text> — 单条消息更新身份卡
-/backend [codex|claude|copilot|opencode|pi|grok|qoder|dsh|memory] — 查看或切换后端
+/backend [codex|claude|copilot|cursor|opencode|pi|grok|qoder|dsh|memory] — 查看或切换后端
 /reset — 清除当前 codex 会话
 /skills [ls|promote <name>] — 查看或提升技能
 /backlog [all] — 查看待办任务
@@ -695,7 +695,6 @@ class CommandRouter:
             self._reply("用法: /nudge <指令文本>\n会注入到当前任务的下一轮执行中")
             return
         from ...apps._inbox import queue_inbox_message
-
         from ...core.operator_context import import_deterministic_credential
 
         text, _credential = import_deterministic_credential(

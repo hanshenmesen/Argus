@@ -50,20 +50,6 @@ class _FakeProc:
         return 0
 
 
-class _LingeringCopilotProc(_FakeProc):
-    def __init__(self, stdout_lines: list[str]) -> None:
-        super().__init__(stdout_lines)
-        self.returncode = None
-        self.pid = 424242
-        self.terminated = False
-
-    def poll(self):
-        return self.returncode
-
-    def wait(self, timeout=None):  # noqa: ARG002
-        return self.returncode
-
-
 @pytest.fixture()
 def _fake_copilot(monkeypatch: pytest.MonkeyPatch):
     lines = [
@@ -123,8 +109,10 @@ def test_none_callback_leaves_turn_unchanged(_fake_copilot, monkeypatch) -> None
     assert result.exit_code == 0
 
 
-def test_copilot_model_response_completes_and_reaps_lingering_cli(
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_copilot_model_response_waits_for_authoritative_result(
     monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
 ) -> None:
     final = "MILESTONE_STATUS=done\nNEXT_OWNER=reviewer"
     lines = [
@@ -142,8 +130,9 @@ def test_copilot_model_response_completes_and_reaps_lingering_cli(
                 },
             }
         ),
+        json.dumps({"type": "result", "sessionId": "sess-final", "exitCode": exit_code}),
     ]
-    process = _LingeringCopilotProc(lines)
+    process = _FakeProc(lines)
 
     monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *args, **kwargs: process)
     monkeypatch.setattr(
@@ -158,8 +147,7 @@ def test_copilot_model_response_completes_and_reaps_lingering_cli(
     )
 
     def terminate(proc, *, include_detached_children=False):  # noqa: ARG001
-        proc.terminated = True
-        proc.returncode = -15
+        raise AssertionError("model responses must not terminate the provider")
 
     monkeypatch.setattr(AgentCliRunner, "_terminate_process", staticmethod(terminate))
 
@@ -173,9 +161,9 @@ def test_copilot_model_response_completes_and_reaps_lingering_cli(
         run_label="engineer-r1",
     )
 
-    assert process.terminated is True
-    assert result.turn_completed is True
-    assert result.turn_failed is False
+    assert result.thread_id == "sess-final"
+    assert result.turn_completed is (exit_code == 0)
+    assert result.turn_failed is (exit_code != 0)
     assert result.agent_messages == [final]
 
 
@@ -342,7 +330,14 @@ def test_cli_process_starts_in_its_own_posix_session(_fake_copilot, monkeypatch)
         options=RunnerOptions(),
         run_label="stream-test",
     )
-    assert _fake_copilot["start_new_session"] is (runner_mod.os.name != "nt")
+    if runner_mod.os.name == "nt":
+        assert _fake_copilot["creationflags"] & runner_mod.subprocess.CREATE_NO_WINDOW
+        startup = _fake_copilot["startupinfo"]
+        assert startup is not None
+        assert startup.dwFlags & runner_mod.subprocess.STARTF_USESHOWWINDOW
+        assert startup.wShowWindow == runner_mod.subprocess.SW_HIDE
+    else:
+        assert _fake_copilot["start_new_session"] is True
 
 
 def test_callback_exception_never_breaks_the_turn(_fake_copilot, monkeypatch) -> None:

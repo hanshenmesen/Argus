@@ -6,6 +6,7 @@ from typing import Sequence
 
 import pytest
 
+from argus_skill.apps import update
 from argus_skill.apps.update import (
     UpdateError,
     inspect_source_checkout,
@@ -167,3 +168,53 @@ def test_inspect_source_checkout_compares_matching_published_branch_without_muta
     assert result.update_available is True
     assert result.can_update is True
     assert not any(command[:2] == ("git", "pull") for command in calls)
+
+
+@pytest.mark.parametrize("diverged", [False, True])
+def test_source_updater_real_git_smoke_follows_branch_and_refuses_divergence(
+    tmp_path: Path, monkeypatch, diverged: bool,
+) -> None:
+    def git(root, *args):
+        return subprocess.run(
+            ["git", "-c", "user.name=Argus test", "-c", "user.email=test@example.invalid", *args],
+            cwd=root, text=True, capture_output=True, check=True,
+        ).stdout.strip()
+
+    upstream = tmp_path / "published"
+    upstream.mkdir()
+    git(upstream, "init", "-b", "feature/lab")
+    (upstream / "pyproject.toml").write_text("[project]\nname='argus-skill'\n")
+    git(upstream, "add", "pyproject.toml")
+    git(upstream, "commit", "-m", "initial")
+    checkout = tmp_path / "checkout"
+    git(tmp_path, "clone", str(upstream), str(checkout))
+    if diverged:
+        (checkout / "local.txt").write_text("local change")
+        git(checkout, "add", "local.txt")
+        git(checkout, "commit", "-m", "local")
+    before = git(checkout, "rev-parse", "HEAD")
+    (upstream / "published.txt").write_text("published change")
+    git(upstream, "add", "published.txt")
+    git(upstream, "commit", "-m", "published")
+    published = git(upstream, "rev-parse", "HEAD")
+    monkeypatch.setattr(update, "PUBLIC_REPOSITORY", str(upstream))
+    check = inspect_source_checkout(checkout)
+    assert check.branch == "feature/lab"
+    assert check.upstream_revision == published
+    installs = []
+    def runner(command, cwd, timeout):
+        if command[0] == "test-python":
+            installs.append(tuple(command))
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.run(command, cwd=cwd, timeout=timeout, text=True, capture_output=True)
+
+    if diverged:
+        with pytest.raises(UpdateError, match="fast-forward"):
+            update_source_checkout(checkout, runner=runner, python_executable="test-python")
+        assert git(checkout, "rev-parse", "HEAD") == before
+        assert installs == []
+    else:
+        result = update_source_checkout(checkout, runner=runner, python_executable="test-python")
+        assert result.after_revision == published
+        assert result.before_revision == before
+        assert installs == [("test-python", "-m", "pip", "install", "-e", str(checkout))]

@@ -159,7 +159,9 @@ class AgentCliRunner:
 @pytest.fixture(autouse=True)
 def fake_agent_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     pkg = ModuleType("argus_skill.agent_cli")
-    setattr(pkg, "__path__", [])
+    # Fake the runner boundary while allowing newly imported supervisor
+    # helpers to resolve untouched bundled modules such as process control.
+    setattr(pkg, "__path__", [str(Path(__file__).resolve().parents[1] / "argus_skill" / "agent_cli")])
 
     runner_mod = ModuleType("argus_skill.agent_cli.agent_cli_runner")
     runner_mod.__dict__["AgentCliRunner"] = AgentCliRunner
@@ -245,6 +247,8 @@ def _configure_relay_credential(
     *,
     environment_token: str | None = None,
 ) -> Path:
+    from argus_skill.provider_integrations import authorization_retry
+
     codex_home = tmp_path / "codex"
     codex_home.mkdir()
     (codex_home / "config.toml").write_text(
@@ -262,6 +266,11 @@ def _configure_relay_credential(
         encoding="utf-8",
     )
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        authorization_retry.Path,
+        "home",
+        classmethod(lambda cls: tmp_path),
+    )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setenv(
         "COPILOT_RELAY_TOKEN",
@@ -781,7 +790,7 @@ def test_settled_call_cost_blocks_the_next_call_at_global_cap(
     assert "global daily budget exhausted" in str(denied.fatal_error)
 
 
-def test_unpriced_call_is_observed_without_blocking_next_provider_spawn(
+def test_unpriced_call_blocks_next_provider_spawn_when_policy_is_block(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -828,9 +837,10 @@ def test_unpriced_call_is_observed_without_blocking_next_provider_spawn(
 
     assert first.pricing_status == "unpriced"
     assert first.cost_usd is None
-    assert calls == ["engineer-r1", "reviewer"]
-    assert second.fatal_error is None
-    assert second.pricing_status == "priced"
+    assert calls == ["engineer-r1"]
+    assert "unresolved provider cost" in second.fatal_error
+    assert second.stop_kind == "budget_exhausted"
+    assert second.pricing_status == "not_billed"
     state = json.loads((root / "cost-control.json").read_text())
     assert [row["call_id"] for row in state["unresolved"]] == [first.call_id]
 
@@ -2298,6 +2308,31 @@ def test_build_agent_cli_backend_from_env_uses_env(monkeypatch):
     assert backend._default_watchdog_hard_idle_seconds == 900
 
 
+def test_fork_creates_independent_runner_with_same_usage_context(tmp_path: Path) -> None:
+    backend = AgentCliBackend(
+        backend="copilot",
+        runner_bin="/bin/echo",
+        default_extra_args=["--trace"],
+        default_watchdog_soft_idle_seconds=11,
+        default_watchdog_stalled_idle_seconds=22,
+        default_watchdog_hard_idle_seconds=33,
+    )
+    backend.set_usage_context(
+        project_root=tmp_path / "project",
+        global_root=tmp_path,
+        mission_id="review",
+    )
+
+    forked = backend.fork()
+
+    assert forked is not backend
+    assert forked._runner is not backend._runner
+    assert forked._runner.agent_bin == backend._runner.agent_bin
+    assert forked._runner.default_extra_args == ["--trace"]
+    assert forked._usage_context_snapshot() == backend._usage_context_snapshot()
+    forked.close_acp_clients()
+
+
 def test_build_agent_cli_backend_from_env_strips_legacy_auto_max_profile(
     monkeypatch,
 ):
@@ -2328,3 +2363,37 @@ def test_build_agent_cli_backend_from_env_defaults(monkeypatch):
     assert backend._default_watchdog_soft_idle_seconds == 600
     assert backend._default_watchdog_stalled_idle_seconds == 1800
     assert backend._default_watchdog_hard_idle_seconds == 0
+
+
+def test_build_backend_default_does_not_reuse_persisted_dsh_runner(
+    monkeypatch,
+):
+    from argus_skill.adapters.agent_cli_backend import _core
+    from argus_skill.core import knob_store
+
+    monkeypatch.setattr(
+        knob_store,
+        "read_persisted_knobs",
+        lambda: {
+            "ARGUS_SKILL_RUNNER_BACKEND": "dsh",
+            "ARGUS_SKILL_RUNNER_BIN": "/persisted/dsh",
+        },
+    )
+    captured = {}
+    monkeypatch.setattr(
+        _core,
+        "AgentCliBackend",
+        lambda **kwargs: captured.update(kwargs) or captured,
+    )
+
+    for configured_backend in (None, "   "):
+        if configured_backend is None:
+            monkeypatch.delenv("ARGUS_SKILL_RUNNER_BACKEND", raising=False)
+        else:
+            monkeypatch.setenv("ARGUS_SKILL_RUNNER_BACKEND", configured_backend)
+        monkeypatch.delenv("ARGUS_SKILL_RUNNER_BIN", raising=False)
+        captured.clear()
+
+        assert build_agent_cli_backend_from_env() is captured
+        assert captured["backend"] == "codex"
+        assert captured["runner_bin"] is None

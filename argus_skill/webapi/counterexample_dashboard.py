@@ -4,28 +4,39 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import time
+from itertools import islice
 from pathlib import Path
 from typing import Any
+
+from .artifacts import safe_artifact_path
 
 _MAX_FILE_BYTES = 4 * 1024 * 1024
 _MAX_CANDIDATES = 500
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
 
-def _csv_rows(path: Path) -> list[dict[str, str]]:
+def _csv_rows(workspace: Path, relative_path: str) -> list[dict[str, str]]:
+    entry = safe_artifact_path(workspace, relative_path)
+    if entry is None:
+        return []
+    _, path = entry
     try:
         if not path.is_file() or path.stat().st_size > _MAX_FILE_BYTES:
             return []
         with path.open(encoding="utf-8-sig", newline="") as handle:
-            return [dict(row) for row in csv.DictReader(handle)][: _MAX_CANDIDATES]
+            return list(islice(csv.DictReader(handle), _MAX_CANDIDATES))
     except (OSError, csv.Error, UnicodeError):
         return []
 
 
 def _latest_claim_status(workspace: Path) -> dict[str, str]:
-    path = workspace / "research" / "MATH_STATE.json"
+    entry = safe_artifact_path(workspace, "research/MATH_STATE.json")
+    if entry is None:
+        return {}
+    _, path = entry
     try:
         if not path.is_file() or path.stat().st_size > _MAX_FILE_BYTES:
             return {}
@@ -33,7 +44,10 @@ def _latest_claim_status(workspace: Path) -> dict[str, str]:
     except (OSError, json.JSONDecodeError, UnicodeError):
         return {}
     latest: dict[str, tuple[int, str]] = {}
-    for claim in payload.get("claims", []) if isinstance(payload, dict) else []:
+    claims = payload.get("claims", []) if isinstance(payload, dict) else []
+    if not isinstance(claims, list):
+        return {}
+    for claim in claims:
         if not isinstance(claim, dict):
             continue
         claim_id = str(claim.get("claim_id") or "")
@@ -65,18 +79,24 @@ def _latest_claim_status(workspace: Path) -> dict[str, str]:
 
 def _parallel_state(workspace: Path, item_id: str) -> tuple[int, float]:
     root = workspace / "parallel" / item_id
-    if root.is_symlink() or not root.is_dir():
+    if root.is_symlink() or not root.is_dir() or not root.resolve().is_relative_to(workspace):
         return 0, 0.0
     count = 0
+    scanned = 0
     updated_at = 0.0
+    pending = [root]
     try:
-        for path in root.rglob("*"):
-            if count >= 200:
-                break
-            if path.is_symlink() or not path.is_file():
-                continue
-            count += 1
-            updated_at = max(updated_at, path.stat().st_mtime)
+        while pending and scanned < 200:
+            with os.scandir(pending.pop()) as entries:
+                for child in entries:
+                    scanned += 1
+                    if child.is_dir(follow_symlinks=False):
+                        pending.append(Path(child.path))
+                    elif child.is_file(follow_symlinks=False):
+                        count += 1
+                        updated_at = max(updated_at, child.stat().st_mtime)
+                    if scanned >= 200:
+                        break
     except OSError:
         pass
     return count, updated_at
@@ -97,9 +117,9 @@ def _progress(status: str) -> int:
 
 def build_counterexample_dashboard(workspace: Path | str) -> dict[str, Any]:
     root = Path(workspace).expanduser().resolve()
-    candidates = _csv_rows(root / "inputs" / "priority_pool.csv")
-    accepted = {row.get("ID", ""): row for row in _csv_rows(root / "outputs" / "results.csv")}
-    rejected = {row.get("ID", ""): row for row in _csv_rows(root / "outputs" / "rejected.csv")}
+    candidates = _csv_rows(root, "inputs/priority_pool.csv")
+    accepted = {row.get("ID", ""): row for row in _csv_rows(root, "outputs/results.csv")}
+    rejected = {row.get("ID", ""): row for row in _csv_rows(root, "outputs/rejected.csv")}
     claim_status = _latest_claim_status(root)
     rows: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -108,8 +128,8 @@ def build_counterexample_dashboard(workspace: Path | str) -> dict[str, Any]:
             continue
         accepted_row = accepted.get(item_id)
         rejected_row = rejected.get(item_id)
-        evidence_path = root / "evidence" / item_id / "README.md"
-        evidence_exists = evidence_path.is_file() and not evidence_path.is_symlink()
+        evidence = safe_artifact_path(root, f"evidence/{item_id}/README.md")
+        evidence_exists = evidence is not None and evidence[1].is_file()
         parallel_files, parallel_updated_at = _parallel_state(root, item_id)
         status = claim_status.get(item_id, "queued")
         if parallel_files:
@@ -121,11 +141,15 @@ def build_counterexample_dashboard(workspace: Path | str) -> dict[str, Any]:
         if accepted_row:
             status = "verified"
         mtimes = [parallel_updated_at]
-        for path in (
-            evidence_path,
-            root / "outputs" / "results.csv",
-            root / "outputs" / "rejected.csv",
+        for relative_path in (
+            f"evidence/{item_id}/README.md",
+            "outputs/results.csv" if accepted_row else "",
+            "outputs/rejected.csv" if rejected_row else "",
         ):
+            entry = safe_artifact_path(root, relative_path)
+            if entry is None:
+                continue
+            _, path = entry
             try:
                 if path.is_file():
                     mtimes.append(path.stat().st_mtime)

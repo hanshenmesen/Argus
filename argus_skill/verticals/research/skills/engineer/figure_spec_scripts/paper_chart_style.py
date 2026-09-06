@@ -11,9 +11,9 @@ tick labels in the wrong size, colours that collapse to identical greys under
 colour-blind simulation. The result reads as "ugly and inconsistent" next to a
 real conference paper. This module gives every figure ONE journal-grade look:
 
-* SciencePlots ``['science','no-latex']`` base (thin spines, inward ticks,
-  serif-ish math) — degrades gracefully to a hand-rolled rcParams theme if
-  SciencePlots is not installed, so it never hard-fails in a project venv.
+* Required SciencePlots ``['science','no-latex']`` base (thin spines, inward
+  ticks, serif-ish math). Data-figure generation fails with an actionable
+  installation error rather than silently reverting to a different renderer.
 * Three named, **colour-blind-safe** palettes (seaborn) so figures are
   distinguishable in print and under CVD: ``colorblind`` (default),
   ``muted`` (cool journal tone), ``high_contrast`` (talks/posters).
@@ -34,7 +34,7 @@ Usage
 -----
     from paper_chart_style import set_pub_style, highlight_ours, figure_size
 
-    colors = set_pub_style(venue="EMNLP", column="double", palette="colorblind")
+    colors = set_pub_style(column="double", palette="colorblind")
     fig, ax = plt.subplots(figsize=figure_size(column="double"))
     ...
     highlight_ours(ax, ours_index=2)   # emphasise the "Ours" series
@@ -44,6 +44,7 @@ Run ``python3 paper_chart_style.py`` to render a before/after demo comparison.
 """
 from __future__ import annotations
 
+import importlib
 import sys
 from typing import Sequence
 
@@ -74,33 +75,46 @@ DEFAULT_PALETTE = "colorblind"
 # Neutral grey used to de-emphasise baselines when highlighting "Ours".
 BASELINE_GREY = "#9A9A9A"
 
-# Venue families that are SINGLE-column (NeurIPS/ICML/…): a full-page-width
-# text block, no ``figure*`` distinction. Everything else is treated as a
-# two-column venue (EMNLP/ACL/AAAI/CVPR-style).
-_SINGLE_COLUMN_VENUES = {
-    "NEURIPS", "NIPS", "ICML", "ICLR", "JMLR", "TMLR", "COLM", "RLC",
-}
+def _project_two_column() -> bool:
+    """Column layout from the project's researched venue profile.
 
+    The venue-format research step writes ``research/VENUE_PROFILE.json`` from
+    the venue's official author kit; its ``two_column`` field says whether the
+    template is two-column. Walk up from the working directory to find it.
+    Defaults to two-column (the most common conference layout) when no profile
+    is found or it cannot be read.
+    """
+    import json
+    from pathlib import Path
 
-def _is_two_column(venue: str | None) -> bool:
-    if not venue:
-        return True
-    return venue.strip().upper() not in _SINGLE_COLUMN_VENUES
+    for root in [Path.cwd(), *Path.cwd().parents]:
+        path = root / "research" / "VENUE_PROFILE.json"
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return True
+            if isinstance(payload, dict):
+                return bool(payload.get("two_column", True))
+            return True
+    return True
 
 
 def figure_size(
     column: str = "single",
     *,
-    venue: str | None = None,
+    two_column: bool | None = None,
     aspect: float = 0.66,
 ) -> tuple[float, float]:
     """Physical figure size (inches) matching the LaTeX float it will sit in.
 
     ``column='single'`` → a one-column ``figure``; ``column='double'`` → a
     full-width ``figure*``. Widths follow the real text/column widths so LaTeX
-    does not rescale the graphic (rescaling is what warps the fonts).
+    does not rescale the graphic (rescaling is what warps the fonts). When
+    ``two_column`` is not given, the project's researched venue profile
+    decides.
     """
-    two_col = _is_two_column(venue)
+    two_col = _project_two_column() if two_column is None else bool(two_column)
     if two_col:
         width = 6.9 if column == "double" else 3.3   # \textwidth vs \columnwidth
     else:
@@ -108,56 +122,46 @@ def figure_size(
     return (width, round(width * aspect, 2))
 
 
-def _fallback_rcparams() -> dict:
-    """Hand-rolled journal theme used when SciencePlots is unavailable."""
-    return {
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
-        "mathtext.fontset": "dejavusans",
-        "axes.linewidth": 0.8,
-        "axes.grid": True,
-        "grid.linewidth": 0.5,
-        "grid.alpha": 0.35,
-        "xtick.direction": "in",
-        "ytick.direction": "in",
-        "xtick.major.width": 0.8,
-        "ytick.major.width": 0.8,
-        "legend.frameon": False,
-    }
+def _apply_scienceplots_style() -> None:
+    """Register and apply the required publication style."""
+    import matplotlib.pyplot as plt
+
+    try:
+        importlib.import_module("scienceplots")
+    except ImportError as exc:
+        raise RuntimeError(
+            "SciencePlots is required for research data figures. Install the "
+            "plotting stack with `pip install 'argus-skill[figures]'` or "
+            "`pip install matplotlib seaborn SciencePlots`."
+        ) from exc
+    plt.style.use(["science", "no-latex"])
 
 
 def set_pub_style(
-    venue: str | None = None,
     *,
     column: str = "single",
     palette: str = DEFAULT_PALETTE,
+    two_column: bool | None = None,
 ) -> list[str]:
     """Apply the shared publication style and return the active colour list.
 
-    Safe to call once at the top of an analysis script. Never raises on a
-    missing optional dependency: SciencePlots is used if importable, otherwise
-    a built-in rcParams theme is applied. Returns the palette so callers can
-    cycle colours explicitly (``colors[i]``) when auto-cycling is not enough.
+    Safe to call once at the top of an analysis script. SciencePlots is a
+    required dependency for this data-figure path; a missing installation is
+    surfaced instead of producing a visually inconsistent fallback. Returns
+    the palette so callers can cycle colours explicitly (``colors[i]``) when
+    auto-cycling is not enough.
     """
     import matplotlib as mpl
-    import matplotlib.pyplot as plt
-
     colors = PALETTES.get(palette, PALETTES[DEFAULT_PALETTE])
 
-    # Base theme: SciencePlots if present, else our fallback rcParams.
-    try:
-        import scienceplots  # noqa: F401  (registers the styles)
-
-        plt.style.use(["science", "no-latex"])
-    except Exception:  # noqa: BLE001 — optional dep / registration hiccup
-        mpl.rcParams.update(_fallback_rcparams())
+    _apply_scienceplots_style()
 
     # Sizes tuned for 8–9pt body text at final print size.
-    two_col = _is_two_column(venue)
+    two_col = _project_two_column() if two_column is None else bool(two_column)
     base = 9 if two_col else 10
     mpl.rcParams.update(
         {
-            "figure.figsize": figure_size(column, venue=venue),
+            "figure.figsize": figure_size(column, two_column=two_col),
             "figure.dpi": 150,
             "savefig.dpi": 600,
             "savefig.bbox": "tight",
@@ -191,27 +195,39 @@ def highlight_ours(
 ) -> None:
     """De-emphasise baselines and make the OUR series pop.
 
-    Works for both bar charts (an ``ax.containers`` / patch group) and line
-    plots (``ax.get_lines()``). Baselines fade to neutral grey; the series at
-    ``ours_index`` keeps full saturation, gains a dark outline / heavier
-    weight, and is drawn on top. ``ours_index`` counts the plotted series in
-    draw order (0-based).
+    Works for both bar charts and line plots. With multiple bar containers,
+    ``ours_index`` selects one plotted series and styles every bar in that
+    container. With one bar container, it selects one category for backward
+    compatibility. For line plots it selects one line. Baselines fade to
+    neutral grey; Ours keeps full saturation, gains a dark outline / heavier
+    weight, and is drawn on top.
     """
     # --- bar charts -------------------------------------------------------
-    bars = [p for p in getattr(ax, "patches", [])]
-    if bars and not ax.get_lines():
-        for i, bar in enumerate(bars):
-            if i == ours_index:
-                if ours_color:
-                    bar.set_facecolor(ours_color)
-                bar.set_edgecolor("black")
-                bar.set_linewidth(1.2)
-                bar.set_alpha(1.0)
-                bar.set_zorder(3)
-            else:
-                bar.set_facecolor(baseline_grey)
-                bar.set_alpha(0.85)
-                bar.set_zorder(2)
+    containers = [
+        container
+        for container in getattr(ax, "containers", [])
+        if getattr(container, "patches", None)
+    ]
+    if containers:
+        grouped = len(containers) > 1
+        for container_index, container in enumerate(containers):
+            for category_index, bar in enumerate(container.patches):
+                selected = (
+                    container_index == ours_index
+                    if grouped
+                    else category_index == ours_index
+                )
+                if selected:
+                    if ours_color:
+                        bar.set_facecolor(ours_color)
+                    bar.set_edgecolor("black")
+                    bar.set_linewidth(1.2)
+                    bar.set_alpha(1.0)
+                    bar.set_zorder(3)
+                else:
+                    bar.set_facecolor(baseline_grey)
+                    bar.set_alpha(0.85)
+                    bar.set_zorder(2)
         return
 
     # --- line charts ------------------------------------------------------
@@ -272,7 +288,7 @@ def _demo(out_dir: str = "/tmp") -> list[str]:
     written.append(before)
 
     # AFTER — shared publication style + highlight Ours.
-    set_pub_style(venue="EMNLP", column="single", palette="colorblind")
+    set_pub_style(column="single", palette="colorblind")
     fig, ax = plt.subplots()
     markers = ["o", "s", "D"]
     for (name, ys), m in zip(series.items(), markers):

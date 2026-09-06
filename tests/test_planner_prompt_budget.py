@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from argus_skill.core.pipeline_state import read_pipeline_state, write_pipeline_state
+from argus_skill.life.memory import EventJournal
 from argus_skill.life.supervisor import LifeSupervisor
 from argus_skill.planner import Planner
+from argus_skill.roles.prompts.planner import _RESEARCH_PLAN_CONTRACT
 from argus_skill.skills.vertical_select import persist_vertical
 
 # Raised from 9_500 / 15_000 when the math vertical gained the objective mode
@@ -38,8 +41,8 @@ from argus_skill.skills.vertical_select import persist_vertical
 # Raised by 1,100 for the fixed living-research-plan contract. The plan itself
 # has a separate 8,000-character projection cap tested below, so future policy
 # prose cannot silently consume that dynamic-state allowance.
-MATH_SCOPE_BUDGET = 12_350
-MATURE_MATH_SCOPE_BUDGET = 18_150
+MATH_SCOPE_BUDGET = 12_650
+MATURE_MATH_SCOPE_BUDGET = 18_450
 RESEARCH_PLAN_DYNAMIC_BUDGET = 8_000
 
 
@@ -181,17 +184,19 @@ def test_bounded_planner_rejects_tautological_acceptance_checks() -> None:
     assert "never emit `or True`, `|| true`, unconditional success" in prompt
 
 
-def test_research_submission_prompt_prescribes_final_submission_scope(
+def test_research_prompt_carries_no_final_submission_scope_machinery(
     tmp_path,
     monkeypatch,
 ) -> None:
+    """The final-submission scope block was removed with the rest of the
+    scripted verification machinery; the review stage judges the submission."""
     persist_vertical(
         tmp_path,
         "research",
         research_target_level="publishable",
     )
     state = read_pipeline_state(tmp_path)
-    state["current_stage"] = "submission"
+    state["current_stage"] = "review"
     write_pipeline_state(tmp_path, state)
     monkeypatch.setenv("ARGUS_SKILL_PROJECT_ROOT", str(tmp_path))
 
@@ -206,10 +211,9 @@ def test_research_submission_prompt_prescribes_final_submission_scope(
         open_ended=True,
     )
 
-    assert "## Final-submission task scope" in prompt
-    assert '`scope:"final_submission"`' in prompt
-    assert "`TASK_SCOPE=final_submission`" in prompt
-    assert "verticals without a final-submission or research-target gate" in prompt
+    # The scope marker itself survives (completion accounting reads it); the
+    # prescriptive section that scripted the final-submission workflow is gone.
+    assert "## Final-submission task scope" not in prompt
 
 
 def test_mature_math_prompt_keeps_only_bounded_terminal_history(
@@ -265,7 +269,17 @@ def test_planner_journal_uses_latest_three_terminal_outcomes() -> None:
         ),
     ]
     supervisor = LifeSupervisor.__new__(LifeSupervisor)
-    supervisor.memory = SimpleNamespace(journal=SimpleNamespace(tail=lambda _count: entries))
+    supervisor.memory = SimpleNamespace(
+        journal=SimpleNamespace(
+            tail_kinds=lambda _count, *, kinds: [
+                entry for entry in entries if entry.kind in kinds
+            ][-_count:],
+            tail_settlements=lambda _count, *, kinds=None: [
+                entry for entry in entries
+                if kinds is None or entry.kind in kinds
+            ][-_count:],
+        ),
+    )
 
     rendered = supervisor._render_journal_for_planner()
 
@@ -276,6 +290,49 @@ def test_planner_journal_uses_latest_three_terminal_outcomes() -> None:
     assert all(f"terminal-{index}" in rendered for index in range(2, 4))
     assert "paused-methods" in rendered
     assert len(rendered) <= 3 * 1_800 + 2
+
+
+def test_planner_journal_window_survives_waiting_heartbeat_floods(tmp_path) -> None:
+    """Journal chatter after a settlement must not hide the settlement.
+
+    The window used to be ``tail(64)`` post-filtered by kind, so 70 waiting
+    heartbeats systematically evicted every terminal outcome the Planner was
+    supposed to reason over. An independent ``life.budget.pause`` event (which
+    has no settlement source) must also stay visible so the Planner can see
+    why nothing is running.
+    """
+    path = tmp_path / "events.jsonl"
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "life.mission.completed",
+            "item_id": "aaaa1111bbbb",
+            "ts": 1.0,
+            "success": True,
+            "status": "done",
+            "title": "settled mission",
+            "summary": "landed the result",
+        }) + "\n")
+        for index in range(70):
+            fh.write(json.dumps({
+                "type": "life.planner.waiting",
+                "ts": 2.0 + index,
+                "reason": "waiting on external dependency",
+            }) + "\n")
+        fh.write(json.dumps({
+            "type": "life.budget.pause",
+            "ts": 100.0,
+            "title": "budget pause",
+            "reason": "daily cap reached",
+        }) + "\n")
+
+    supervisor = LifeSupervisor.__new__(LifeSupervisor)
+    supervisor.memory = SimpleNamespace(journal=EventJournal(path))
+
+    rendered = supervisor._render_journal_for_planner()
+
+    assert "settled mission" in rendered
+    assert "budget pause" in rendered
+    assert "waiting on external dependency" not in rendered
 
 
 def _research_plan(*, experiment_fill: str = "") -> str:
@@ -295,11 +352,17 @@ def _research_plan(*, experiment_fill: str = "") -> str:
     )
 
 
-def test_planner_prompt_renders_existing_living_research_plan(
+def test_research_planner_prompt_drops_frozen_plan_block(
     tmp_path,
 ) -> None:
+    """The research vertical no longer plans through a frozen RESEARCH_PLAN.md:
+    the experimental design lives in the experiment stage and is revised in
+    contact with evidence, so the planner prompt carries no plan block even
+    when a plan file exists."""
     from argus_skill.life.research_plan import render_research_plan_for_planner
+    from argus_skill.skills.vertical_select import persist_vertical
 
+    persist_vertical(tmp_path, "research")
     plan = _research_plan()
     (tmp_path / "RESEARCH_PLAN.md").write_text(plan, encoding="utf-8")
     rendered = render_research_plan_for_planner(tmp_path)
@@ -312,11 +375,8 @@ def test_planner_prompt_renders_existing_living_research_plan(
         state_root=tmp_path,
     )
 
-    assert "## Research plan (living document)" in prompt
-    assert plan in prompt
-    assert "PLAN_UPDATE" in prompt
-    assert "never delete a Dead" not in prompt  # guard exact contract wording below
-    assert "Never delete a Dead\nends entry" in prompt
+    assert "## Research plan (living document)" not in prompt
+    assert "PLAN_UPDATE" not in prompt
 
 
 def test_planner_prompt_marks_absent_or_corrupt_plan_for_creation(tmp_path) -> None:
@@ -329,6 +389,11 @@ def test_planner_prompt_marks_absent_or_corrupt_plan_for_creation(tmp_path) -> N
     assert "no plan yet" in absent
     assert "create RESEARCH_PLAN.md" in absent
     assert corrupt == absent
+
+
+def test_research_plan_contract_avoids_hard_result_gates() -> None:
+    assert "without fixed numeric pass/fail thresholds" in _RESEARCH_PLAN_CONTRACT
+    assert "scientifically valuable improvement" in _RESEARCH_PLAN_CONTRACT
 
 
 def test_oversize_research_plan_keeps_head_and_next_milestone_with_hard_cap(

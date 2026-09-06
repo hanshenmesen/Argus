@@ -18,6 +18,7 @@ from ..apps.update import (
     public_upstream,
     update_source_checkout,
 )
+from ..core.daemon_lock import is_pid_running
 from ..core.runtime_identity import runtime_identity, source_root
 
 STATUS_FILE = "source-update.json"
@@ -84,6 +85,17 @@ def read_source_update_status(global_root: Path | str) -> dict[str, Any]:
         return _initial_status()
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         return _initial_status()
+    if payload.get("running") and not is_pid_running(int(payload.get("worker_pid") or 0)):
+        return _write_status(
+            global_root,
+            {
+                **payload,
+                "state": "failed",
+                "phase": "interrupted",
+                "running": False,
+                "error": "The source-update worker exited before completing the job.",
+            },
+        )
     return payload
 
 
@@ -99,7 +111,10 @@ def _run_source_update(
 ) -> None:
     root = (checkout or source_root()).expanduser().resolve()
     try:
-        _merge_status(global_root, state="checking", phase="checking", running=True)
+        _merge_status(
+            global_root, state="checking", phase="checking", running=True,
+            worker_pid=os.getpid(),
+        )
         check = inspect_source_checkout(root)
         common = {
             "source_root": str(check.root),
@@ -119,8 +134,6 @@ def _run_source_update(
                 state="available" if check.update_available else "current",
                 phase="complete",
                 running=False,
-                changed=False,
-                restart_required=False,
                 message=(
                     "Version check complete. Local changes block source updates."
                     if check.dirty
@@ -162,7 +175,9 @@ def _run_source_update(
                 "upstream_revision": result.after_revision,
                 "update_available": False,
                 "changed": result.changed,
-                "restart_required": result.changed,
+                "restart_required": result.changed or bool(
+                    read_source_update_status(global_root).get("restart_required")
+                ),
                 "message": (
                     "Latest source installed. Restart the cockpit and safely reload active daemons."
                     if result.changed
@@ -172,12 +187,20 @@ def _run_source_update(
             },
         )
     except Exception as exc:  # noqa: BLE001 - failure is persisted for the UI
+        changed = {}
+        if isinstance(exc, UpdateError) and exc.result is not None:
+            changed = {
+                "current_revision": exc.result.after_revision,
+                "changed": exc.result.changed,
+                "restart_required": exc.result.changed,
+            }
         _merge_status(
             global_root,
+            **changed,
             state="failed",
             phase="failed",
             running=False,
-            message="The update did not change the installed source.",
+            message="Source update failed. Inspect the error before retrying.",
             error=str(exc)[:1000],
         )
     finally:
@@ -197,15 +220,17 @@ def start_source_update(
         active = _THREADS.get(key)
         if active is not None and active.is_alive():
             return read_source_update_status(global_root)
+        current = read_source_update_status(global_root)
+        if current.get("running"):
+            return current
         status = _write_status(
             global_root,
             {
-                **read_source_update_status(global_root),
+                **current,
                 "state": "checking" if action == "check" else "updating",
                 "phase": "queued",
                 "running": True,
-                "changed": False,
-                "restart_required": False,
+                "worker_pid": os.getpid(),
                 "message": (
                     "Checking the published branch…"
                     if action == "check"

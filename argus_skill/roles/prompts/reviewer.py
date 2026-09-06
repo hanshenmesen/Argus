@@ -18,8 +18,10 @@ from ..task_contract import (
 from .types import ChecklistMode, RoleName, RolePromptRequest
 
 EVALUATE = "evaluate"
+SCIENCE_LOSS_CHECK = "science_loss_check"
+COLD_READ = "cold_read"
 
-OPERATIONS = frozenset({EVALUATE})
+OPERATIONS = frozenset({EVALUATE, SCIENCE_LOSS_CHECK, COLD_READ})
 
 _REEVALUATE_HEADER = (
     "## NEW ROUND — RE-EVALUATE INDEPENDENTLY (resumed reviewer)\n"
@@ -30,8 +32,6 @@ _REEVALUATE_HEADER = (
     "the prior verdict left unresolved. The role, rubric, and decision rules "
     "still bind.\n\n"
 )
-
-_MAX_SHARED_CTX_CHARS = 100_000_000
 
 # Acceptance settles effort, never truth. Once one round accepted a 6% score on
 # a benchmark where the model publishes ~80%, this boundary forbade every later
@@ -78,10 +78,11 @@ def evaluate_request(
     stage: str | None = None,
     vertical: str | None = None,
     checklist_mode: ChecklistMode = ChecklistMode.AUTO,
+    operation: str = EVALUATE,
 ) -> RolePromptRequest:
     return RolePromptRequest(
         role=RoleName.REVIEWER,
-        operation=EVALUATE,
+        operation=operation,
         project_root=project_root,
         # The facts are about the work, which lives in the worktree, not in
         # state/projects/<session>/ where the stage is read from.
@@ -214,8 +215,6 @@ def _format_engineer_shared_context(
     if skill:
         parts.append(f"- skill_used: {skill}")
     if prev:
-        if len(prev) > _MAX_SHARED_CTX_CHARS:
-            prev = prev[:_MAX_SHARED_CTX_CHARS].rstrip() + "..."
         indented = "\n".join("    " + line for line in prev.splitlines())
         parts.append("- previous_review_summary:\n" + indented)
     return "\n".join(parts) + "\n\n"
@@ -224,6 +223,7 @@ def _format_engineer_shared_context(
 def render_reviewer_prompt(
     owner: Any,
     *,
+    operation: str = EVALUATE,
     resumed: bool = False,
     objective: str,
     original_objective: str = "",
@@ -336,6 +336,7 @@ def render_reviewer_prompt(
                 if explicit_vertical and not _persisted
                 else ChecklistMode.AUTO
             ),
+            operation=operation,
         )
     )
     persisted_prompt_context = (
@@ -344,6 +345,7 @@ def render_reviewer_prompt(
                 _proot,
                 vertical=routed_vertical,
                 checklist_mode=ChecklistMode.NONE,
+                operation=operation,
             )
         )
         if routed_vertical is not None
@@ -362,6 +364,13 @@ def render_reviewer_prompt(
         if review_libraries.block:
             matched_review_skill_block = review_libraries.block + "\n\n"
     stage = prompt_context.stage
+    research_context_block = ""
+    if prompt_context.vertical == "research" and operation == EVALUATE:
+        from ...verticals.research.prompt_policy import active_research_context
+
+        research_context_block = active_research_context(
+            stage, resolve_project_root(working_dir) if working_dir else _proot
+        )
     direct_workflow = resolve_workflow_mode(_proot) == "direct"
     _measured = not _requires_engineering_audit and os.environ.get(
         "ARGUS_SKILL_MEASURED_MODE", ""
@@ -418,9 +427,9 @@ def render_reviewer_prompt(
                 "End with `RESEARCH_RESULT=<JSON>` over evidence you inspected. "
                 "`evidence` and `limitations` are JSON string arrays; a survey is "
                 "`literature_review` with `novelty_status` `known` or "
-                "`not_applicable`. Every field below takes one listed value "
-                "verbatim — any other value voids the whole result, however well "
-                "it describes the work:\n"
+                "`not_applicable`. Use one listed value per field so the record "
+                "stays comparable across campaigns; the block summarizes your "
+                "verdict and never replaces it:\n"
                 + "".join(
                     f"{_field}: {' '.join(_choices)}\n"
                     for _field, _choices in RESULT_FIELD_CHOICES
@@ -471,7 +480,7 @@ def render_reviewer_prompt(
             "in the operator's language (Chinese here), answerable in a sentence "
             "— no jargon/JSON/template names.\n"
             "- `done` is rare here — only at/above the known ceiling.\n"
-            "Ignore GROUND_TRUTH/gate/marker/status/provenance files (the harness "
+            "Ignore GROUND_TRUTH/marker/status/provenance files (the harness "
             "ignores them) and artifact hygiene — the scorer's number is the only "
             "evidence. A round that MEASURED a real number, even a worse one, made "
             "progress by ruling out a mechanism. This OVERRIDES the generic "
@@ -500,14 +509,25 @@ def render_reviewer_prompt(
     stage_order = prompt_context.stage_order
     stage_idx = stage_order.index(stage) if stage in stage_order else 0
     earlier_stages = ", ".join(stage_order[:stage_idx]) or "(none)"
-    rollback_block = (
-        "## Upstream defects\n"
-        f"Current stage: `{stage}`. Earlier stages: {earlier_stages}.\n"
-        "Rollback only when a concrete earlier defect makes the current result unusable. "
-        "Optional or non-claim-critical artifacts are advisory. If rollback is necessary, "
-        "return `replan_requested` with the earliest stage and evidence; Manager owns rollback. "
-        "Never edit `.argus/PIPELINE_STATE.json`."
-    )
+    if prompt_context.vertical == "research":
+        rollback_block = (
+            "## Upstream defects\n"
+            f"Current stage: `{stage}`. Earlier stages: {earlier_stages}.\n"
+            "Research stages are forward-only. If an earlier method, experiment, "
+            "or paper defect affects current work, keep this stage and return the "
+            "concrete repair as `next_action`; never request rollback or reopen "
+            "idea selection. Never edit `.argus/PIPELINE_STATE.json`."
+        )
+    else:
+        rollback_block = (
+            "## Upstream defects\n"
+            f"Current stage: `{stage}`. Earlier stages: {earlier_stages}.\n"
+            "Rollback only when a concrete earlier defect makes the current result "
+            "unusable. Optional or non-claim-critical artifacts are advisory. If "
+            "rollback is necessary, return `replan_requested` with the earliest "
+            "stage and evidence; Manager owns rollback. Never edit "
+            "`.argus/PIPELINE_STATE.json`."
+        )
     operator_text = (
         "\n".join(f"- {line}" for line in operator_messages) if operator_messages else "- none"
     )
@@ -609,10 +629,10 @@ def render_reviewer_prompt(
         )
     )
     handoff_policy = (
-        "`done` closes a bounded direct task when its mission contract and decisive "
-        "check pass at the current verification profile. It does not certify the "
-        "project or suppress a programme-level `plan_signal=reconsider`. Use "
-        "`continue` for a concrete material gap and give the next work package; "
+        "`done` closes a direct task when its contract and decisive check "
+        "pass. Use `replan_requested` only to change the plan; `plan_signal` is "
+        "advisory and cannot override `status`. Use `continue` for a material gap and give "
+        "the next work package; "
         "leave optional hardening advisory."
         if direct_workflow
         else (
@@ -624,7 +644,7 @@ def render_reviewer_prompt(
             "claim needs code-path evidence plus profiling, timing, or a controlled comparison. "
             "Integrity is mandatory but not scientific value by itself. Ask the "
             "operator only for authority/information they own. "
-            "Bounded `done` closes; final-submission `done` may certify."
+            "An ordinary task's `done` closes that task; a final-submission `done` may certify the project."
         )
     )
     # Keep the requested footer smaller than the compatibility parser. Legacy
@@ -672,9 +692,9 @@ def render_reviewer_prompt(
             "FORWARD_PROGRESS=true\n"
             "PLAN_SIGNAL=continue"
         )
-        + "\nEqually ordinary:\n"
-        "PLAN_SIGNAL=reconsider\n"
-        "PLAN_CHALLENGE=challenged assumption\n"
+        + "\nPlan change verdict:\n"
+        "STATUS=replan_requested\n"
+        "PLAN_CHALLENGE=failed assumption\n"
         "AUTHORITY_IMPACT=technical"
         + "\nFor a real operator-owned choice only, add "
         "`OPERATOR_QUESTION=...` and "
@@ -686,21 +706,20 @@ def render_reviewer_prompt(
         + _PLAN_SIGNAL_VOCABULARY
         + "Put the next Engineer "
         "instruction only in next_action. Do not inspect or edit "
-        "checkpoint/context-packet/handoff bookkeeping.\n\n"
+        "checkpoint or context bookkeeping.\n\n"
         + ("" if _requires_engineering_audit else _verification_directive())
         + audit_integrity_block
         + verification_instruction
         + wiki_curator_skill_block
         + direct_memory_edit_block
         + matched_review_skill_block
-        + review_validity_block
         + stage_checklist
         + "\n\n"
         + rollback_block
         + "\n\n"
         + surprise_judgment_block
         + venv_skill_block
-        + "\n\n## Handoff policy\n"
+        + "\n\n## What each verdict means\n"
         + handoff_policy
         + "\n\n"
         + objective_block
@@ -712,6 +731,9 @@ def render_reviewer_prompt(
     # Reviewers receive this after the full static rubric every time.
     delta = (
         (_REEVALUATE_HEADER if resumed else "")
+        + research_context_block
+        + ("\n\n" if research_context_block else "")
+        + review_validity_block
         + search_altitude_block
         + f"{checkpoint_block}"
         + f"{escalate_block}"
@@ -743,6 +765,7 @@ def render_reviewer_prompt(
             "research_target": verification_instruction,
             "surprise_judgment": surprise_judgment_block,
             "manuscript_review_validity": review_validity_block,
+            "research_context": research_context_block,
             "objective_context": objective_context,
             "checkpoint": checkpoint_block,
             "execution_log_audit": engineer_log_audit_block,
@@ -761,8 +784,10 @@ def assemble_reviewer_prompt(static: str, delta: str) -> str:
 
 
 __all__ = [
+    "COLD_READ",
     "EVALUATE",
     "OPERATIONS",
+    "SCIENCE_LOSS_CHECK",
     "assemble_reviewer_prompt",
     "evaluate_request",
     "render_reviewer_prompt",

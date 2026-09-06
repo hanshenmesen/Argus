@@ -5,10 +5,11 @@ routing request before any vertical can commit. This module owns the
 fail-closed parsers for that decision.
 
 The proposed domain (when authored) is persisted as project-local DATA by
-:func:`argus_skill.verticals._data_domain.write_data_domain`; the per-stage
-checklist is authored later by the Planner. Parsing is fail-closed to ``None``
-on any ambiguity (bad JSON, no usable stages, an un-sluggable/unknown name),
-but the CALLER is FAIL-HARD: ``Manager.decide_vertical`` raises
+:func:`argus_skill.verticals._data_domain.write_data_domain`; the runtime owns
+its candidate stages and the per-stage checklist is authored later by the
+Planner. Parsing is fail-closed to ``None`` on any ambiguity (bad input or an
+un-sluggable/unknown name), but the CALLER is FAIL-HARD:
+``Manager.decide_vertical`` raises
 ``VerticalDecisionError`` on a ``None`` parse — there is NO silent fallback to
 the research default.
 """
@@ -24,12 +25,11 @@ from ..roles.prompts.manager import (
     build_research_target_prompt,
     build_vertical_decision_prompt,
 )
+from ..skills.stage_machine import normalize_stage_for_project
+from ..verticals._data_domain import CANDIDATE_DOMAIN_STAGES
 from .live_view import LiveViewDecision, parse_live_view
 
 _NAME_SANITIZE_RE = re.compile(r"[^a-z0-9_]+")
-_MIN_STAGES = 2
-# Generated stage count is a persisted schema bound, not a work deadline.
-_MAX_STAGES = 10
 
 
 class VerticalDecisionError(RuntimeError):
@@ -136,7 +136,7 @@ _MISSING = object()
 
 @dataclass
 class DomainProposal:
-    """A Manager-authored new domain (validated + sluggified)."""
+    """A Manager-routed new domain with runtime-owned candidate stages."""
 
     name: str
     stages: list[str]
@@ -151,6 +151,7 @@ _DECISION_KEYS = (
     "NAME",
     "DOMAIN",
     "WORKFLOW_MODE",
+    "START_STAGE",
     "CONFIDENCE",
     "RESEARCH_TARGET_LEVEL",
     "RESEARCH_DIRECTION_MODE",
@@ -158,7 +159,6 @@ _DECISION_KEYS = (
     "RATIONALE",
     "EXECUTION_TASK",
     "REQUIRE_INDEPENDENT_REVIEW",
-    "STAGES",
     "PRECISE_CONSTRAINTS",
     "EXCLUSIONS",
     "AMBIGUITIES",
@@ -204,6 +204,7 @@ def _decision_fields(
         "VERTICAL",
         "NAME",
         "WORKFLOW_MODE",
+        "START_STAGE",
         "RESEARCH_TARGET_LEVEL",
         "RESEARCH_DIRECTION_MODE",
     ):
@@ -225,8 +226,6 @@ def _decision_fields(
             values,
             "REQUIRE_INDEPENDENT_REVIEW",
         )
-    if "STAGES" in values:
-        fields["stages"] = list(read_list(values, "STAGES"))
     # The three requirement lines. `_stated_requirements` reads them off this
     # dict and wants real lists, the same shape a volunteered JSON object
     # supplies, so one reader serves both doors. Absent stays absent: "the
@@ -343,6 +342,7 @@ def _resolve_research_direction(
     target_level: str,
     same_persisted_identity: bool,
     persisted_research_direction_mode: str,
+    allow_persisted_change: bool,
 ) -> str | None:
     from ..core.research_contract import normalize_research_direction_mode
 
@@ -356,14 +356,14 @@ def _resolve_research_direction(
     )
     if (
         same_persisted_identity
-        and prior_direction == "broad"
-        and direction == "locked"
+        and prior_direction
+        and direction
+        and direction != prior_direction
+        and not allow_persisted_change
     ):
         return None
     if direction is None and same_persisted_identity:
         direction = prior_direction
-    if direction == "locked" and not prior_direction:
-        direction = "broad"
     if direction is None:
         direction = "broad" if target_level in {"publishable", "doctoral"} else "locked"
     return direction
@@ -411,27 +411,15 @@ def parse_domain_proposal(
     known_verticals: Sequence[str] = (),
     existing_data_domains: Sequence[str] = (),
 ) -> DomainProposal | None:
-    """Validate the Manager's JSON proposal; fail-closed to ``None`` on ambiguity.
+    """Validate a Manager proposal; fail-closed to ``None`` on ambiguity.
 
-    Rules: valid JSON object; ``stages`` is a list of ``_MIN_STAGES``..
-    ``_MAX_STAGES`` slugs (deduped, order preserved); ``name`` sluggifies to
-    a non-empty slug that does not collide with a preset vertical or an existing
-    data domain (a numeric suffix is appended on collision). Anything else →
+    ``name`` sluggifies to a non-empty slug that does not collide with a preset
+    vertical or existing data domain (a numeric suffix is appended on
+    collision). Candidate stages are always runtime-owned. Anything else →
     ``None``.
     """
     obj = _decision_fields(raw_text)
     if not isinstance(obj, dict):
-        return None
-
-    raw_stages = obj.get("stages")
-    if not isinstance(raw_stages, list):
-        return None
-    stages: list[str] = []
-    for s in raw_stages:
-        slug = _sluggify_name(s)
-        if slug and slug not in stages:
-            stages.append(slug)
-    if not (_MIN_STAGES <= len(stages) <= _MAX_STAGES):
         return None
 
     # Accept either "name" or "vertical" as the slug key — the two-shape
@@ -459,7 +447,7 @@ def parse_domain_proposal(
 
     return DomainProposal(
         name=unique,
-        stages=stages,
+        stages=list(CANDIDATE_DOMAIN_STAGES),
         rationale=rationale,
         confidence=confidence,
         execution_task=execution_task,
@@ -491,7 +479,7 @@ class VerticalDecision:
     ``choice`` is ``"existing"`` (reuse a known built-in vertical or an existing
     project data domain) or ``"new"`` (author a fresh data domain). ``vertical``
     is the chosen/authored name in both cases; ``proposal`` carries the authored
-    domain (stages + slug) only when ``choice == "new"``.
+    domain only when ``choice == "new"``.
     """
 
     choice: str
@@ -501,8 +489,8 @@ class VerticalDecision:
     # Orthogonal execution topology chosen by Manager; never encoded as a vertical.
     workflow_mode: str = "staged"
     proposal: DomainProposal | None = None
-    # Existing project data domains may be refined in place when their stage
-    # skeleton is materially too weak for the matching recurring capability.
+    # Legacy compatibility only; current Manager routing never populates or
+    # consumes model-authored stage adaptations.
     adapted_stages: tuple[str, ...] = ()
     adaptation_reason: str = ""
     # Optional, independently-grounded choice of which workspace files the Web
@@ -538,6 +526,8 @@ class VerticalDecision:
     ambiguities: tuple[str, ...] = ()
     # Raw validated Manager response, applied only when the decision commits.
     rendering_response: str = ""
+    # Initial stage for direct work; never resets an existing stage.
+    start_stage: str = ""
 
 
 @dataclass(frozen=True)
@@ -558,6 +548,10 @@ class FastVerticalRoute:
     research_direction_mode: str = ""
     target_venue: str = ""
     require_independent_review: bool = True
+    precise_constraints: tuple[str, ...] = ()
+    exclusions: tuple[str, ...] = ()
+    ambiguities: tuple[str, ...] = ()
+    start_stage: str = ""
 
 
 def parse_fast_vertical_decision(
@@ -573,6 +567,7 @@ def parse_fast_vertical_decision(
     persisted_research_target_level: str = "",
     persisted_research_direction_mode: str = "",
     allow_persisted_change: bool = False,
+    project_root: object = None,
 ) -> FastVerticalRoute | None:
     """Parse a tool-free route; invalid output fails closed to grounding."""
     obj = _decision_fields(raw_text)
@@ -641,6 +636,7 @@ def parse_fast_vertical_decision(
         target_level=target_level,
         same_persisted_identity=same_persisted_identity,
         persisted_research_direction_mode=persisted_research_direction_mode,
+        allow_persisted_change=allow_persisted_change,
     )
     if direction_mode is None:
         return None
@@ -649,11 +645,18 @@ def parse_fast_vertical_decision(
     )[:100]
     if name != "research":
         target_venue = ""
+    stated, exclusions, ambiguities = _stated_requirements(obj)
     return FastVerticalRoute(
         needs_grounding=False,
         vertical=name,
         domain=domain,
         workflow_mode=workflow_mode,
+        start_stage=(
+            normalize_stage_for_project(
+                project_root, obj.get("start_stage"), vertical=name, require_known=True,
+            )
+            if workflow_mode == "direct" and obj.get("start_stage") else ""
+        ),
         confidence=confidence,
         rationale=rationale,
         research_target_level=target_level,
@@ -662,6 +665,9 @@ def parse_fast_vertical_decision(
         require_independent_review=(
             obj.get("require_independent_review", True) is not False
         ),
+        precise_constraints=stated,
+        exclusions=exclusions,
+        ambiguities=ambiguities,
     )
 
 
@@ -670,7 +676,7 @@ def _stated_requirements(
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """The operator-stated constraints, exclusions and open questions.
 
-    Bounded and de-duplicated but otherwise passed through verbatim. The harness
+    De-duplicated but otherwise passed through verbatim. The harness
     must not reword a constraint: the operator's phrasing is the thing that was
     agreed to, and a paraphrase is already a revision.
     """
@@ -681,11 +687,11 @@ def _stated_requirements(
             return ()
         return tuple(
             dict.fromkeys(
-                " ".join(str(value).split())[:400]
+                " ".join(str(value).split())
                 for value in raw
                 if isinstance(value, str) and str(value).strip()
             )
-        )[:12]
+        )
 
     return _clean("precise_constraints"), _clean("exclusions"), _clean("ambiguities")
 
@@ -771,20 +777,6 @@ def vertical_decision_contract_violation(
             "direct|staged",
         )
     if choice == "new":
-        raw_stages = obj.get("stages", _MISSING)
-        if not isinstance(raw_stages, list):
-            return ContractViolation(
-                "contract", "stages", raw_stages, "a list of 2..10 unique stage names"
-            )
-        stages = tuple(
-            dict.fromkeys(
-                slug for value in raw_stages if (slug := _sluggify_name(value))
-            )
-        )
-        if not (_MIN_STAGES <= len(stages) <= _MAX_STAGES):
-            return ContractViolation(
-                "contract", "stages", raw_stages, "2..10 unique stage names"
-            )
         name = obj.get("name") or obj.get("vertical", _MISSING)
         if not _sluggify_name(name):
             return ContractViolation(
@@ -878,6 +870,7 @@ def vertical_decision_contract_violation(
         target_level=target_level,
         same_persisted_identity=same_persisted_identity,
         persisted_research_direction_mode=persisted_research_direction_mode,
+        allow_persisted_change=allow_persisted_change,
     )
     if direction is None:
         return ContractViolation(
@@ -886,27 +879,6 @@ def vertical_decision_contract_violation(
             obj.get("research_direction_mode", _MISSING),
             "broad|locked and the persisted route contract",
         )
-    raw_stages = obj.get("stages")
-    existing_names = {
-        str(value).strip().lower() for value in existing_data_domains
-    }
-    if name in existing_names and isinstance(raw_stages, list):
-        tokens = [
-            str(value or "").strip().casefold()
-            for value in raw_stages
-            if str(value or "").strip()
-        ]
-        normalized = tuple(
-            dict.fromkeys(
-                slug for value in raw_stages if (slug := _sluggify_name(value))
-            )
-        )
-        if tokens not in ([], ["none"]) and not (
-            _MIN_STAGES <= len(normalized) <= _MAX_STAGES
-        ):
-            return ContractViolation(
-                "contract", "stages", raw_stages, "2..10 unique stage names or NONE"
-            )
     return ContractViolation(
         "contract",
         "route_contract",
@@ -929,6 +901,7 @@ def parse_vertical_decision(
     persisted_research_target_level: str = "",
     persisted_research_direction_mode: str = "",
     allow_persisted_change: bool = False,
+    project_root: object = None,
 ) -> VerticalDecision | None:
     """Validate the Manager's vertical-decision JSON; fail-closed to ``None``.
 
@@ -1000,6 +973,7 @@ def parse_vertical_decision(
             target_level=target_level,
             same_persisted_identity=same_persisted_identity,
             persisted_research_direction_mode=persisted_research_direction_mode,
+            allow_persisted_change=allow_persisted_change,
         )
         if direction_mode is None:
             return None
@@ -1010,36 +984,21 @@ def parse_vertical_decision(
             target_venue = ""
         stated, exclusions, ambiguities = _stated_requirements(obj)
         if name and name in known:
-            adapted_stages: tuple[str, ...] = ()
-            raw_stages = obj.get("stages")
-            existing_domains = {
-                str(value).strip().lower()
-                for value in existing_data_domains
-            }
-            if name in existing_domains and isinstance(raw_stages, list):
-                raw_tokens = [
-                    str(value or "").strip().casefold()
-                    for value in raw_stages
-                    if str(value or "").strip()
-                ]
-                if raw_tokens not in ([], ["none"]):
-                    normalized = tuple(
-                        dict.fromkeys(
-                            slug
-                            for value in raw_stages
-                            if (slug := _sluggify_name(value))
-                        )
-                    )
-                    if not (_MIN_STAGES <= len(normalized) <= _MAX_STAGES):
-                        return None
-                    adapted_stages = normalized
             return VerticalDecision(
                 choice="existing",
                 vertical=name,
                 domain=domain,
                 workflow_mode=workflow_mode,
+                start_stage=(
+                    normalize_stage_for_project(
+                        project_root,
+                        obj.get("start_stage"),
+                        vertical=name,
+                        require_known=True,
+                    )
+                    if workflow_mode == "direct" and obj.get("start_stage") else ""
+                ),
                 proposal=None,
-                adapted_stages=adapted_stages,
                 adaptation_reason=str(obj.get("rationale") or "").strip()[:600],
                 live_view=parsed_live_view,
                 live_view_decided=live_view_decided,
@@ -1069,11 +1028,16 @@ def parse_vertical_decision(
         if proposal is None:
             return None
         stated, exclusions, ambiguities = _stated_requirements(obj)
+        start_stage = str(obj.get("start_stage") or "").strip().lower()
         return VerticalDecision(
             choice="new",
             vertical=proposal.name,
             domain="",
             workflow_mode=workflow_mode,
+            start_stage=(
+                start_stage
+                if workflow_mode == "direct" and start_stage in proposal.stages else ""
+            ),
             proposal=proposal,
             live_view=parsed_live_view,
             live_view_decided=live_view_decided,

@@ -95,6 +95,113 @@ def test_completed_event_carries_existing_engineer_summary(tmp_path) -> None:
     )
 
 
+def test_reviewer_summary_creates_delivery_when_engineer_returns_only_footer(
+    tmp_path,
+) -> None:
+    supervisor, sink = _make_supervisor(
+        tmp_path,
+        _Outcome(
+            success=True,
+            status="done",
+            final_review_status="done",
+            final_review_reason="已完整审阅《餐饮企业运营手册.md》；符合交付条件。",
+            final_message=(
+                "Decision:\n"
+                "MILESTONE_STATUS=done\n"
+                "RESULT=已完成餐饮企业运营手册。\n"
+                "NEXT_OWNER=reviewer"
+            ),
+        ),
+    )
+    workdir = supervisor._project_workdir()
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "餐饮企业运营手册.md").write_text("# 手册\n", encoding="utf-8")
+    supervisor.memory.backlog.add(
+        BacklogItem.new(title="制作运营手册", objective="制作餐饮企业运营手册")
+    )
+
+    supervisor.tick()
+
+    event = _completed_event(sink)
+    assert event["summary"] == "已完整审阅《餐饮企业运营手册.md》；符合交付条件。"
+    assert event["delivery"]["primary_target"]["path"] == "餐饮企业运营手册.md"
+
+
+def test_reviewed_engineer_path_survives_malformed_reviewer_link(tmp_path) -> None:
+    supervisor, sink = _make_supervisor(
+        tmp_path,
+        _Outcome(
+            success=True,
+            status="done",
+            final_review_status="done",
+            final_review_reason="team-result.txt` passed independent byte verification.",
+            final_message=(
+                "Decision:\n"
+                "MILESTONE_STATUS=done\n"
+                "RESULT=Created `team-result.txt` and verified it.\n"
+                "NEXT_OWNER=reviewer"
+            ),
+        ),
+    )
+    workdir = supervisor._project_workdir()
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "team-result.txt").write_text("ARGUS_TEAM_OK\n", encoding="utf-8")
+    supervisor.memory.backlog.add(
+        BacklogItem.new(title="Create team result", objective="Create team-result.txt")
+    )
+
+    supervisor.tick()
+
+    assert _completed_event(sink)["delivery"]["primary_target"]["path"] == (
+        "team-result.txt"
+    )
+
+
+@pytest.mark.parametrize(
+    ("open_ended", "expected_complete"),
+    [(False, True), (True, False)],
+)
+def test_manager_complete_is_project_complete_only_for_bounded_campaign(
+    tmp_path,
+    open_ended: bool,
+    expected_complete: bool,
+) -> None:
+    outcome = _Outcome(
+        success=True,
+        status="done",
+        final_review_status="done",
+        final_review_source="reviewer",
+    )
+    outcome.stage_transition = {
+        "action": "complete",
+        "target_stage": "setup",
+    }
+    supervisor, sink = _make_supervisor(tmp_path, outcome)
+    supervisor.config.continuous = True
+    supervisor.config.open_ended = open_ended
+    supervisor.memory.backlog.add(
+        BacklogItem.new(
+            title="Complete the direct objective",
+            objective="Finish one reviewed direct task.",
+            tags=["manager_direct", "scope:bounded", "stage_closing"],
+            manager_decision={
+                "routed": True,
+                "vertical": "software",
+                "workflow_mode": "direct",
+            },
+        )
+    )
+
+    result = supervisor.tick()
+
+    assert result is not None
+    assert result["overall_complete"] is expected_complete
+    assert result["campaign_continues"] is not expected_complete
+    event = _completed_event(sink)
+    assert event["overall_complete"] is expected_complete
+    assert event["campaign_continues"] is not expected_complete
+
+
 @pytest.mark.parametrize(
     ("status", "success", "expected"),
     [

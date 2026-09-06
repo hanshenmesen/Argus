@@ -29,6 +29,10 @@ def public_upstream(branch: str) -> str:
 class UpdateError(RuntimeError):
     """Raised when an update cannot be completed without risking local work."""
 
+    def __init__(self, message: str, *, result: UpdateResult | None = None) -> None:
+        super().__init__(message)
+        self.result = result
+
 
 @dataclass(frozen=True)
 class UpdateResult:
@@ -105,7 +109,7 @@ def inspect_source_checkout(
     *,
     runner: CommandRunner = _run_command,
 ) -> UpdateCheck:
-    """Compare the loaded source checkout with public ``main`` without changing it."""
+    """Compare the checkout with its published branch without changing it."""
     checkout = (root or source_root()).expanduser().resolve()
     if not (checkout / "pyproject.toml").is_file():
         raise UpdateError(
@@ -203,24 +207,28 @@ def update_source_checkout(
         timeout=None,
     )
     after = _checked(runner, ["git", "rev-parse", "HEAD"], cwd=checkout)
-
-    if before != after:
-        report("installing")
-        executable = python_executable or sys.executable
-        _checked(
-            runner,
-            [executable, "-m", "pip", "install", "-e", str(checkout)],
-            cwd=checkout,
-            timeout=None,
-        )
-
-    report("complete")
-    return UpdateResult(
+    result = UpdateResult(
         root=checkout,
         upstream=upstream,
         before_revision=before,
         after_revision=after,
     )
+
+    if before != after:
+        report("installing")
+        executable = python_executable or sys.executable
+        try:
+            _checked(
+                runner,
+                [executable, "-m", "pip", "install", "-e", str(checkout)],
+                cwd=checkout,
+                timeout=None,
+            )
+        except UpdateError as exc:
+            raise UpdateError(str(exc), result=result) from exc
+
+    report("complete")
+    return result
 
 
 def run_update() -> int:

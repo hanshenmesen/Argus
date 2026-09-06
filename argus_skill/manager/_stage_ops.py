@@ -16,7 +16,7 @@ import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 from ..core.role_decision import latest_role_decision
 from ._helpers import (
@@ -138,14 +138,12 @@ class _StageDecisionMixin:
             if not isinstance(signal, str):
                 return False
             signal = signal.strip().lower()
-            if signal not in {"", "continue", "reconsider"} or signal == "reconsider":
+            if signal not in {"", "continue", "reconsider"}:
                 return False
         for name in ("challenge", "alternative"):
             if name in planner_report:
                 value = planner_report[name]
                 if not isinstance(value, str):
-                    return False
-                if value.strip().casefold() not in _NEUTRAL_REVIEW_TEXT:
                     return False
         if "authority_impact" in planner_report:
             authority = planner_report["authority_impact"]
@@ -358,6 +356,59 @@ class _StageDecisionMixin:
         except Exception:  # noqa: BLE001
             return ""
 
+    def report_project_completion(
+        self,
+        *,
+        completion_context: Mapping[str, Any],
+        continuous_objective: str = "",
+        completion_reason: str = "",
+        on_event: Any = None,
+        root_task_id: str | None = None,
+    ) -> str:
+        """Return a Manager-authored operator report for a completed stage ledger."""
+        from ..roles.prompts.manager import build_project_completion_report_prompt
+
+        prompt = build_project_completion_report_prompt(
+            objective=continuous_objective,
+            completion_reason=completion_reason,
+            completion_context=completion_context,
+        )
+        run_exec, hold = self._build_stage_run_exec(None, on_event)
+        if hold is not None or run_exec is None:
+            from ..core.operator_messages import uses_cjk
+
+            stages = completion_context.get("stages")
+            stage_names = list(stages) if isinstance(stages, dict) else []
+            route = " -> ".join(stage_names)
+            if uses_cjk(continuous_objective):
+                return (
+                    "项目已完成。Manager 已收到完整阶段记录"
+                    + (f"（{route}）。" if route else "。")
+                    + (
+                        f" 完成原因：{completion_reason.strip()}"
+                        if completion_reason.strip()
+                        else ""
+                    )
+                )
+            return (
+                "Project completed. Manager received the full stage ledger"
+                + (f" ({route})." if route else ".")
+                + (
+                    f" Completion reason: {completion_reason.strip()}"
+                    if completion_reason.strip()
+                    else ""
+                )
+            )
+        raw = self._run_stage_model(run_exec, prompt, root_task_id)
+        if not raw.strip():
+            return ""
+        from ..core.role_reply import strip_control_footer
+
+        return strip_control_footer(
+            raw,
+            ("ACTION", "TARGET_STAGE", "REASON", "RESOLVES_WAIT"),
+        ).strip()
+
     def _parse_and_finalize_stage_decision(
         self,
         raw: str,
@@ -467,20 +518,26 @@ class _StageDecisionMixin:
             resolve_workflow_mode,
         )
 
-        # Computed once and shared by every check below that needs it.
-        _allow_early_completion = (
-            not open_ended and resolve_workflow_mode(root) == "direct"
-        )
         decision = parse_stage_decision(raw, current_stage=cur, stage_order=order)
 
         _completion_vertical = resolve_vertical(root)
         _research_target_level = resolve_research_target_level(root)
+        # Direct mode is the operator's explicit one-package deliverable. It may
+        # complete without traversing unrelated later stages, including an
+        # Idea-only Research request. Paper production is routed as staged.
+        _allow_early_completion = (
+            not open_ended
+            and resolve_workflow_mode(root) == "direct"
+        )
         _completion_blockers = [
             blocker
             for blocker in (external_completion_gate_issue(self.execution_workdir),)
             if blocker
         ]
-        if _research_target_level in {"publishable", "doctoral"}:
+        if (
+            _research_target_level in {"publishable", "doctoral"}
+            and not _allow_early_completion
+        ):
             from ..verticals._base import (
                 load_vertical,
                 vertical_stage_completion_issues,
@@ -588,6 +645,14 @@ class _StageDecisionMixin:
 
         from .stage_decider import StageDecision
 
+        if _completion_vertical == "research" and decision.action == "rollback":
+            decision = StageDecision(
+                "hold",
+                cur,
+                "research stages are forward-only; schedule repair work in Review",
+                "research_rollback_rejected",
+            )
+
         if (
             planner_wait_reconciliation
             and resolve_workflow_mode(root) != "direct"
@@ -677,6 +742,18 @@ class _StageDecisionMixin:
                                    decision.resolves_wait)
 
         if decision.action == "rollback":
+            from ..skills.vertical_select import resolve_vertical
+
+            if resolve_vertical(root) == "research":
+                return StageTransition(
+                    "hold",
+                    cur,
+                    "research stages are forward-only; schedule repair work in "
+                    "the current stage",
+                    current_stage=cur,
+                    source="illegal_target_hold",
+                    diagnostic="research_rollback_rejected",
+                )
             try:
                 _rollback(root, target_stage=decision.target_stage,
                           reason=decision.reason, rolled_back_by="manager",
@@ -858,23 +935,24 @@ class _StageDecisionMixin:
         if deterministic_candidate:
             try:
                 from ..skills.stage_machine import _ensure_stage_completion
+                from ..skills.vertical_select import (
+                    resolve_vertical,
+                    resolve_workflow_mode,
+                )
                 from .stage_decider import StageDecision
 
-                _ensure_stage_completion(
-                    root,
-                    cur,
-                    evidence_root=self.execution_workdir,
+                allow_early_completion = (
+                    not open_ended
+                    and resolve_workflow_mode(root) == "direct"
                 )
-                decision = StageDecision(
-                    "advance",
-                    next_stage,
-                    "Reviewer certified the current-stage checklist and "
-                    "deterministic completion checks passed",
-                    "deterministic_reviewer_done",
-                )
-                if terminal_stage:
+                if not (allow_early_completion and not terminal_stage):
+                    _ensure_stage_completion(
+                        root,
+                        cur,
+                        evidence_root=self.execution_workdir,
+                    )
+                if terminal_stage or allow_early_completion:
                     from ..core.research_contract import resolve_research_target_level
-                    from ..skills.vertical_select import resolve_vertical
                     from .stage_decider import final_stage_completion_decision
 
                     decision = final_stage_completion_decision(
@@ -888,9 +966,18 @@ class _StageDecisionMixin:
                         checklist_contract=checklist_contract,
                         trigger_diagnostic="deterministic_reviewer_done",
                         trigger_reason=(
-                            "Reviewer certified the terminal-stage checklist and "
+                            "Reviewer certified the current-stage checklist and "
                             "deterministic completion checks passed"
                         ),
+                        allow_early_completion=allow_early_completion,
+                    )
+                else:
+                    decision = StageDecision(
+                        "advance",
+                        next_stage,
+                        "Reviewer certified the current-stage checklist and "
+                        "deterministic completion checks passed",
+                        "deterministic_reviewer_done",
                     )
                 if decision is not None:
                     return self._apply_stage_decision_to_disk(
@@ -924,6 +1011,14 @@ class _StageDecisionMixin:
                 build_stage_decision_prompt,
                 stage_decision_request,
             )
+            from ..skills.vertical_select import (
+                resolve_vertical,
+                resolve_workflow_mode,
+            )
+
+            allow_direct_completion = (
+                not open_ended and resolve_workflow_mode(root) == "direct"
+            )
 
             prompt_context = resolve_role_prompt(
                 stage_decision_request(root, stage=cur)
@@ -942,6 +1037,8 @@ class _StageDecisionMixin:
                     planner_verdict=planner_verdict,
                     open_ended=open_ended,
                     continuous_objective=continuous_objective,
+                    allow_rollback=resolve_vertical(root) != "research",
+                    allow_early_completion=allow_direct_completion,
                 ),
                 role_banner=prompt_context.role_banner,
                 role_skill_block=self._role_skill_block(

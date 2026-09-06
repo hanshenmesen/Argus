@@ -17,7 +17,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal
 
-from ..provider_integrations.copilot_usage import NANO_AIU_PER_USD, find_copilot_usage_near
+from ..provider_integrations.copilot_usage import (
+    NANO_AIU_PER_USD,
+    copilot_usage_store_signature,
+    find_copilot_usage_near,
+)
 from .event_catalog import CALL_SCOPED_EVENT_TYPES, EventType, canonical_event_type
 from .pricing import PricingStatus, quote_copilot_usage, quote_token_usage
 from .runner_errors import is_pre_provider_refusal_error
@@ -34,7 +38,7 @@ USAGE_MIGRATION_FILE = "usage.migration-v1.json"
 USAGE_COPILOT_RECONCILE_FILE = "usage.copilot-token-v1.json"
 EVENT_MIGRATION_FILE = "events.migration-v2.json"
 EVENT_MIGRATION_LOCK_FILE = "events.migration-v2.lock"
-_COPILOT_RECONCILE_VERSION = 3
+_COPILOT_RECONCILE_VERSION = 4
 UsageSource = Literal["run_exec", "legacy.events"]
 CallStatus = Literal["completed", "error", "denied"]
 
@@ -200,6 +204,7 @@ def build_usage_record(
     token_usage: TokenUsage | None = None,
     premium_requests: float | None = None,
     total_nano_aiu: int | None = None,
+    copilot_token_billing_expected: bool = False,
     provider_cost_usd: float | None = None,
     thread_id: str | None = None,
     model_usage: Iterable[dict[str, Any]] | None = None,
@@ -213,6 +218,7 @@ def build_usage_record(
     missing_resume_target = (
         is_pre_provider_refusal_error(error)
         and total_nano_aiu is None
+        and provider_cost_usd is None
         and not normalized_model_usage
         and not usage.observed
         and not (premium_requests or 0.0)
@@ -227,6 +233,13 @@ def build_usage_record(
         pricing_tier = "copilot_token"
         cost_usd = max(0, int(total_nano_aiu)) / NANO_AIU_PER_USD
         cost_basis = "token"
+    elif normalized_provider == "copilot" and copilot_token_billing_expected:
+        # Modern Copilot still reports premium requests, but that is not its
+        # token charge. A missing/late store row must not become a settled $0.04.
+        pricing_status = "partial"
+        pricing_tier = "copilot_token_pending"
+        cost_usd = None
+        cost_basis = "none"
     elif normalized_provider == "copilot":
         pricing_status = premium_quote.status
         pricing_tier = premium_quote.tier
@@ -490,9 +503,12 @@ class UsageLedger:
         if not _copilot_reconcile_enabled_for(self.project_root):
             return 0
         signature = _path_signature(self.path)
+        store_signature = copilot_usage_store_signature()
         if signature is None and self.copilot_reconcile_path.exists():
             return 0
-        if _reconcile_marker_signature(self.copilot_reconcile_path) == signature:
+        if _reconcile_marker_signature(
+            self.copilot_reconcile_path, store_signature=store_signature
+        ) == signature:
             return 0
         if signature is None:
             _write_json_atomic(
@@ -504,10 +520,21 @@ class UsageLedger:
                 },
             )
             return 0
-        call_threads = _legacy_call_threads(self.project_root)
         updated = 0
         with self._locked():
             rows = _read_usage_json_rows(self.path)
+            # Current records already carry the session id. Reading the entire
+            # raw event history is only necessary for older records without it.
+            call_threads = (
+                _legacy_call_threads(self.project_root)
+                if any(
+                    row.get("provider") == "copilot"
+                    and row.get("total_nano_aiu") is None
+                    and not row.get("thread_id")
+                    for row in rows
+                )
+                else {}
+            )
             not_billed: dict[str, Any] = {
                 "input_tokens": None,
                 "cached_input_tokens": None,
@@ -552,18 +579,23 @@ class UsageLedger:
                 call_id = str(row.get("call_id") or "")
                 completed_at = _float(row.get("completed_at"), 0.0)
                 started_at = _float(row.get("started_at"), completed_at)
-                session_id = call_threads.get(call_id)
+                session_id = _optional_text(row.get("thread_id")) or call_threads.get(call_id)
                 found = find_copilot_usage_near(
                     completed_at=completed_at,
                     started_at=started_at,
                     session_id=session_id,
                 )
                 usage = found[1] if found is not None else None
+                own_usage_events = {
+                    (str(item.get("session_id") or ""), item.get("usage_event_id"))
+                    for item in _normalize_model_usage(row.get("model_usage"))
+                }
                 available = (
                     tuple(
                         item
                         for item in usage.rows
                         if (item.session_id, item.row_id) not in used_usage_events
+                        or (item.session_id, item.row_id) in own_usage_events
                     )
                     if usage is not None
                     else ()
@@ -610,6 +642,20 @@ class UsageLedger:
                     if usage.cost_usd is not None:
                         continue
 
+                if row.get("pricing_tier") == "copilot_token_pending" or available:
+                    # A modern store's incomplete AIU data is not a premium-only
+                    # bill. Keep it unresolved until the DB is updated.
+                    pending = {
+                        "cost_usd": None,
+                        "cost_basis": "none",
+                        "pricing_status": "partial",
+                        "pricing_tier": "copilot_token_pending",
+                    }
+                    if any(row.get(key) != value for key, value in pending.items()):
+                        row.update(pending)
+                        updated += 1
+                    continue
+
                 # Copilot CLI versions that expose the complete billable
                 # premium-request count but no local token/AIU row still give us
                 # a definitive charge.  Settle that billing unit rather than
@@ -651,11 +697,21 @@ class UsageLedger:
                         if row.get("call_id")
                     }
                 )
+            reconciled_signature = _path_signature(self.path)
+            pending_token_usage = any(
+                row.get("provider") == "copilot"
+                and row.get("total_nano_aiu") is None
+                and row.get("status") != "denied"
+                and row.get("pricing_status") != "not_billed"
+                for row in rows
+            )
         _write_json_atomic(
             self.copilot_reconcile_path,
             {
                 "version": _COPILOT_RECONCILE_VERSION,
-                "usage_signature": list(_path_signature(self.path) or ()),
+                "usage_signature": list(reconciled_signature or ()),
+                "store_signature": store_signature,
+                "pending_token_usage": pending_token_usage,
                 "updated": updated,
                 "completed_at": time.time(),
             },
@@ -1370,7 +1426,9 @@ def _rewrite_usage_rows(path: Path, rows: list[dict[str, Any]]) -> None:
             pass
 
 
-def _reconcile_marker_signature(path: Path) -> tuple[int, int, int] | None:
+def _reconcile_marker_signature(
+    path: Path, *, store_signature: list[dict[str, Any]]
+) -> tuple[int, int, int] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
@@ -1379,6 +1437,8 @@ def _reconcile_marker_signature(path: Path) -> tuple[int, int, int] | None:
         not isinstance(payload, dict)
         or payload.get("version") != _COPILOT_RECONCILE_VERSION
     ):
+        return None
+    if payload.get("pending_token_usage") and payload.get("store_signature") != store_signature:
         return None
     raw = payload.get("usage_signature")
     if not isinstance(raw, list) or len(raw) != 3:

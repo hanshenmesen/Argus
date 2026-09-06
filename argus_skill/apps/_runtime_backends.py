@@ -33,8 +33,15 @@ class _Outcome:
     # token, missing API key, etc.). The supervisor uses this to stop
     # early instead of looping over failing missions.
     auth_failure: bool = False
+    delivery: dict[str, Any] | None = None
     # Set only when a final-submission mission receives Reviewer ``done``.
     final_submission_certified: bool = False
+    # The manuscript the final Reviewer actually read (path/sha256/recorded_at).
+    # ``rounds`` above is only a count, so the supervisor cannot recover this
+    # from the outcome otherwise; without it the journal records a certified
+    # final submission with no manuscript binding and the research completion
+    # check can never accept it.
+    manuscript_snapshot: dict | None = None
     completion_evidence: str = ""
     # The Manager's stage-transition verdict for this mission completion (the
     # Manager is the sole writer of current_stage). Shape:
@@ -197,6 +204,12 @@ class _ScriptedPlannerBackend:
         if delay > 0:
             time.sleep(delay)
         return payload
+
+    def fork(self) -> "_ScriptedPlannerBackend":
+        backend = object.__new__(type(self))
+        backend._planner = self._planner
+        backend._critic = self._critic
+        return backend
 
     def run_exec(
         self,

@@ -1,8 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { artifactRefreshEventKey, snapshotRefreshEventKey, useProjects, useProjectCosts, useSnapshot, useEventStream, useProjectActions, useArtifacts, useTranscript, useJournal, useGitDiff } from './hooks';
-import { api, isConnectionError, type EventMsg } from './api';
+import { api, isConnectionError, type EventMsg, type MessageRouteOverride } from './api';
+import { initialMessageRoute, MESSAGE_ROUTE_KEY } from './lib/messageRoute';
 import { TopBar } from './components/TopBar';
-import { EventStream } from './components/EventStream';
+import { EventStream, latestConversationDelivery } from './components/EventStream';
 import { ChatBox } from './components/ChatBox';
 import {
   appendPhaseStep,
@@ -17,7 +18,11 @@ import { PendingReplyDialog } from './components/PendingReplyDialog';
 import { GuardianBanner } from './components/GuardianBanner';
 import { rankProjects } from '../../core/src/projects';
 import { ArtifactModal } from './components/ArtifactModal';
-import { ResearchCanvas } from './components/ResearchCanvas';
+import {
+  missionIsComplete,
+  ResearchCanvas,
+  selectCompletionArtifact,
+} from './components/ResearchCanvas';
 import { ActionNotice, type NoticeTone, type UiNotice } from './components/ActionNotice';
 import { NewDaemonModal } from './components/NewDaemonModal';
 import { DaemonManageModal } from './components/DaemonManageModal';
@@ -57,10 +62,13 @@ import { useWorkbenchLayout } from './useWorkbenchLayout';
 import { useI18n } from './i18n';
 import { ConnectionProblemBanner } from './components/ConnectionProblemBanner';
 import { DeliveryNotice } from './components/DeliveryNotice';
-import type { DeliveryReceipt } from '../../core/src/types';
+import type { ArtifactInfo, DeliveryReceipt, MissionView } from '../../core/src/types';
 import {
-  notifyDesktopDelivery,
+  completionNotificationPayload,
+  installDesktopExternalLinkBridge,
+  notifyDesktopCompletion,
   subscribeDesktopDelivery,
+  subscribeDesktopNewChat,
 } from './lib/desktopBridge';
 
 type Overlay = 'none' | 'palette' | 'help' | 'doctor' | 'config' | 'identity' | 'transcript' | 'inspector' | 'operations';
@@ -69,7 +77,14 @@ interface ActiveMessageRequest {
   sid: string;
   controller: AbortController;
 }
+interface CompletionContext {
+  sid: string;
+  completionId: string;
+  view: MissionView | null;
+  artifacts: ArtifactInfo[];
+}
 let noticeSequence = 0;
+
 const ResearchWorkbenchPanel = lazy(async () => {
   const module = await import('./research-workbench/ResearchWorkbenchPanel');
   return { default: module.ResearchWorkbenchPanel };
@@ -109,11 +124,13 @@ export default function App() {
     setRightWidth,
     setShowReasoning,
     setSidebarOpen,
+    setThemeStyle,
     setWorkspaceView,
     shellRef,
     showReasoning,
     sidebarOpen,
     themeMode,
+    themeStyle,
     workspaceView,
   } = useWorkbenchLayout();
   const [standardWorkspaceView, setStandardWorkspaceView] = useState<'mission' | 'activity'>(
@@ -133,29 +150,42 @@ export default function App() {
   const [composerDraft, setComposerDraft] = useState('');
   const [rewriting, setRewriting] = useState(false);
   const [slashSelection, setSlashSelection] = useState(0);
+  const [routeOverride, setRouteOverride] = useState<MessageRouteOverride>(initialMessageRoute);
   const [chatPending, setChatPending] = useState(false);
   const [localConversationEvents, setLocalConversationEvents] = useState<EventMsg[]>([]);
-  const [managerPhase, setManagerPhase] = useState('');
-  const [managerPhaseHeartbeat, setManagerPhaseHeartbeat] = useState(false);
-  const [managerPhaseQuietS, setManagerPhaseQuietS] = useState(0);
   const [managerSteps, setManagerSteps] = useState<PhaseStep[]>([]);
-  const [managerStartedAt, setManagerStartedAt] = useState(0);
   const [artifactPath, setArtifactPath] = useState<string | null>(null);
   const [previewPathRequest, setPreviewPathRequest] = useState({ path: '', token: 0 });
   const [dismissedDeliveryId, setDismissedDeliveryId] = useState('');
   const [taskItemId, setTaskItemId] = useState<string | null>(null);
   const [newDaemonOpen, setNewDaemonOpen] = useState(false);
   const [daemonManageOpen, setDaemonManageOpen] = useState(false);
+  const [manageTargetSid, setManageTargetSid] = useState<string | null>(null);
+  const [resumingSid, setResumingSid] = useState<string | null>(null);
   const messageSubmitLockRef = useRef(false);
   const messageRequestRef = useRef<ActiveMessageRequest | null>(null);
   const messageEpochRef = useRef(0);
   const observedDeliveryRef = useRef<string | null | undefined>(undefined);
+  const observedCompletionRef = useRef<{ sid: string; id: string | null }>();
+  const completionContextRef = useRef<CompletionContext>({
+    sid: '',
+    completionId: '',
+    view: null,
+    artifacts: [],
+  });
   const deliveryRef = useRef<DeliveryReceipt | null>(null);
   const [notice, setNotice] = useState<UiNotice | null>(null);
   const [eventView, dispatchEventView] = useReducer(eventViewReducer, initialEventViewState);
   const [eventFilter, setEventFilter] = useState<EventViewFilter>('all');
   const [eventQuery, setEventQuery] = useState('');
   const dismissNotice = useCallback(() => setNotice(null), []);
+  useEffect(() => {
+    try {
+      localStorage.setItem(MESSAGE_ROUTE_KEY, routeOverride);
+    } catch {
+      // A blocked storage area does not affect the current in-memory choice.
+    }
+  }, [routeOverride]);
   const notify = useCallback((tone: NoticeTone, message: string) => {
     setNotice({ id: ++noticeSequence, tone, message });
   }, []);
@@ -166,11 +196,7 @@ export default function App() {
     messageRequestRef.current?.controller.abort();
     messageRequestRef.current = null;
     setChatPending(false);
-    setManagerPhase('');
-    setManagerPhaseHeartbeat(false);
-    setManagerPhaseQuietS(0);
     setManagerSteps([]);
-    setManagerStartedAt(0);
     return cancelled;
   }, []);
 
@@ -201,6 +227,7 @@ export default function App() {
     messageRequestRef.current?.controller.abort();
     messageRequestRef.current = null;
   }, []);
+  useEffect(() => installDesktopExternalLinkBridge(), []);
 
   /**
    * Let the Manager restate a short draft before it is sent.
@@ -246,9 +273,11 @@ export default function App() {
     refetchProjects: projectsQ.refetch,
     selectProject,
   });
+  useEffect(() => subscribeDesktopNewChat(() => setNewDaemonOpen(true)), []);
 
 
   const snapQ = useSnapshot(activeSid);
+  const manageSnapQ = useSnapshot(manageTargetSid);
   const snap = snapQ.data;
   const loadedSid = snap?.session.id === activeSid ? activeSid : null;
   const continuous = snap?.continuous;
@@ -259,17 +288,26 @@ export default function App() {
   const snapshotRefreshKey = useMemo(() => snapshotRefreshEventKey(events), [events]);
   useEffect(() => {
     if (!loadedSid || !artifactRefreshKey) return;
-    void queryClient.invalidateQueries({
-      queryKey: ['artifacts', loadedSid],
-      exact: true,
-    });
+    // One tool turn can write several files back-to-back. Coalesce those
+    // events into one artifact read instead of making JSON/list reconciliation
+    // compete with typing and WebView painting.
+    const timer = window.setTimeout(() => {
+      void queryClient.invalidateQueries({
+        queryKey: ['artifacts', loadedSid],
+        exact: true,
+      });
+    }, 180);
+    return () => window.clearTimeout(timer);
   }, [artifactRefreshKey, loadedSid, queryClient]);
   useEffect(() => {
     if (!loadedSid || !snapshotRefreshKey) return;
-    void queryClient.invalidateQueries({
-      queryKey: ['snapshot', loadedSid],
-      exact: true,
-    });
+    const timer = window.setTimeout(() => {
+      void queryClient.invalidateQueries({
+        queryKey: ['snapshot', loadedSid],
+        exact: true,
+      });
+    }, 80);
+    return () => window.clearTimeout(timer);
   }, [loadedSid, queryClient, snapshotRefreshKey]);
   const guardianAlert = useMemo(() => activeGuardianAlert(events), [events]);
   const transcriptQ = useTranscript(loadedSid, standardWorkspaceView === 'activity', 120);
@@ -298,8 +336,29 @@ export default function App() {
     () => snap ? projectMissionView(snap, activityEvents, artifactsQ.data ?? []) : null,
     [activityEvents, artifactsQ.data, snap],
   );
-  const delivery = missionView?.delivery ?? null;
+  const conversationDelivery = useMemo(
+    () => latestConversationDelivery(activityEvents),
+    [activityEvents],
+  );
+  const delivery = conversationDelivery === undefined
+    ? missionView?.delivery ?? null
+    : conversationDelivery;
+  const hasUnfinishedWork = snap?.backlog.some((item) =>
+    ['pending', 'running', 'in_progress', 'claimed'].includes(item.status),
+  ) ?? false;
+  const operatorTaskComplete = missionIsComplete(missionView)
+    && !hasUnfinishedWork
+    && !snap?.continuous?.enabled;
+  const completionId = loadedSid && operatorTaskComplete && missionView?.mission.id
+    ? `completion:${loadedSid}:${missionView.mission.id}`
+    : '';
   deliveryRef.current = delivery;
+  completionContextRef.current = {
+    sid: loadedSid || '',
+    completionId,
+    view: missionView,
+    artifacts: artifactsQ.data ?? [],
+  };
   const focusDeliveryPath = useCallback((path: string) => {
     const target = path.trim();
     if (!target) {
@@ -325,19 +384,56 @@ export default function App() {
     if (previous === id) return;
     observedDeliveryRef.current = id;
     setDismissedDeliveryId('');
-    if (delivery) {
-      openDelivery(delivery);
-      void notifyDesktopDelivery(delivery);
+    if (delivery && loadedSid) {
+      void queryClient.invalidateQueries({
+        queryKey: ['artifacts', loadedSid],
+        exact: true,
+      }).then(() => openDelivery(delivery));
     }
-  }, [delivery, openDelivery, snap]);
+  }, [delivery, loadedSid, openDelivery, queryClient, snap]);
+  useEffect(() => {
+    if (!loadedSid) return;
+    const previous = observedCompletionRef.current;
+    if (!previous || previous.sid !== loadedSid) {
+      // Opening an already-completed project must not replay an old OS toast.
+      observedCompletionRef.current = { sid: loadedSid, id: completionId || null };
+      return;
+    }
+    if (!completionId) {
+      observedCompletionRef.current = { sid: loadedSid, id: null };
+      return;
+    }
+    if (previous.id === completionId) return;
+
+    // Let the completion-triggered artifact refresh land so the native toast's
+    // single action can open the best delivered file immediately.
+    const timer = window.setTimeout(() => {
+      const current = completionContextRef.current;
+      if (current.sid !== loadedSid || current.completionId !== completionId || !current.view) return;
+      const receipt = current.view.delivery;
+      const artifact = selectCompletionArtifact(current.artifacts);
+      const payload = completionNotificationPayload({
+        completionId,
+        title: receipt?.title || current.view.mission.title || t('mission.taskCompleted'),
+        summary: receipt?.summary || current.view.mission.summary,
+        path: receipt?.primary_target?.path || artifact?.path,
+      });
+      if (payload) void notifyDesktopCompletion(payload);
+      observedCompletionRef.current = { sid: loadedSid, id: completionId };
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [completionId, loadedSid, t]);
   useEffect(() => subscribeDesktopDelivery((payload) => {
     const current = deliveryRef.current;
     if (current && current.delivery_id === payload.deliveryId) {
       openDelivery(current);
     } else if (payload.path) {
       focusDeliveryPath(payload.path);
+    } else {
+      setMobileView('activity');
+      setWorkspaceView('mission');
     }
-  }), [focusDeliveryPath, openDelivery]);
+  }), [focusDeliveryPath, openDelivery, setMobileView, setWorkspaceView]);
   // Keep a ref so the /clear handler can read the current length without being
   // listed as a reactive dependency of commandHandlers.
   const activityEventsRef = useRef(activityEvents);
@@ -350,10 +446,26 @@ export default function App() {
     dispatchEventView({ kind: 'reset' });
   }, [loadedSid]);
   const actions = useProjectActions(activeSid, snap?.daemon_commands?.revision);
+  const manageActions = useProjectActions(
+    manageTargetSid,
+    manageSnapQ.data?.daemon_commands?.revision,
+  );
+  const resumeSession = useCallback(async (sid: string) => {
+    setResumingSid(sid);
+    try {
+      await api.startDaemon(sid);
+      await projectsQ.refetch();
+      notify('success', t('sidebar.resumeSuccess'));
+    } catch (error) {
+      notify('error', t('sidebar.resumeFailed', { error: errorText(error) }));
+    } finally {
+      setResumingSid(null);
+    }
+  }, [notify, projectsQ, t]);
   const {
     daemonBusy,
     manageDeleteProject,
-    managePauseDaemon,
+    manageStopDaemon,
     manageRenameProject,
     manageStartDaemon,
     requestDispose,
@@ -364,10 +476,12 @@ export default function App() {
     toggleContinuous,
   } = useProjectDaemonActions({
     actions,
+    manageActions,
+    manageTargetSid,
+    setManageTargetSid,
     activeSid,
     clearProjectSelection,
     continuous,
-    currentSnapshotSid: snap?.session.id,
     notify,
     refetchProjects: projectsQ.refetch,
     selectProject,
@@ -463,20 +577,12 @@ export default function App() {
       if (messageRequestRef.current?.id === requestId) {
         messageRequestRef.current = null;
         setChatPending(false);
-        setManagerPhase('');
-        setManagerPhaseHeartbeat(false);
-        setManagerPhaseQuietS(0);
-        setManagerStartedAt(0);
         setManagerSteps([]);
       }
     };
 
     setChatPending(true);
-    setManagerPhase(attachments.length ? t('chat.uploadingAttachments') : '');
-    setManagerPhaseHeartbeat(false);
-    setManagerPhaseQuietS(0);
     setManagerSteps([]);
-    setManagerStartedAt(Date.now());
     let attachmentRefs: Array<{ attachment_id: string }> = [];
     if (attachments.length) {
       try {
@@ -564,10 +670,7 @@ export default function App() {
         try {
           await api.messageStream(requestSid, text, {
             onPhase: (label, role, meta) => {
-              if (!isCurrent()) return;
-              setManagerPhase(label);
-              setManagerPhaseHeartbeat(meta.heartbeat);
-              setManagerPhaseQuietS(meta.quietS);
+              if (!isCurrent() || meta.heartbeat) return;
               trail = appendPhaseStep(trail, {
                 label,
                 role,
@@ -583,9 +686,6 @@ export default function App() {
               gotDelta = true;
               trail = closePhaseTrail(trail);
               setManagerSteps(trail);
-              setManagerPhase('');
-              setManagerPhaseHeartbeat(false);
-              setManagerPhaseQuietS(0);
               showManagerText(
                 block,
                 messageId,
@@ -605,6 +705,7 @@ export default function App() {
           }, {
             signal: controller.signal,
             attachments: attachmentRefs,
+            routeOverride,
           });
         } catch (error) {
           if (isCurrent()) streamErr = error as Error;
@@ -697,7 +798,14 @@ export default function App() {
   }, [projects, snap?.daemon.alive, kiosk, showReasoning, continuous?.enabled, chatPending, stopWaiting, locale, t]);
 
   return (
-    <div ref={shellRef} className="workbench-shell ambient-canvas flex h-screen h-[100dvh] w-screen max-w-full overflow-hidden text-ink">
+    <div
+      ref={shellRef}
+      style={{
+        '--sidebar-width': `${leftWidth}px`,
+        '--preview-width': `${rightWidth}px`,
+      } as React.CSSProperties}
+      className="workbench-shell ambient-canvas flex w-screen max-w-full overflow-hidden text-ink"
+    >
       <ConnectionProblemBanner
         error={connectionError}
         onRetry={() => {
@@ -731,6 +839,8 @@ export default function App() {
           }}
           onPrefetch={prefetchProject}
           onManage={requestManageSession}
+          onResume={(sid) => void resumeSession(sid)}
+          resumingId={resumingSid}
           onOpenPanel={(panel) => setOverlay(panel)}
           onNew={() => setNewDaemonOpen(true)}
           loading={projectsQ.isLoading}
@@ -742,7 +852,6 @@ export default function App() {
           onToggleCollapse={() => setLeftPanelOpen((value) => !value)}
           themeMode={themeMode}
           onCycleTheme={cycleTheme}
-          expandedWidth={leftWidth}
         />
       ) : null}
       {!kiosk && leftPanelOpen ? (
@@ -766,7 +875,7 @@ export default function App() {
                 streamOk={connected}
                 onStart={requestStartDaemon}
                 onStop={requestStopDaemon}
-                onManage={() => setDaemonManageOpen(true)}
+                onManage={() => activeSid && requestManageSession(activeSid)}
                 busy={daemonBusy}
                 snapshotStale={snapQ.isError}
                 readOnly={kiosk}
@@ -787,9 +896,13 @@ export default function App() {
                 {standardWorkspaceView === 'mission' && missionView ? (
                   <MissionControl
                     view={missionView}
+                    sid={snap.session.id}
+                    snapshot={snap}
                     gitDiff={gitDiffQ.data}
-                    onOpenArtifact={setArtifactPath}
+                    artifacts={artifactsQ.data}
+                    onOpenArtifact={focusDeliveryPath}
                     onOpenDelivery={openDelivery}
+                    onNotify={notify}
                   />
                 ) : (
                   <EventStream
@@ -801,6 +914,8 @@ export default function App() {
                     filter={eventFilter}
                     query={eventQuery}
                     skipFirst={eventView.skipFirst}
+                    artifacts={artifactsQ.data}
+                    onOpenArtifact={focusDeliveryPath}
                     onOpenDelivery={openDelivery}
                   />
                 )}
@@ -822,15 +937,13 @@ export default function App() {
                       pending={chatPending}
                       focusSignal={composerFocus}
                       embedded
-                      phase={managerPhase}
-                      heartbeat={managerPhaseHeartbeat}
-                      quietS={managerPhaseQuietS}
                       steps={managerSteps}
-                      startedAt={managerStartedAt}
                       onRewrite={rewriteDraft}
                       rewriting={rewriting}
                       slashSelection={slashSelection}
                       onSlashSelectionChange={setSlashSelection}
+                      routeOverride={routeOverride}
+                      onRouteOverrideChange={setRouteOverride}
                     />
                     </div>
                   </div>
@@ -857,7 +970,7 @@ export default function App() {
             ) : null}
 
             <aside
-              style={{ '--preview-width': `${rightWidth}px` } as React.CSSProperties}
+              data-resizable-panel="right"
               className={`${mobileView === 'preview' ? 'flex' : 'hidden'} relative min-w-0 flex-1 flex-col overflow-hidden border-l border-line/60 bg-panel transition-[width] duration-[250ms] ease-panel lg:flex lg:flex-none ${
               rightPanelOpen ? 'lg:w-[var(--preview-width)]' : 'lg:w-14'
             }`}>
@@ -867,7 +980,7 @@ export default function App() {
                   streamOk={connected}
                   onStart={requestStartDaemon}
                   onStop={requestStopDaemon}
-                  onManage={() => setDaemonManageOpen(true)}
+                  onManage={() => activeSid && requestManageSession(activeSid)}
                   busy={daemonBusy}
                   snapshotStale={snapQ.isError}
                   readOnly={kiosk}
@@ -922,7 +1035,15 @@ export default function App() {
       <CommandPalette open={overlay === 'palette'} onClose={() => setOverlay('none')} items={paletteItems} />
       <KeybindingHelp open={overlay === 'help'} onClose={() => setOverlay('none')} />
       {activeSid && <DoctorModal sid={activeSid} open={overlay === 'doctor'} onClose={() => setOverlay('none')} />}
-      {activeSid && <ConfigModal sid={activeSid} open={overlay === 'config'} onClose={() => setOverlay('none')} />}
+      {activeSid && (
+        <ConfigModal
+          sid={activeSid}
+          open={overlay === 'config'}
+          onClose={() => setOverlay('none')}
+          themeStyle={themeStyle}
+          onThemeStyleChange={setThemeStyle}
+        />
+      )}
       {activeSid && <IdentityModal sid={activeSid} open={overlay === 'identity'} onClose={() => setOverlay('none')} />}
       {activeSid && <TranscriptModal sid={activeSid} open={overlay === 'transcript'} onClose={() => setOverlay('none')} />}
       {activeSid && snap ? (
@@ -977,18 +1098,25 @@ export default function App() {
         onClose={() => setPendingReplyOpen(false)}
         onSubmit={answerPendingReply}
       />
-      {activeSid && snap ? (
+      {manageTargetSid ? (
         <DaemonManageModal
           open={daemonManageOpen}
-          sid={activeSid}
-          name={snap.session.display_name || ''}
-          alive={snap.daemon.alive}
-          controlAvailable={snap.daemon.control_available !== false}
+          sid={manageTargetSid}
+          name={manageSnapQ.data?.session.display_name
+            || projects.find((project) => project.id === manageTargetSid)?.display_name
+            || projects.find((project) => project.id === manageTargetSid)?.label
+            || ''}
+          alive={manageSnapQ.data?.daemon.alive
+            ?? Boolean(projects.find((project) => project.id === manageTargetSid)?.daemon_alive)}
+          controlAvailable={manageSnapQ.data?.daemon.control_available !== false}
           busy={daemonBusy}
-          onClose={() => setDaemonManageOpen(false)}
+          onClose={() => {
+            setDaemonManageOpen(false);
+            setManageTargetSid(null);
+          }}
           onRename={manageRenameProject}
           onStart={manageStartDaemon}
-          onPause={managePauseDaemon}
+          onStop={manageStopDaemon}
           onDelete={manageDeleteProject}
         />
       ) : null}
@@ -996,6 +1124,7 @@ export default function App() {
       {snap && !kiosk ? (
         <MobileTabBar
           active={mobileView === 'preview' ? 'preview' : workspaceView}
+          sidebarOpen={sidebarOpen}
           onSelect={(tab) => {
             if (tab === 'preview') {
               setMobileView('preview');

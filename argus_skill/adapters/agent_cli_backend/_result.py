@@ -16,6 +16,7 @@ from typing import Any
 
 from ...core.models import RunnerResult
 from ...core.role_decision import extract_role_decisions
+from ...core.runner_errors import is_model_catalog_startup_error
 from ...core.stop_kinds import (
     StopKind,
     normalize_stop_kind,
@@ -368,6 +369,10 @@ def translate_result(
         stderr_diagnostic = "\n".join(
             map(str, getattr(cli_result, "stderr_lines", None) or [])
         ).strip()
+        if is_model_catalog_startup_error(stderr_diagnostic):
+            # CLI startup can provide only a generic terminal receipt while
+            # stderr explains that model discovery failed before any turn.
+            fatal_error = stderr_diagnostic
         if stderr_diagnostic and stderr_diagnostic not in failure_diagnostic:
             failure_diagnostic = "\n".join(
                 part for part in (failure_diagnostic, stderr_diagnostic) if part

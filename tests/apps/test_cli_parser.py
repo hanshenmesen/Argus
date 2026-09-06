@@ -7,6 +7,7 @@ subcommand.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -35,7 +36,23 @@ def test_version_reports_package_version(capsys) -> None:
     with pytest.raises(SystemExit, match="0"):
         build_parser().parse_args(["--version"])
     rendered = capsys.readouterr().out
-    assert rendered == "argus-skill 0.1.2\n"
+    assert rendered == "argus-skill 0.1.1\n"
+
+
+def test_main_pins_pip_user_off_before_any_child_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI counterpart of the daemon boot pin: the default engineer spawn is
+    dangerous_yolo, whose codex child inherits this process env untouched, so
+    main() itself must neutralize pip's silent user-install fallback (the
+    2026-09-05 launcher hijack) before any command runs. Dropping the
+    configure_framework_python_env call from main must fail HERE."""
+    monkeypatch.setenv("PIP_USER", "1")
+
+    with pytest.raises(SystemExit, match="0"):
+        main(["--version"])
+
+    assert os.environ["PIP_USER"] == "0"
 
 
 def test_debug_help_still_exposes_internal_flags(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,6 +74,7 @@ def test_parser_exposes_doctor_and_repair_subcommands() -> None:
     for backend in ("qoder", "dsh"):
         parsed = build_parser().parse_args(["doctor", "--advisor", backend])
         assert parsed.advisor == backend
+    assert build_parser().parse_args(["doctor"]).advisor == "none"
 
     repair = build_parser().parse_args(["repair", "--safe", "--json"])
     assert repair.command == "repair"
@@ -424,7 +442,9 @@ def test_main_exports_decided_vertical_skills(
     assert rc == 0
     assert "vertical: research" in out
     assert (target / "engineer/research-visualization-router.md").exists()
-    assert (target / "engineer/auto-research-pipeline.md").exists()
+    for stage in ("idea", "experiment", "paper", "review"):
+        assert (target / f"research-{stage}-playbook.md").exists()
+    assert not (target / "engineer/auto-research-pipeline.md").exists()
 
 
 def test_export_target_does_not_inherit_unrelated_cwd_vertical(

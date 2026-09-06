@@ -26,7 +26,6 @@ from ..mission_outcome import (
     review_keeps_mission_resumable,
 )
 from ._constants import (
-    _REPLAN_STREAK_JOURNAL_WINDOW,
     PLANNER_RECENT_FAILURE_STATUS,
     PLANNER_SCOPE_BOUNDED,
     PLANNER_SCOPE_FINAL_SUBMISSION,
@@ -37,6 +36,38 @@ from ._mission_execution_helpers import _MissionRunState
 from .pending_notify import notify_pending_question
 
 log = logging.getLogger(__name__)
+
+# JournalEntry kinds the replan-streak migration scan reasons about (see
+# ``memory.EventJournal._entry_from_event`` for the projection):
+# ``mission_replan_requested`` counts toward the streak, ``mission_complete``
+# and ``mission_iterated`` break it as forward progress. Every other
+# ``life.mission.completed`` projection (budget/provider/research pauses,
+# ``mission_failed``) neither counts nor breaks and therefore must not occupy
+# slots in the threshold-sized ``tail_for_item`` window.
+_REPLAN_STREAK_SETTLEMENT_KINDS = frozenset({
+    "mission_replan_requested",
+    "mission_complete",
+    "mission_iterated",
+})
+
+
+def outcome_manuscript_binding(outcome: object) -> dict[str, str] | None:
+    """The manuscript the final Reviewer read, from whichever outcome shape we got.
+
+    The daemon's ``_Outcome`` carries it as ``manuscript_snapshot`` (its
+    ``rounds`` is a count); in-process outcomes carry a list of round records
+    whose last review holds it.
+    """
+    direct = getattr(outcome, "manuscript_snapshot", None)
+    if isinstance(direct, dict) and str(direct.get("sha256") or "").strip():
+        return dict(direct)
+    rounds = getattr(outcome, "rounds", None) or []
+    if isinstance(rounds, (list, tuple)) and rounds:
+        final_review = getattr(rounds[-1], "review", None)
+        candidate = getattr(final_review, "manuscript_snapshot", None)
+        if isinstance(candidate, dict) and str(candidate.get("sha256") or "").strip():
+            return dict(candidate)
+    return None
 
 
 class MissionExecutionSettlementMixin:
@@ -217,15 +248,7 @@ class MissionExecutionSettlementMixin:
             and review_status == "done"
             and state.pipeline_stage_at_start
         ):
-            review_manuscript_binding = None
-            review_rounds = getattr(outcome, "rounds", None) or []
-            if isinstance(review_rounds, (list, tuple)) and review_rounds:
-                final_round_review = getattr(review_rounds[-1], "review", None)
-                candidate_binding = getattr(
-                    final_round_review, "manuscript_snapshot", None
-                )
-                if isinstance(candidate_binding, dict):
-                    review_manuscript_binding = dict(candidate_binding)
+            review_manuscript_binding = outcome_manuscript_binding(outcome)
             try:
                 from ...core.stage_certificate import record_stage_review
 
@@ -500,14 +523,25 @@ class MissionExecutionSettlementMixin:
     def _count_consecutive_item_replans(self, item_id: str) -> int:
         """Trailing consecutive replan_requested missions journaled for one item.
 
-        Walks the journal newest-first and counts ``mission_replan_requested``
-        entries for ``item_id``, stopping at the first forward-progress marker
-        (``mission_complete``) for that item. The current mission's own replan
-        has not been journaled yet, so this is the count of PRIOR consecutive
-        replans; the caller adds one for the in-flight outcome.
+        Migration fallback for pre-counter backlog rows only. Walks the item's
+        OWN settlement entries newest-first and counts
+        ``mission_replan_requested``, stopping at the first forward-progress
+        marker (``mission_complete`` or ``mission_iterated``). The journal
+        window holds exactly the last ``threshold`` settlements OF THOSE KINDS
+        (``kinds=`` pushes the filter into the tail read): neutral settlements
+        — budget/provider/research pauses, ``mission_failed`` — neither count
+        nor break the streak, so letting them occupy window slots would push
+        an older replan out and under-count. With only count-or-break entries
+        in the window, and the current mission's own replan not journaled yet
+        (the caller adds one for the in-flight outcome), ``threshold`` prior
+        entries always suffice to decide escalation.
         """
         try:
-            entries = self.memory.journal.tail(_REPLAN_STREAK_JOURNAL_WINDOW)
+            entries = self.memory.journal.tail_for_item(
+                item_id,
+                n=consecutive_replan_escalation_threshold(),
+                kinds=_REPLAN_STREAK_SETTLEMENT_KINDS,
+            )
         except Exception:  # noqa: BLE001 - guard degrades to current behavior
             log.exception(
                 "life supervisor: failed to read journal for replan streak"
@@ -515,10 +549,8 @@ class MissionExecutionSettlementMixin:
             return 0
         count = 0
         for entry in reversed(entries):
-            if str(getattr(entry, "id", "") or "") != item_id:
-                continue
             kind = str(getattr(entry, "kind", "") or "")
-            if kind == "mission_complete":
+            if kind in {"mission_complete", "mission_iterated"}:
                 break
             if kind == "mission_replan_requested":
                 count += 1
@@ -535,23 +567,27 @@ class MissionExecutionSettlementMixin:
         operator_question = str(
             getattr(outcome, "operator_question", "") or ""
         ).strip()
+        operator_question_policy = "unchanged"
         if operator_question:
+            from ...manager.directive import active_operator_question_policy
+
+            operator_question_policy = active_operator_question_policy(
+                self._artifact_root()
+            )
             from ...core.autonomy import (
                 assess_operator_intervention,
+                resolve_autonomy_mode,
                 technical_continuation,
             )
 
-            planner_report = dict(
-                getattr(outcome, "final_planner_report", {}) or {}
-            )
-            intervention = assess_operator_intervention(
-                question=operator_question,
-                reason=str(getattr(outcome, "final_review_reason", "") or ""),
-                next_action=str(getattr(outcome, "final_review_next_action", "") or ""),
-                planner_report=planner_report,
-            )
-            if not intervention.required:
-                continuation = technical_continuation(
+            if (
+                operator_question_policy == "forbid"
+                or resolve_autonomy_mode() == "autonomous"
+            ):
+                planner_report = dict(
+                    getattr(outcome, "final_planner_report", {}) or {}
+                )
+                intervention = assess_operator_intervention(
                     question=operator_question,
                     reason=str(
                         getattr(outcome, "final_review_reason", "") or ""
@@ -559,38 +595,54 @@ class MissionExecutionSettlementMixin:
                     next_action=str(
                         getattr(outcome, "final_review_next_action", "") or ""
                     ),
+                    planner_report=planner_report,
+                    mode=(
+                        "autonomous"
+                        if operator_question_policy == "forbid"
+                        else None
+                    ),
                 )
-                planner_report.update({
-                    "forward_progress": False,
-                    "plan_signal": "reconsider",
-                    "challenge": str(
-                        planner_report.get("challenge")
-                        or getattr(outcome, "final_review_reason", "")
-                        or operator_question
-                    ),
-                    "alternative": continuation,
-                    "authority_impact": "technical",
-                    "auto_continued": True,
-                })
-                outcome.final_planner_report = planner_report
-                outcome.operator_question = ""
-                self._emit({
-                    "type": EventType.LIFE_MANAGER_PLAN_CHALLENGE_DECIDED,
-                    "item_id": item.id,
-                    "manager_action": "replace",
-                    "manager_reason": intervention.reason,
-                    "challenge": operator_question,
-                    "alternative": continuation,
-                    "authority_impact": "technical",
-                    "source": "pragmatic_autonomy_policy",
-                    "text": (
-                        "Argus kept a reversible technical choice inside the team "
-                        "instead of interrupting the operator."
-                    ),
-                })
-                operator_question = ""
-                if status in {"blocked", "replan_requested"}:
-                    status = "replan_requested"
+                if not intervention.required:
+                    continuation = technical_continuation(
+                        question=operator_question,
+                        reason=str(
+                            getattr(outcome, "final_review_reason", "") or ""
+                        ),
+                        next_action=str(
+                            getattr(outcome, "final_review_next_action", "") or ""
+                        ),
+                    )
+                    planner_report.update({
+                        "forward_progress": False,
+                        "plan_signal": "reconsider",
+                        "challenge": str(
+                            planner_report.get("challenge")
+                            or getattr(outcome, "final_review_reason", "")
+                            or operator_question
+                        ),
+                        "alternative": continuation,
+                        "authority_impact": "technical",
+                        "auto_continued": True,
+                    })
+                    outcome.final_planner_report = planner_report
+                    outcome.operator_question = ""
+                    self._emit({
+                        "type": EventType.LIFE_MANAGER_PLAN_CHALLENGE_DECIDED,
+                        "item_id": item.id,
+                        "manager_action": "replace",
+                        "manager_reason": intervention.reason,
+                        "challenge": operator_question,
+                        "alternative": continuation,
+                        "authority_impact": "technical",
+                        "source": "pragmatic_autonomy_policy",
+                        "text": (
+                            "Argus kept a reversible technical choice inside the team "
+                            "instead of interrupting the operator."
+                        ),
+                    })
+                    operator_question = ""
+                    if status in {"blocked", "replan_requested"}:
+                        status = "replan_requested"
         research_pause = status in {
             "research_incomplete",
             "paused_no_breakthrough",
@@ -712,10 +764,8 @@ class MissionExecutionSettlementMixin:
 
         forbid_operator_parking = False
         if status == "blocked" and operator_question:
-            from ...manager.directive import active_operator_question_policy
-
             forbid_operator_parking = (
-                active_operator_question_policy(self.memory.root) == "forbid"
+                operator_question_policy == "forbid"
             )
             if forbid_operator_parking:
                 operator_question = ""
@@ -1088,14 +1138,9 @@ class MissionExecutionSettlementMixin:
             if final_submission_certified
             else ""
         )
-        final_submission_manuscript_snapshot: dict[str, str] | None = None
-        if final_submission_certified:
-            rounds = getattr(outcome, "rounds", None) or []
-            if isinstance(rounds, (list, tuple)) and rounds:
-                final_review = getattr(rounds[-1], "review", None)
-                candidate = getattr(final_review, "manuscript_snapshot", None)
-                if isinstance(candidate, dict):
-                    final_submission_manuscript_snapshot = dict(candidate)
+        final_submission_manuscript_snapshot: dict[str, str] | None = (
+            outcome_manuscript_binding(outcome) if final_submission_certified else None
+        )
         try:
             remaining_work = any(
                 row.id != item.id
@@ -1119,6 +1164,11 @@ class MissionExecutionSettlementMixin:
             and state.iteration is None
             and (
                 final_submission_certified
+                or (
+                    not self.config.open_ended
+                    and "manager_direct" in state.item_tags
+                    and state.stage_action == "complete"
+                )
                 or (not self.config.continuous and not remaining_work)
             )
         )
@@ -1135,8 +1185,8 @@ class MissionExecutionSettlementMixin:
         plan_challenge = dict(getattr(outcome, "plan_challenge", {}) or {})
         raw_mission_summary = str(
             getattr(outcome, "summary", "")
-            or getattr(outcome, "final_message", "")
             or getattr(outcome, "final_review_reason", "")
+            or getattr(outcome, "final_message", "")
             or getattr(outcome, "reason", "")
             or planner_report.get("summary")
             or ""
@@ -1156,16 +1206,36 @@ class MissionExecutionSettlementMixin:
         mission_summary = " ".join(raw_mission_summary.split())[:1200]
         # A completed mission needs one durable, operator-facing receipt rather
         # than three loosely related hints (event, chat text, and sidebar).
-        # Resolve targets only from the final Reviewer evidence, vertical
-        # contract, or Manager-owned live view; never scan or guess workspace
-        # files at settlement time.
+        # Resolve targets only from final Reviewer evidence, the accepted
+        # completion message, or a vertical contract; never scan or guess files.
+        # Some Reviewer backends certify the files named in the Engineer handoff
+        # without repeating them in ``frontier.artifacts``. Those explicit links
+        # are still reviewer-accepted evidence and must remain openable in the UI.
         delivery: dict[str, Any] | None = None
+        delivery_workspace = state.execution_workdir or self._project_workdir()
         frontier = getattr(outcome, "final_frontier_report", {}) or {}
         reviewer_artifacts = (
             list(frontier.get("artifacts") or [])
             if isinstance(frontier, dict)
             else []
         )
+        try:
+            from ..delivery import referenced_delivery_paths
+
+            referenced = referenced_delivery_paths(
+                delivery_workspace,
+                [
+                    raw_mission_summary,
+                    getattr(outcome, "final_message", ""),
+                ],
+                limit=12,
+            )
+            known_artifacts = {str(candidate) for candidate in reviewer_artifacts}
+            reviewer_artifacts.extend(
+                path for path in referenced if path not in known_artifacts
+            )
+        except Exception:  # noqa: BLE001 - receipt construction remains fail-soft
+            log.debug("completion artifact links could not be resolved", exc_info=True)
         try:
             from ..delivery import build_delivery_receipt
 
@@ -1180,7 +1250,7 @@ class MissionExecutionSettlementMixin:
                     getattr(outcome, "final_review_status", "") or ""
                 ),
                 final_submission_certified=final_submission_certified,
-                workspace=(state.execution_workdir or self._project_workdir()),
+                workspace=delivery_workspace,
                 state_root=self.memory.root,
                 stage=state.pipeline_stage_at_start,
                 reviewer_artifacts=reviewer_artifacts,

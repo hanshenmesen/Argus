@@ -16,6 +16,10 @@ from argus_skill.manager.domain_author import (
     VerticalDecisionError,
     parse_vertical_decision,
 )
+from argus_skill.roles.prompts.manager import (
+    build_fast_vertical_decision_prompt,
+    build_vertical_decision_prompt,
+)
 from argus_skill.skills.stage_machine import ChecklistItem
 from argus_skill.skills.vertical_select import persist_vertical
 from argus_skill.verticals.research.stages import STAGE_ORDER as RESEARCH_STAGES
@@ -151,6 +155,41 @@ def test_standalone_route_retries_project_domain_in_domain_field(
     ]
     assert "project domain" in runner.calls[1]["prompt"]
     assert "RESEARCH_TARGET_LEVEL" in runner.calls[1]["prompt"]
+
+
+def test_standalone_route_retry_names_the_failed_contract_field(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ARGUS_SKILL_MANAGER_FAST_ROUTE", "0")
+    runner = _SequenceDecisionRunner([
+        {
+            "choice": "existing",
+            "vertical": "research",
+            "domain": "",
+            "workflow_mode": "direct",
+        },
+        {
+            "choice": "existing",
+            "vertical": "research",
+            "domain": "",
+            "workflow_mode": "direct",
+            "research_target_level": "exploratory",
+            "research_direction_mode": "broad",
+        },
+    ])
+
+    decision = Manager(project_root=tmp_path, runner=runner).decide_vertical(
+        "Produce a compact bounded paper from supplied evidence."
+    )
+
+    assert decision.research_target_level == "exploratory"
+    assert [call["run_label"] for call in runner.calls] == [
+        "manager-classify-grounded",
+        "manager-classify-field-retry",
+    ]
+    assert "research_target_level" in runner.calls[1]["prompt"]
+    assert "exploratory|publishable|doctoral" in runner.calls[1]["prompt"]
 
 
 def test_direct_software_handoff_skips_duplicate_manager_grounding(
@@ -405,11 +444,11 @@ def test_manager_without_backend_cannot_be_bypassed_by_vertical_env(
         Manager(project_root=tmp_path).decide_vertical("prove the lemma")
 
 
-def test_plan_stages_research_is_the_8_stage_pipeline():
+def test_plan_stages_research_is_the_four_stage_pipeline():
     stages = Manager().plan_stages("research")
     assert stages == list(RESEARCH_STAGES)
-    assert stages[0] == "research" and stages[-1] == "submission"
-    assert len(stages) == 8
+    assert stages[0] == "idea" and stages[-1] == "review"
+    assert len(stages) == 4
 
 
 def test_plan_stages_propagates_vertical_load_failure(monkeypatch):
@@ -607,9 +646,41 @@ def test_replacement_intent_forces_immediate_pipeline_reset(tmp_path):
 
     state = json.loads(state_path.read_text())
     assert state["vertical"] == "research"
-    assert state["current_stage"] == "research"
+    assert state["current_stage"] == "idea"
+    assert state["research_intent_generation"] == 2
     assert state["stages"]["review"]["status"] == "pending"
     assert state["stage_history"][-1]["direction"] == "reset"
+
+
+def test_replacement_intent_can_commit_a_supplied_locked_idea(tmp_path) -> None:
+    persist_vertical(
+        tmp_path,
+        "research",
+        research_target_level="publishable",
+        research_direction_mode="broad",
+        workflow_mode="staged",
+    )
+    manager = Manager(project_root=tmp_path)
+    decision = VerticalDecision(
+        choice="existing",
+        vertical="research",
+        execution_task="write a paper from the supplied method",
+        workflow_mode="staged",
+        research_target_level="publishable",
+        research_direction_mode="locked",
+    )
+
+    manager.commit_vertical_decision(
+        "replace discovery with the operator's supplied paper idea",
+        decision,
+        force_stage_reset=True,
+    )
+
+    state = json.loads(
+        (tmp_path / ".argus" / "PIPELINE_STATE.json").read_text()
+    )
+    assert state["research_direction_mode"] == "locked"
+    assert state["current_stage"] == "idea"
 
 
 def test_failed_vertical_commit_restores_pipeline_state(tmp_path, monkeypatch):
@@ -782,6 +853,40 @@ def test_vertical_decision_pins_manager_model(tmp_path, monkeypatch) -> None:
     assert "fast, tool-free front-door judgment" in runner.calls[0]["prompt"]
 
 
+def test_custom_codex_provider_does_not_send_diagnostic_model_placeholder(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """`<backend default>` is a streak label, never a provider model id."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        """
+model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.invalid/"
+wire_api = "responses"
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ARGUS_SKILL_HOME", str(tmp_path / "argus-home"))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("ARGUS_SKILL_RUNNER_BACKEND", "codex")
+    monkeypatch.delenv("ARGUS_SKILL_MANAGER_MODEL", raising=False)
+    monkeypatch.delenv("ARGUS_SKILL_MODEL", raising=False)
+    runner = _existing("research")
+
+    decision = Manager(project_root=tmp_path, runner=runner).decide_vertical(
+        "Write a short Chinese survey with a compiled PDF deliverable."
+    )
+
+    assert decision.vertical == "research"
+    assert runner.last_options.model == ""
+    assert runner.last_options.model != "<backend default>"
+
+
 def test_software_planner_requirement_overrides_direct_route(
     tmp_path,
     monkeypatch,
@@ -865,6 +970,126 @@ def test_vertical_decision_always_uses_repository_grounded_route(
         runner.calls[0]["prompt"]
     )
     assert "at most one targeted" not in runner.calls[0]["prompt"]
+
+
+def test_fast_route_carries_contract_fields_without_bypassing_planner(
+    tmp_path,
+) -> None:
+    runner = _DecisionRunner({
+        "choice": "existing",
+        "vertical": "software",
+        "workflow_mode": "direct",
+        "confidence": 0.99,
+        "rationale": "one bounded parser repair",
+        "require_independent_review": True,
+        "precise_constraints": ["pytest -q tests/test_parser.py exits zero"],
+        "exclusions": ["do not change the public API"],
+        "ambiguities": [],
+    })
+    runner._backend_name = "codex"
+
+    decision = Manager(project_root=tmp_path, runner=runner).decide_vertical(
+        "Repair the parser and run its focused test."
+    )
+
+    assert decision.workflow_mode == "direct"
+    assert decision.require_independent_review is True
+    assert decision.precise_constraints == (
+        "pytest -q tests/test_parser.py exits zero",
+    )
+    assert decision.exclusions == ("do not change the public API",)
+    assert decision.ambiguities == ()
+    assert runner.calls[0]["run_label"] == "manager-classify-fast"
+    assert runner.calls[0]["options"].disable_tools is True
+    assert runner.calls[0]["options"].extra_args == ["--ephemeral"]
+
+
+def test_research_route_prompts_require_the_fields_the_parser_requires() -> None:
+    shared = {
+        "task": "Write a finite technical survey.",
+        "verticals_with_purpose": {"research": "research and surveys"},
+        "research_target_verticals": ("research",),
+    }
+    fast = build_fast_vertical_decision_prompt(**shared)
+    grounded = build_vertical_decision_prompt(**shared)
+
+    assert "always choose and output `research_target_level`" in fast
+    assert "Always output `research_direction_mode`" in fast
+    assert "For a research-target vertical, always add `research_target_level`" in (
+        grounded
+    )
+    assert "Add research target fields only when the operator stated them" not in fast
+    assert "`target_venue` only when the operator stated one" in grounded
+    for prompt in (fast, grounded):
+        assert "Figures, plots, diagrams, a Figure 1" in prompt
+        assert "a revision of a research manuscript are `research`" in prompt
+        assert "only for that part and excludes a full campaign, choose `direct`" in prompt
+        assert "START_STAGE=\n" in prompt
+        assert "START_STAGE=<stage name or empty>" in prompt
+        assert "used only with WORKFLOW_MODE=direct" in prompt
+        assert "must be one of the chosen vertical's stages" in prompt
+        assert "Empty means its first stage" in prompt
+        assert "A staged workflow always starts at its first stage" in prompt
+
+
+@pytest.mark.parametrize("fast", [True, False], ids=["fast", "grounded"])
+def test_direct_research_figure_route_seeds_paper(tmp_path, monkeypatch, fast) -> None:
+    monkeypatch.setenv("ARGUS_SKILL_MANAGER_FAST_ROUTE", "1" if fast else "0")
+    runner = _DecisionRunner({
+        "choice": "existing",
+        "vertical": "research",
+        "workflow_mode": "direct",
+        "start_stage": "paper",
+        "confidence": 0.99,
+        "research_target_level": "exploratory",
+        "research_direction_mode": "locked",
+    })
+    manager = Manager(project_root=tmp_path, runner=runner)
+    task = "Produce only publication figures for this paper; no full research campaign."
+
+    decision = manager.decide_vertical(task)
+    assert decision.start_stage == "paper"
+    division = manager.commit_vertical_decision(task, decision)
+
+    state = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
+    assert division.vertical == "research"
+    assert division.workflow_mode == "direct"
+    assert state["current_stage"] == "paper"
+    assert runner.calls[0]["run_label"] == (
+        "manager-classify-fast" if fast else "manager-classify-grounded"
+    )
+
+
+@pytest.mark.parametrize("ask_on_new_domain", [False, True])
+def test_new_domain_start_stage_survives_commit_and_confirmation(
+    tmp_path, ask_on_new_domain,
+) -> None:
+    task = "Validate the supplied field report."
+    decision = parse_vertical_decision({
+        "choice": "new",
+        "vertical": "field_report",
+        "workflow_mode": "direct",
+        "start_stage": " VaLiDaTe ",
+        "execution_task": task,
+    })
+    assert decision is not None
+    manager = Manager(project_root=tmp_path)
+
+    division = manager.commit_vertical_decision(
+        task, decision, ask_on_new_domain=ask_on_new_domain,
+    )
+    if ask_on_new_domain:
+        division = manager.commit_domain(
+            division.task,
+            division.proposed_domain,
+            execution_task=division.execution_task,
+            workflow_mode=division.workflow_mode,
+            start_stage=division.start_stage,
+        )
+
+    state = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
+    assert division.workflow_mode == "direct"
+    assert state["current_stage"] == "validate"
 
 
 def test_fast_route_environment_cannot_restore_tool_free_shortcut(
@@ -1059,7 +1284,6 @@ def test_vertical_decision_rejects_repeated_no_tool_new_vertical_route(
                 json.dumps({
                     "choice": "new",
                     "vertical": "custom_runtime",
-                    "stages": ["measure", "implement", "verify"],
                     "workflow_mode": "staged",
                     "execution_task": "Build the requested custom runtime.",
                     "rationale": "claimed a new project capability without inspection",
@@ -1285,8 +1509,8 @@ def test_divide_resets_stage_when_new_intent_supersedes_finished_prior_vertical(
     assert d.vertical == "research"
     state = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
     assert state["vertical"] == "research"
-    assert state["current_stage"] == "research"  # reset to the NEW vertical's first stage
-    assert current_stage(tmp_path) == "research"
+    assert state["current_stage"] == "idea"
+    assert current_stage(tmp_path) == "idea"
 
 
 def test_divide_reopens_finished_pipeline_for_new_same_vertical_task(tmp_path):
@@ -1297,7 +1521,7 @@ def test_divide_reopens_finished_pipeline_for_new_same_vertical_task(tmp_path):
     (tmp_path / ".argus" / "PIPELINE_STATE.json").write_text(
         json.dumps({
             "vertical": "research",
-            "current_stage": "submission",
+            "current_stage": "review",
             "stages": {stage: {"status": "done"} for stage in RESEARCH_STAGES},
         }),
         encoding="utf-8",
@@ -1311,7 +1535,8 @@ def test_divide_reopens_finished_pipeline_for_new_same_vertical_task(tmp_path):
 
     state = json.loads((tmp_path / ".argus" / "PIPELINE_STATE.json").read_text())
     assert division.vertical == "research"
-    assert state["current_stage"] == "research"
+    assert state["current_stage"] == "idea"
+    assert state["research_intent_generation"] == 2
     assert vertical_reached_own_terminal_stage(tmp_path, "research") is False
 
 

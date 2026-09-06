@@ -1,9 +1,29 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import { type ThemeMode } from './components/TopBar';
+import { readLocalStorage, writeLocalStorage } from './lib/storage';
+import {
+  readThemeStyle,
+  THEME_STYLE_STORAGE_KEY,
+  type ThemeStyle,
+} from './lib/themePreference';
 
 function storedBoolean(key: string, fallback: boolean): boolean {
-  const value = localStorage.getItem(key);
+  const value = readLocalStorage(key);
   return value == null ? fallback : value === 'true';
+}
+
+function publishThemeMode(themeMode: ThemeMode): void {
+  document.documentElement.dataset.theme = themeMode;
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: 'argus:theme-changed', payload: themeMode }, '*');
+  }
 }
 
 export function useWorkbenchLayout() {
@@ -17,46 +37,48 @@ export function useWorkbenchLayout() {
   const [workspaceView, setWorkspaceView] = useState<'mission' | 'activity' | 'workbench'>(
     () => {
       if (params.get('view') === 'workbench') return 'workbench';
-      const stored = localStorage.getItem('argus.workspace.view');
+      const stored = readLocalStorage('argus.workspace.view');
       return stored === 'mission' || stored === 'workbench' ? stored : 'activity';
     },
   );
   const [mobileView, setMobileView] = useState<'activity' | 'preview'>('activity');
   const [rightPanelOpen, setRightPanelOpen] = useState(() => storedBoolean('argus.preview.expanded.v5', true));
   const [leftWidth, setLeftWidth] = useState(() => {
-    const value = Number(localStorage.getItem('argus.sidebar.width.v2') || 256);
+    const value = Number(readLocalStorage('argus.sidebar.width.v2') || 256);
     return Number.isFinite(value) ? Math.max(220, Math.min(400, value)) : 256;
   });
   const [rightWidth, setRightWidth] = useState(() => {
-    const value = Number(localStorage.getItem('argus.preview.width.v2') || 440);
+    const value = Number(readLocalStorage('argus.preview.width.v2') || 440);
     return Number.isFinite(value) ? Math.max(320, Math.min(600, value)) : 440;
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [leftPanelOpen, setLeftPanelOpen] = useState(() => storedBoolean('argus.sidebar.expanded.v4', true));
   const [manualTheme, setManualTheme] = useState<ThemeMode | null>(() => {
-    const stored = localStorage.getItem('argus.theme');
+    const stored = readLocalStorage('argus.theme');
     return stored === 'light' || stored === 'dark' ? stored : null;
   });
+  const [themeStyle, setThemeStyleState] = useState<ThemeStyle>(readThemeStyle);
   const [systemDark, setSystemDark] = useState(
     () => window.matchMedia('(prefers-color-scheme: dark)').matches,
   );
   const themeMode: ThemeMode = manualTheme ?? (systemDark ? 'dark' : 'light');
+  const themeModeRef = useRef(themeMode);
   const shellRef = useRef<HTMLDivElement>(null);
   const resizeFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
-    localStorage.setItem('argus.sidebar.expanded.v4', String(leftPanelOpen));
-    localStorage.setItem('argus.preview.expanded.v5', String(rightPanelOpen));
-    localStorage.setItem('argus.sidebar.width.v2', String(leftWidth));
-    localStorage.setItem('argus.preview.width.v2', String(rightWidth));
+    writeLocalStorage('argus.sidebar.expanded.v4', String(leftPanelOpen));
+    writeLocalStorage('argus.preview.expanded.v5', String(rightPanelOpen));
+    writeLocalStorage('argus.sidebar.width.v2', String(leftWidth));
+    writeLocalStorage('argus.preview.width.v2', String(rightWidth));
   }, [leftPanelOpen, leftWidth, rightPanelOpen, rightWidth]);
 
   useEffect(() => {
-    localStorage.setItem('argus.workspace.view', workspaceView);
+    writeLocalStorage('argus.workspace.view', workspaceView);
   }, [workspaceView]);
 
   useEffect(() => {
-    localStorage.setItem('argus.reasoning.visible.v1', String(showReasoning));
+    writeLocalStorage('argus.reasoning.visible.v1', String(showReasoning));
   }, [showReasoning]);
 
   useEffect(() => {
@@ -68,23 +90,26 @@ export function useWorkbenchLayout() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = themeMode;
+    themeModeRef.current = themeMode;
+    publishThemeMode(themeMode);
   }, [themeMode]);
 
   useEffect(() => {
-    const sync = () => {
-      document.documentElement.dataset.pageVisible = String(!document.hidden);
-    };
-    sync();
-    document.addEventListener('visibilitychange', sync);
-    return () => document.removeEventListener('visibilitychange', sync);
-  }, []);
+    document.documentElement.dataset.themeStyle = themeStyle;
+  }, [themeStyle]);
 
   const cycleTheme = useCallback(() => {
-    const next = themeMode === 'light' ? 'dark' : 'light';
-    setManualTheme(next);
-    localStorage.setItem('argus.theme', next);
-  }, [themeMode]);
+    const next = themeModeRef.current === 'light' ? 'dark' : 'light';
+    themeModeRef.current = next;
+    publishThemeMode(next);
+    writeLocalStorage('argus.theme', next);
+    startTransition(() => setManualTheme(next));
+  }, []);
+
+  const setThemeStyle = useCallback((next: ThemeStyle) => {
+    setThemeStyleState(next);
+    writeLocalStorage(THEME_STYLE_STORAGE_KEY, next);
+  }, []);
 
   const resizeSidebar = useCallback((
     side: 'left' | 'right',
@@ -94,25 +119,39 @@ export function useWorkbenchLayout() {
     if (!shell) return;
     event.preventDefault();
     const rect = shell.getBoundingClientRect();
+    let pendingWidth = side === 'left' ? leftWidth : rightWidth;
+    shell.dataset.resizing = side;
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     const move = (pointer: PointerEvent) => {
-      if (resizeFrameRef.current != null) window.cancelAnimationFrame(resizeFrameRef.current);
+      if (side === 'left') {
+        const occupiedRight = rightPanelOpen ? rightWidth + 8 : 56;
+        const max = Math.max(220, Math.min(400, rect.width - occupiedRight - 360 - 8));
+        pendingWidth = Math.max(220, Math.min(max, pointer.clientX - rect.left));
+      } else {
+        const occupiedLeft = leftPanelOpen ? leftWidth + 8 : 56;
+        const max = Math.max(320, Math.min(600, rect.width - occupiedLeft - 360 - 8));
+        pendingWidth = Math.max(320, Math.min(max, rect.right - pointer.clientX));
+      }
+      if (resizeFrameRef.current != null) return;
       resizeFrameRef.current = window.requestAnimationFrame(() => {
-        if (side === 'left') {
-          const occupiedRight = rightPanelOpen ? rightWidth + 8 : 56;
-          const max = Math.max(220, Math.min(400, rect.width - occupiedRight - 360 - 8));
-          setLeftWidth(Math.max(220, Math.min(max, pointer.clientX - rect.left)));
-        } else {
-          const occupiedLeft = leftPanelOpen ? leftWidth + 8 : 56;
-          const max = Math.max(320, Math.min(600, rect.width - occupiedLeft - 360 - 8));
-          setRightWidth(Math.max(320, Math.min(max, rect.right - pointer.clientX)));
-        }
+        shell.style.setProperty(
+          side === 'left' ? '--sidebar-width' : '--preview-width',
+          `${pendingWidth}px`,
+        );
+        resizeFrameRef.current = null;
       });
     };
     const stop = () => {
       if (resizeFrameRef.current != null) window.cancelAnimationFrame(resizeFrameRef.current);
       resizeFrameRef.current = null;
+      shell.style.setProperty(
+        side === 'left' ? '--sidebar-width' : '--preview-width',
+        `${pendingWidth}px`,
+      );
+      if (side === 'left') setLeftWidth(pendingWidth);
+      else setRightWidth(pendingWidth);
+      delete shell.dataset.resizing;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       window.removeEventListener('pointermove', move);
@@ -167,11 +206,13 @@ export function useWorkbenchLayout() {
     setRightWidth,
     setShowReasoning,
     setSidebarOpen,
+    setThemeStyle,
     setWorkspaceView,
     shellRef,
     showReasoning,
     sidebarOpen,
     themeMode,
+    themeStyle,
     workspaceView,
   };
 }
