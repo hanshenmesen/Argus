@@ -1413,7 +1413,7 @@ class PlanningCycleEnqueueMixin:
                 skipped.append(item_id)
         if skipped:
             log.info(
-                "planner retirement skipped unknown, running or terminal items: %s",
+                "planner retirement skipped unknown or non-pending items: %s",
                 ", ".join(skipped),
             )
 
