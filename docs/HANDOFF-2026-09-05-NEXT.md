@@ -280,3 +280,14 @@ academic_paper_review_block、review playbook 第 4 步）明确：辅助检查�
 Reviewer 自己的检查就是评估，缺席本身永远不是拒绝 done 或等待的理由。运行时逻辑未改。
 同日操作员干预：用 `--notify` 发了两条说明，并通过 Backlog API 把 7 条历史重复待办标为
 superseded（原因已写入记录）。
+
+## 2026-09-06 10:35 UTC · FuseHead 认定完成
+
+final_submission 任务 `完成正式重跑并进行最终独立认证` 的 Reviewer 判决 done（科学：648 个决策
+与 dense reference 一致、全部区间复算相符；视觉：11 页逐页无缺陷、符合 EuroSys 2027 格式；
+语言：论点与证据层级清楚），结算 `final_submission_certified=true`，Manager 走确定性路径
+`complete`，PIPELINE_STATE 为 review / certified。最终稿：paper/main.tex（11 页）+ appendix（5 页）。
+论文主张：公开集对 exact oracle 2.03× [1.18, 4.10]，12+12+12 held-out 1.95× [1.13, 3.46]，
+LEMP-LI 慢 6.56×，24+12 作为自适应诊断 1.41× [1.02, 2.05] 不算独立确认。
+当日部署链：1ab0a3449（写作标准）→ b3874b30e（去机器味）→ 25d4700a5（新鲜度根目录）
+→ 8ff4280fd（辅助检查不阻断）。当前 FuseHead 进程 pid 3994354，revision 8ff4280fd。
