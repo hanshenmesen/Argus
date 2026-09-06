@@ -124,14 +124,23 @@ def fatal_error_looks_like_backend_failure(fatal_error: str | None) -> bool:
 
 
 def fatal_error_looks_like_model_configuration(fatal_error: str | None) -> bool:
-    """True for an explicit CLI diagnostic rejecting the selected model."""
+    """True when the CLI refused the model or could not reach any model.
+
+    Covers the explicit "model X is not available" diagnostic as well as the
+    startup refusals that precede it when the provider session itself is
+    unusable (no model catalog, policy denial). All of them pause the mission
+    for a provider cooldown rather than failing it.
+    """
     if not fatal_error:
         return False
+    from ..core.runner_errors import is_provider_access_startup_error
+
     low = str(fatal_error).strip().casefold()
     return (
         ("--model" in low and "not available" in low)
         or "unknown model" in low
         or "unsupported model" in low
+        or is_provider_access_startup_error(fatal_error)
     )
 
 

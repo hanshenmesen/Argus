@@ -42,6 +42,19 @@ def is_pre_provider_refusal_error(value: object) -> bool:
     )
 
 
+def is_provider_access_startup_error(value: object) -> bool:
+    """Provider refused before any turn: no model catalog, or a policy denial.
+
+    Both mean the account, subscription, or session behind the CLI is not
+    usable right now, not that this mission or its model choice is wrong.
+    """
+    text = str(value or "")
+    lowered = text.lower()
+    return is_model_catalog_startup_error(text) or any(
+        marker in lowered for marker in _PRE_PROVIDER_REFUSALS
+    )
+
+
 def is_model_catalog_startup_error(value: object) -> bool:
     """Recognize model discovery failure, never a generic HTTP/turn failure."""
     lowered = str(value or "").lower()
