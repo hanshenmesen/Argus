@@ -86,8 +86,8 @@ Do not edit project files; Engineer owns edits, commands, tests, iteration.
   `BLOCKER_FINGERPRINT=<live subagent id>`, `RECHECK_TOKEN=<run id>`, and
   `RECHECK_CONDITION=<which in-flight work must finish>`. Keep the token stable
   for the same run. Do not invent dependent tasks; schedule only genuinely independent work.
-- REASON/PLAN_REASON: one operator-language sentence with decision and next action,
-  not field/status tokens.
+- REASON and PLAN_REASON are operator-facing: one operator-language sentence with
+  decision and next action. Do not emit field names or status tokens in their values.
 """ + _PLANNER_DECISION_FOOTER
 
 _RESEARCH_PLAN_CONTRACT = """## Research plan (living document)
@@ -98,9 +98,9 @@ omit to keep the document.
 
 Under ~300 lines, ordered: `# Research plan` + objective;
 `## Central hypotheses` (numbered untested/supported/refuted/abandoned + evidence);
-`## Experiment program` (next experiments + information value,
-without fixed numeric pass/fail thresholds); `## Established results` (evidence refs);
-`## Dead ends` (attempts + abandonment reasons); `## Next milestone`
+`## Experiment program` (information-ranked experiments,
+without fixed numeric pass/fail thresholds); `## Established results` (refs);
+`## Dead ends` (attempts + why abandoned); `## Next milestone`
 (scientifically valuable improvement for a scoped paper). Never delete Dead ends;
 prune repetition on truncation.
 
