@@ -366,10 +366,17 @@ def render_reviewer_prompt(
     stage = prompt_context.stage
     research_context_block = ""
     if prompt_context.vertical == "research" and operation == EVALUATE:
-        from ...verticals.research.prompt_policy import active_research_context
+        from ...verticals.research.prompt_policy import (
+            active_research_context,
+            research_runtime_context,
+        )
 
-        research_context_block = active_research_context(
-            stage, resolve_project_root(working_dir) if working_dir else _proot
+        resource_root = resolve_project_root(working_dir) if working_dir else _proot
+        research_context_block = "\n\n".join(
+            block for block in (
+                active_research_context(stage, resource_root),
+                research_runtime_context(stage, resource_root),
+            ) if block
         )
     direct_workflow = resolve_workflow_mode(_proot) == "direct"
     _measured = not _requires_engineering_audit and os.environ.get(
