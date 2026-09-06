@@ -26,6 +26,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from ...core.models import RunnerOptions, RunnerResult
+from ._budget_monitor import monitor_budget
 from ._exec_admission import admit
 from ._exec_context import _ExecContext
 from ._exec_spawn import spawn_and_finish
@@ -86,4 +87,5 @@ def execute(
     if denied is not None:
         return denied
 
-    return spawn_and_finish(ctx, cli_options)
+    with monitor_budget(ctx, cli_options):
+        return spawn_and_finish(ctx, cli_options)

@@ -1,14 +1,16 @@
-"""Host-global settled-cost admission and reconciliation.
+"""Host-global settled and observed in-flight cost admission.
 
 ``usage.jsonl`` remains the authoritative settled ledger. This module protects
 the global admission check and unresolved-price policy across concurrent
-daemons. Calls do not receive or consume a fixed per-call USD hold.
+daemons. Calls publish observed provider spend while running; they do not
+receive or consume a speculative fixed per-call USD hold.
 """
 
 from __future__ import annotations
 
 import calendar
 import json
+import math
 import os
 import tempfile
 import threading
@@ -26,7 +28,7 @@ from .daemon_lock import is_pid_running
 from .event_catalog import EventType, new_event
 from .knobs import resolve_budget_caps, resolve_knob
 from .paths import session_states_root
-from .usage import UsageLedger, UsageRecord
+from .usage import UsageLedger, UsageRecord, summarize_usage
 
 COST_CONTROL_STATE_FILE = "cost-control.json"
 COST_CONTROL_LOCK_FILE = "cost-control.lock"
@@ -82,6 +84,7 @@ def _default_state(timestamp: float) -> dict[str, Any]:
         "day": _local_day(timestamp),
         "reservations": [],
         "unresolved": [],
+        "project_roots": [],
         "updated_at": timestamp,
     }
 
@@ -123,6 +126,8 @@ def _read_state(root: Path, timestamp: float) -> dict[str, Any]:
         "day": payload["day"],
         "reservations": [row for row in reservations if isinstance(row, dict)],
         "unresolved": [row for row in unresolved if isinstance(row, dict)],
+        "project_roots": [str(path) for path in payload.get("project_roots", [])
+                          if isinstance(path, str)],
         "updated_at": float(payload.get("updated_at") or timestamp),
     }
 
@@ -212,22 +217,73 @@ def _prune_reservations(
     return [
         {**row, "amount_usd": 0.0}
         for row in rows
-        if _pid_alive(int(row.get("pid") or 0))
+        if (_pid_alive(int(row.get("pid") or 0))
+            or float(row.get("observed_cost_usd") or 0.0) > 0)
         and str(row.get("call_id") or "") not in settled
     ]
 
 
 def _project_records(project_root: Path, day_start: float) -> list[UsageRecord]:
-    # This reader runs while the global cost-control lock may already be held.
-    # Usage reconciliation takes the project usage lock, while provider-call
-    # finalization takes those locks in the opposite order (usage, then cost).
-    # Triggering reconciliation here can therefore deadlock the whole WebAPI.
-    # Budget accounting only needs the durable ledger rows already on disk.
-    return UsageLedger(project_root, migrate_legacy=False).records(since=day_start)
+    # All callers read before taking the global cost lock. Reconcile pending
+    # Copilot telemetry here so a late SQLite write releases the budget gate
+    # without requiring a UI reader. Never migrate unrelated historical events
+    # or take the usage lock while holding the cost lock (usage -> cost order).
+    ledger = UsageLedger(project_root, migrate_legacy=False)
+    records = ledger.records(since=day_start)
+    if any(record.provider == "copilot" and (
+        record.pricing_status in {"partial", "unpriced"}
+        or record.cost_basis == "premium_request"
+    ) for record in records):
+        ledger.ensure_copilot_usage_reconciled()
+        records = ledger.records(since=day_start)
+    return records
 
 
 def _known_cost(records: list[UsageRecord]) -> float:
-    return sum(float(record.cost_usd) for record in records if record.cost_usd is not None)
+    unique = {(record.project_id, record.call_id): record for record in records}
+    return summarize_usage(unique.values()).known_cost_usd
+
+
+def _unresolved_costs(
+    records: list[UsageRecord], state_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project late reconciliations without taking any usage lock under ours."""
+    by_id = {record.call_id: record for record in records}
+    state_by_id = {str(row.get("call_id") or ""): row for row in state_rows}
+    unresolved = {
+        str(row.get("call_id") or ""): row for row in state_rows
+        if str(row.get("call_id") or "") not in by_id
+    }
+    for record in records:
+        if record.status == "denied" or record.pricing_status == "not_billed":
+            continue
+        if record.cost_usd is None or record.pricing_status in {"partial", "unpriced"}:
+            unresolved[record.call_id] = {
+                **state_by_id.get(record.call_id, {}),
+                "call_id": record.call_id, "project_id": record.project_id,
+                "mission_id": record.mission_id, "provider": record.provider,
+                "model": record.model, "pricing_status": record.pricing_status,
+                "reason": record.error or "provider usage is not fully priced",
+                "created_at": record.completed_at,
+            }
+    return list(unresolved.values())
+
+
+def _budget_reason(
+    records: list[UsageRecord], state: dict[str, Any], cap: float,
+) -> str:
+    if _unpriced_policy() == "block":
+        unresolved = _unresolved_costs(records, list(state["unresolved"]))
+        if unresolved:
+            return f"unresolved provider cost: {len(unresolved)} call(s) awaiting usage reconciliation"
+    settled_ids = {record.call_id for record in records}
+    live = _prune_reservations(list(state["reservations"]), settled_call_ids=settled_ids)
+    spent = _known_cost(records) + sum(
+        max(0.0, float(row.get("observed_cost_usd") or 0.0)) for row in live
+    )
+    if cap > 0 and spent >= cap:
+        return f"global daily budget exhausted (${cap - spent:.6f} available)"
+    return ""
 
 
 def _global_records(root: Path, day_start: float) -> list[UsageRecord]:
@@ -236,6 +292,24 @@ def _global_records(root: Path, day_start: float) -> list[UsageRecord]:
         project_roots = [path for path in projects.iterdir() if path.is_dir()]
     except OSError:
         project_roots = []
+    # A caller can place its ledger outside global/projects. Retain those
+    # unsettled references so a later reconciliation releases the global gate.
+    # This reader must always run before acquiring the global state lock.
+    try:
+        state = _read_state(root, day_start)
+        known = {path.resolve() for path in project_roots}
+        references = [*state["unresolved"], *state["reservations"],
+                      *({"project_root": path} for path in state["project_roots"])]
+        for row in references:
+            project_text = str(row.get("project_root") or "")
+            if project_text:
+                path = Path(project_text).expanduser().resolve()
+                if path not in known:
+                    project_roots.append(path)
+                    known.add(path)
+    except CostControlStateError:
+        # Admission/snapshot performs its own authoritative state validation.
+        pass
     records: list[UsageRecord] = []
     for project_root in project_roots:
         try:
@@ -338,6 +412,45 @@ class CallBudgetReservation:
         self._closed = True
         return changed
 
+    def observe_cost(self, cost_usd: float = 0.0, *, now: float | None = None) -> str:
+        """Publish observed in-flight spend and check the shared daily cap.
+
+        This is real provider telemetry, not a speculative fixed call hold.
+        Callers pass only usage incurred on the current local day.
+        """
+        if self._closed:
+            return ""
+        if not math.isfinite(cost_usd) or cost_usd < 0:
+            raise ValueError("observed cost must be finite and non-negative")
+        timestamp = time.time() if now is None else now
+        records = _global_records(self.root, _local_day_start(timestamp))
+        if self.project_root is not None:
+            if self.project_root.resolve().parent != session_states_root(self.root).resolve():
+                records.extend(_project_records(self.project_root, _local_day_start(timestamp)))
+        cap = resolve_budget_caps(global_root=self.root).global_daily_cap_usd
+        # Always read ledgers before the cost-state lock (usage -> cost order).
+        with _locked(self.root, timeout_seconds=_CALL_STATE_LOCK_TIMEOUT_SECONDS):
+            state = _read_state(self.root, timestamp)
+            if self.project_root is not None:
+                state["project_roots"] = sorted(set(state["project_roots"]) |
+                                                {str(self.project_root.resolve())})
+            state["reservations"] = _prune_reservations(
+                list(state["reservations"]),
+                settled_call_ids={record.call_id for record in records},
+            )
+            row = next((item for item in state["reservations"]
+                        if item.get("id") == self.reservation_id), None)
+            if row is None:
+                row = {"id": self.reservation_id, "call_id": self.call_id,
+                       "pid": os.getpid(), "amount_usd": 0.0,
+                       "created_at": timestamp}
+                state["reservations"].append(row)
+            row["observed_cost_usd"] = max(float(row.get("observed_cost_usd") or 0), cost_usd)
+            reason = _budget_reason(records, state, cap)
+            _write_state(self.root, state, timestamp)
+            self.state_tracked = True
+        return reason
+
 
 def reserve_call_budget(
     *,
@@ -353,7 +466,7 @@ def reserve_call_budget(
     pid: int | None = None,
     lock_timeout_seconds: float = _CALL_STATE_LOCK_TIMEOUT_SECONDS,
 ) -> tuple[CallBudgetReservation | None, str]:
-    """Atomically admit one call against settled host-global daily spend."""
+    """Admit a call against settled spend, observed running costs and unknowns."""
     timestamp = time.time() if now is None else float(now)
     root = _global_root(global_root)
     project = Path(project_root).expanduser() if project_root is not None else None
@@ -382,7 +495,9 @@ def reserve_call_budget(
         except OSError:
             inside_global = False
         if not inside_global:
-            global_records.extend(project_records)
+            known_ids = {record.call_id for record in global_records}
+            global_records.extend(record for record in project_records
+                                  if record.call_id not in known_ids)
 
     global_spend = _known_cost(global_records)
     available = global_cap - global_spend
@@ -424,18 +539,27 @@ def reserve_call_budget(
     try:
         with _locked(root, timeout_seconds=lock_timeout_seconds):
             state = _read_state(root, timestamp)
+            if project_key:
+                state["project_roots"] = sorted(set(state["project_roots"]) | {project_key})
             reservations = _prune_reservations(
                 list(state["reservations"]),
                 settled_call_ids=settled_call_ids,
             )
+            state["reservations"] = reservations
+            reason = _budget_reason(global_records, state, global_cap)
+            if reason:
+                _append_audit(root, EventType.BUDGET_RESERVATION_DENIED,
+                              call_id=call_id, provider=provider, reason=reason)
+                return None, reason
             reservations.append(row)
             state["reservations"] = reservations
             _write_state(root, state, timestamp)
     except CostControlLockBusyError:
-        # The authoritative spend check above succeeded. Because reservations
-        # carry no speculative USD hold, skipping only this telemetry write
-        # does not weaken the settled-cost cap. Final usage remains durable in
-        # the per-project ledger and later snapshots reconcile stale rows.
+        # Atomic state reads still include observed in-flight costs and unknown
+        # settlements. Contention must not silently bypass either budget gate.
+        reason = _budget_reason(global_records, _read_state(root, timestamp), global_cap)
+        if reason:
+            return None, reason
         state_tracked = False
     except CostControlStateError as exc:
         reason = f"cost control unavailable: {exc}"
@@ -514,7 +638,7 @@ def _close_reservation(
             "model": record.model,
             "pricing_status": record.pricing_status,
             "reason": record.error or "provider usage is not fully priced",
-            "blocking": False,
+            "blocking": _unpriced_policy() == "block",
             "created_at": timestamp,
         }
     elif unknown_reason:
@@ -536,7 +660,7 @@ def _close_reservation(
             "run_label": reservation.run_label,
             "pricing_status": "unknown",
             "reason": unknown_reason,
-            "blocking": False,
+            "blocking": _unpriced_policy() == "block",
             "created_at": timestamp,
         }
 
@@ -604,9 +728,10 @@ def cost_control_snapshot(
     timestamp = time.time() if now is None else float(now)
     root = _global_root(global_root)
     day_start = _local_day_start(timestamp)
+    records = _global_records(root, day_start)
     settled_call_ids = {
         record.call_id
-        for record in _global_records(root, day_start)
+        for record in records
         if record.call_id
     }
     snapshot_stale = False
@@ -617,10 +742,7 @@ def cost_control_snapshot(
                 list(state["reservations"]),
                 settled_call_ids=settled_call_ids,
             )
-            unresolved = _resolved_unpriced(
-                list(state["unresolved"]),
-                day_start=day_start,
-            )
+            unresolved = _unresolved_costs(records, list(state["unresolved"]))
             state["reservations"] = reservations
             state["unresolved"] = unresolved
             _write_state(root, state, timestamp)
@@ -634,16 +756,15 @@ def cost_control_snapshot(
             list(state["reservations"]),
             settled_call_ids=settled_call_ids,
         )
-        unresolved = _resolved_unpriced(
-            list(state["unresolved"]),
-            day_start=day_start,
-        )
+        unresolved = _unresolved_costs(records, list(state["unresolved"]))
         snapshot_stale = True
     payload = {
         "day": state["day"],
         "active_reservations": len(reservations),
         "unresolved_calls": len(unresolved),
-        "blocking_unresolved_calls": 0,
+        "blocking_unresolved_calls": len(unresolved) if _unpriced_policy() == "block" else 0,
+        "in_flight_cost_usd": sum(float(row.get("observed_cost_usd") or 0.0)
+                                  for row in reservations),
         "unresolved": [
             {
                 **{
@@ -659,10 +780,7 @@ def cost_control_snapshot(
                         "created_at",
                     )
                 },
-                # Legacy state may retain blocking=true from the retired
-                # unknown-price admission gate. Current unresolved rows are
-                # observability-only and must agree with the aggregate count.
-                "blocking": False,
+                "blocking": _unpriced_policy() == "block",
             }
             for row in unresolved
         ],

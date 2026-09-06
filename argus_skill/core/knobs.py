@@ -50,7 +50,7 @@ class BudgetCaps:
 
 
 BUDGET_KNOB_DEFAULTS: dict[str, str] = {
-    "ARGUS_SKILL_GLOBAL_DAILY_CAP_USD": "20000.0",
+    "ARGUS_SKILL_GLOBAL_DAILY_CAP_USD": "1000.0",
 }
 
 # Daemon count is not provider concurrency: every backend still obeys its own

@@ -224,7 +224,7 @@ def test_priced_settlement_replaces_hold_with_global_ledger_cost(
     }
 
 
-def test_unpriced_cost_is_observed_without_globally_blocking(
+def test_unpriced_cost_blocks_until_operator_policy_allows_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -241,13 +241,13 @@ def test_unpriced_cost_is_observed_without_globally_blocking(
 
     snapshot = cost_control_snapshot(global_root=tmp_path)
     assert snapshot["unresolved_calls"] == 1
-    assert snapshot["blocking_unresolved_calls"] == 0
-    assert snapshot["unresolved"][0]["blocking"] is False
+    assert snapshot["blocking_unresolved_calls"] == 1
+    assert snapshot["unresolved"][0]["blocking"] is True
 
     next_call, reason = _reserve(tmp_path, project, "call-2")
-    assert next_call is not None and reason == ""
-    assert next_call.amount_usd == 0.0
-    next_call.release(reason="test")
+    assert next_call is None and "unresolved provider cost" in reason
+
+    monkeypatch.setenv("ARGUS_SKILL_UNPRICED_COST_POLICY", "allow")
 
     control, reason = reserve_call_budget(
         call_id="control-1",
@@ -270,7 +270,7 @@ def test_unpriced_cost_is_observed_without_globally_blocking(
         "External interrupt: operator abort requested: stop now",
     ],
 )
-def test_partial_copilot_cost_does_not_create_a_second_budget_gate(
+def test_partial_copilot_cost_obeys_unpriced_budget_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     error: str,
@@ -317,8 +317,7 @@ def test_partial_copilot_cost_does_not_create_a_second_budget_gate(
         global_daily_cap_usd=10.0,
     )
 
-    assert admitted is not None and reason == ""
-    admitted.release(reason="test")
+    assert admitted is None and "unresolved provider cost" in reason
 
 
 def test_dead_process_hold_is_pruned(tmp_path: Path) -> None:

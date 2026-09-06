@@ -159,7 +159,9 @@ class AgentCliRunner:
 @pytest.fixture(autouse=True)
 def fake_agent_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     pkg = ModuleType("argus_skill.agent_cli")
-    setattr(pkg, "__path__", [])
+    # Fake the runner boundary while allowing newly imported supervisor
+    # helpers to resolve untouched bundled modules such as process control.
+    setattr(pkg, "__path__", [str(Path(__file__).resolve().parents[1] / "argus_skill" / "agent_cli")])
 
     runner_mod = ModuleType("argus_skill.agent_cli.agent_cli_runner")
     runner_mod.__dict__["AgentCliRunner"] = AgentCliRunner
@@ -788,7 +790,7 @@ def test_settled_call_cost_blocks_the_next_call_at_global_cap(
     assert "global daily budget exhausted" in str(denied.fatal_error)
 
 
-def test_unpriced_call_is_observed_without_blocking_next_provider_spawn(
+def test_unpriced_call_blocks_next_provider_spawn_when_policy_is_block(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -835,9 +837,10 @@ def test_unpriced_call_is_observed_without_blocking_next_provider_spawn(
 
     assert first.pricing_status == "unpriced"
     assert first.cost_usd is None
-    assert calls == ["engineer-r1", "reviewer"]
-    assert second.fatal_error is None
-    assert second.pricing_status == "priced"
+    assert calls == ["engineer-r1"]
+    assert "unresolved provider cost" in second.fatal_error
+    assert second.stop_kind == "budget_exhausted"
+    assert second.pricing_status == "not_billed"
     state = json.loads((root / "cost-control.json").read_text())
     assert [row["call_id"] for row in state["unresolved"]] == [first.call_id]
 

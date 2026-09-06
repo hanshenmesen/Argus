@@ -148,6 +148,7 @@ def test_format_shows_persisted_value_when_env_is_unset() -> None:
 def test_budget_caps_share_env_persisted_default_precedence() -> None:
     from argus_skill.core import knob_store
 
+    assert resolve_budget_caps(env={}).global_daily_cap_usd == 1000.0
     knob_store.write_persisted_knob("ARGUS_SKILL_GLOBAL_DAILY_CAP_USD", "12.5")
     persisted = resolve_budget_caps(env={})
     overridden = resolve_budget_caps(env={"ARGUS_SKILL_GLOBAL_DAILY_CAP_USD": "90"})

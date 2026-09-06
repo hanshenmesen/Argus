@@ -754,6 +754,11 @@ class CopilotAcpClient:
                 allow_persistent=bool(getattr(options, "dangerous_yolo", False)),
             )
             self._active_turn = turn
+            # Expose the parent identity before the first request so live
+            # budget accounting can include this ACP session's nested agents.
+            self._emit_turn_event(turn, {
+                "type": "session.start", "data": {"sessionId": sid},
+            })
             cancelled = {"v": False}
             cancel_reason = {"v": ""}
             cancel_event = threading.Event()
