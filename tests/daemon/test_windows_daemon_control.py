@@ -101,6 +101,7 @@ def test_worker_upgrades_drain_request_to_immediate_interrupt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(daemon_state.time, "time", lambda: 1000.0)
     monkeypatch.setattr(life_worker_mod.signal, "signal", lambda *_args: None)
     monkeypatch.setattr(
         life_worker_mod,

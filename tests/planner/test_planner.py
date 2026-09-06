@@ -1036,6 +1036,47 @@ def test_plan_next_holds_stage_when_staged_advance_is_missing(monkeypatch) -> No
     assert "advance_to_stage missing; holding current stage" in verdict.diagnostics
 
 
+def test_missing_stage_holds_valid_task_after_scope_normalization(
+    monkeypatch,
+) -> None:
+    runner = _SequenceRunner([
+        "\n".join(
+            [
+                "PROJECT_DONE=false",
+                "REASON=review the isolated candidate",
+                "TASK_KEY=review-candidate",
+                "TASK_TITLE=Review candidate",
+                "TASK_OBJECTIVE=Review exactly the frozen candidate rows.",
+                "TASK_SCOPE=bounded；one isolated review mission",
+            ]
+        ),
+    ])
+    monkeypatch.setattr(
+        Planner,
+        "_build_planner_prompt",
+        staticmethod(lambda **kwargs: "original planner prompt"),
+    )
+
+    verdict = Planner(runner).plan_next(
+        continuous_objective="audit the candidate",
+        planning_cycle=10,
+        config=PlannerConfig(
+            working_dir="/tmp/project",
+            require_stage_decision=True,
+            current_stage="solve",
+        ),
+    )
+
+    assert verdict.error == ""
+    assert verdict.advance_to_stage == ""
+    assert len(runner.calls) == 1
+    assert "advance_to_stage missing; holding current stage" in verdict.diagnostics
+    assert verdict.new_tasks[0].scope == "bounded"
+    assert verdict.new_tasks[0].objective == (
+        "Review exactly the frozen candidate rows."
+    )
+
+
 def test_plan_next_keeps_task_containing_binary_outcome_label(monkeypatch) -> None:
     forbidden_label = "no" + "-go"
     runner = _SequenceRunner([
