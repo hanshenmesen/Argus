@@ -52,7 +52,10 @@ claim-critical references without recursively inspecting history.
    verdict are always evaluated for the current round.
 4. Give these internal findings to the normal integrated Reviewer. Adjudicate
    current supplied assessments; repeat an inspection only for a concrete
-   contradiction or changed input, using the smallest decisive check. Only that
+   contradiction or changed input, using the smallest decisive check. When the
+   host supplied no passes, the Reviewer inspects the paper itself and that
+   inspection is the assessment; missing host passes are never by themselves a
+   reason to withhold `done` or to wait. Only that
    Reviewer controls the round and overwrites `paper/REVIEW.md`; preliminary
    passes create no project-visible report or history. Semantic-loss and cold-
    read findings begin in shadow mode: until calibration explicitly enables

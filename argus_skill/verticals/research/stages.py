@@ -235,7 +235,10 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
                 "internal; the integrated Reviewer "
                 "records their adjudicated result only in `paper/REVIEW.md`. Until calibration "
                 "promotes them, new semantic-loss and cold-read diagnostics run in shadow mode "
-                "and cannot be the sole reason to block."
+                "and cannot be the sole reason to block. These passes assist the Reviewer; "
+                "they are not a precondition of its verdict. When the host supplies none, "
+                "the Reviewer's own page-by-page inspection is the assessment, and their "
+                "absence is never by itself a reason to withhold `done`."
             ),
             evidence_hint=(
                 "internal immutable snapshots, isolated rendered-PDF pass, current paper, "
@@ -309,10 +312,10 @@ STAGE_CHECKLISTS: dict[str, tuple[ChecklistItem, ...]] = {
         ChecklistItem(
             id="review.integrated",
             statement=(
-                "After the three internal passes are adjudicated and the paper is recompiled, "
-                "perform one integrated final review of scientific content, visual quality, "
-                "language, and venue compliance. Keep all repairs inside Review without "
-                "moving to an earlier stage."
+                "Perform one integrated final review of scientific content, visual quality, "
+                "language, and venue compliance on the current recompiled paper, using any "
+                "internal pass results the host supplied and your own inspection where it "
+                "did not. Keep all repairs inside Review without moving to an earlier stage."
             ),
             evidence_hint="paper/main.tex and its rendered output/direct dependencies",
         ),

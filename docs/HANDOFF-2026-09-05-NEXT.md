@@ -268,3 +268,15 @@ FuseHead 的 final_submission 终审 09:58 得到 done、"Reject-level issues: n
 都用执行目录；这里是 4eaa23591 分离状态根/执行目录时漏掉的一处。改为 `ex_state.workdir`，
 加 tests/apps/test_review_freshness_uses_execution_workdir.py（当前评审保持 done；
 改稿后的旧评审仍 stale）。tests/apps、tests/manager、认证恢复测试全部通过。
+
+## 2026-09-06 · Host 辅助检查缺席不再阻断终审
+
+FuseHead 10:29 的 final_submission 终审：Reviewer 自己逐页看完、复算全部区间、核对代码和
+EuroSys 格式后写"未发现阻断性问题"，却因为"Host 尚未提供并行逐页视觉、PDF-only 冷读和语义
+损失检查"而 continue，并让 Engineer"等待 Host"。原因是 `_parallel_final_review_passes` 在
+pipeline `current_verdict == done` 时直接跳过，而 review.parallel / review.integrated 清单和
+终审提示词把这三项当成了前提。现在三处（stages.py 两条清单项、prompt_policy 的
+academic_paper_review_block、review playbook 第 4 步）明确：辅助检查只是协助，Host 没给时
+Reviewer 自己的检查就是评估，缺席本身永远不是拒绝 done 或等待的理由。运行时逻辑未改。
+同日操作员干预：用 `--notify` 发了两条说明，并通过 Backlog API 把 7 条历史重复待办标为
+superseded（原因已写入记录）。
