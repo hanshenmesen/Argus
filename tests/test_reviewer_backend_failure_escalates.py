@@ -118,9 +118,13 @@ def test_invalid_named_footer_is_not_credited_as_evidence() -> None:
     assert decision.backend_unavailable is True
 
 
-def test_unavailable_engineer_model_blocks_once_with_actionable_error(
+def test_unavailable_engineer_model_pauses_for_provider_cooldown(
     tmp_path: Path,
 ) -> None:
+    """A model the CLI rejects is treated as a provider outage: the mission
+    pauses for cooldown (so the daemon retries it later instead of marking
+    the whole backlog blocked), the Reviewer never runs, and the operator
+    alert still fires."""
     events: list[dict] = []
 
     class _UnavailableModelEngineer:
@@ -157,9 +161,10 @@ def test_unavailable_engineer_model_blocks_once_with_actionable_error(
         on_event=events.append,
     )
 
-    assert status == "blocked"
+    assert status == "paused_provider_cooldown"
     assert engineer_runner.calls == 1
     assert len(rounds) == 1
+    assert rounds[0].stop_kind == "provider_cooldown"
     assert "model is unavailable" in reason.lower()
     alerts = [event for event in events if event.get("type") == "round.model_configuration_error"]
     assert len(alerts) == 1 and alerts[0]["operator_alert"] is True

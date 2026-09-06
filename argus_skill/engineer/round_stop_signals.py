@@ -310,13 +310,15 @@ def model_configuration_review_decision(
             "Configured model is unavailable; Engineer and Reviewer were not "
             f"run. error={error_text}"
         ),
-        next_action="Select a model supported by the configured CLI, then retry.",
-        operator_question=(
-            "The configured model is unavailable. Choose a valid model in "
-            "/config, then tell me to retry this task."
+        next_action=(
+            "The daemon retries this mission after a provider cooldown. If the "
+            "model name is wrong rather than the provider being down, select a "
+            "model supported by the configured CLI."
         ),
         backend_unavailable=True,
-        backend_stop_kind="permanent_error",
+        backend_fatal_error=error_text,
+        backend_exit_code=exit_code,
+        backend_stop_kind="provider_cooldown",
     )
 
 
